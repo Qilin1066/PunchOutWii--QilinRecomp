@@ -46,6 +46,9 @@ struct Display::Impl {
     Image frame;      // the uploaded frame
     Image target;     // headless: what's presented
     bool need_rebuild = false;
+    uint32_t buttons = 0;
+    SDL_Gamepad* pad = nullptr;
+    bool rumbling = false;
 
     void build_swapchain() {
         vkDeviceWaitIdle(gpu.device);
@@ -191,8 +194,58 @@ bool Display::poll() {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
         if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) d.need_rebuild = true;
+        if (e.type == SDL_EVENT_GAMEPAD_ADDED && !d.pad) d.pad = SDL_OpenGamepad(e.gdevice.which);
+        if (e.type == SDL_EVENT_GAMEPAD_REMOVED && d.pad && SDL_GetGamepadID(d.pad) == e.gdevice.which) {
+            SDL_CloseGamepad(d.pad);
+            d.pad = nullptr;
+        }
     }
+    uint32_t b = 0;
+    if (SDL_Gamepad* p = d.pad) {
+        struct Map {
+            SDL_GamepadButton sdl;
+            uint32_t bit;
+        };
+        static constexpr Map kMap[] = {
+            {SDL_GAMEPAD_BUTTON_DPAD_UP, kPadUp},     {SDL_GAMEPAD_BUTTON_DPAD_DOWN, kPadDown},
+            {SDL_GAMEPAD_BUTTON_DPAD_LEFT, kPadLeft}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, kPadRight},
+            {SDL_GAMEPAD_BUTTON_SOUTH, kPadA},        {SDL_GAMEPAD_BUTTON_EAST, kPadB},
+            {SDL_GAMEPAD_BUTTON_WEST, kPadX},         {SDL_GAMEPAD_BUTTON_NORTH, kPadY},
+            {SDL_GAMEPAD_BUTTON_START, kPadStart},    {SDL_GAMEPAD_BUTTON_BACK, kPadBack},
+            {SDL_GAMEPAD_BUTTON_GUIDE, kPadGuide},
+        };
+        for (const Map& m : kMap)
+            if (SDL_GetGamepadButton(p, m.sdl)) b |= m.bit;
+        const int x = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
+        if (x < -16384) b |= kPadLeft;
+        if (x > 16384) b |= kPadRight;
+        if (y < -16384) b |= kPadUp;
+        if (y > 16384) b |= kPadDown;
+    }
+    const bool* k = SDL_GetKeyboardState(nullptr);
+    struct Key {
+        SDL_Scancode sc;
+        uint32_t bit;
+    };
+    static constexpr Key kKeys[] = {
+        {SDL_SCANCODE_UP, kPadUp},        {SDL_SCANCODE_DOWN, kPadDown},     {SDL_SCANCODE_LEFT, kPadLeft},
+        {SDL_SCANCODE_RIGHT, kPadRight},  {SDL_SCANCODE_X, kPadA},           {SDL_SCANCODE_Z, kPadB},
+        {SDL_SCANCODE_C, kPadY},          {SDL_SCANCODE_SPACE, kPadY},       {SDL_SCANCODE_RETURN, kPadStart},
+        {SDL_SCANCODE_BACKSPACE, kPadBack}, {SDL_SCANCODE_ESCAPE, kPadGuide},
+    };
+    for (const Key& key : kKeys)
+        if (k[key.sc]) b |= key.bit;
+    d.buttons = b;
     return true;
+}
+
+uint32_t Display::buttons() const { return impl_->buttons; }
+
+void Display::rumble(bool on) {
+    Impl& d = *impl_;
+    if (!d.pad || on == d.rumbling) return;
+    d.rumbling = on;
+    SDL_RumbleGamepad(d.pad, on ? 0xFFFF : 0, on ? 0xFFFF : 0, on ? 60000 : 0);
 }
 
 void Display::present(uint32_t width, uint32_t height, const uint8_t* rgba, float aspect) {

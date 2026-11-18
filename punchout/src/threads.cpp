@@ -343,7 +343,10 @@ void OSSuspendThread(Cpu& c) {  // (thread) -> the suspend count before
     store(t);
 }
 
-void OSYieldThread(Cpu&) {
+void OSYieldThread(Cpu& c) {
+    // A yield is how the guest waits for others in a loop: a safe point, so an
+    // interrupt (a read finishing, the retrace) can arrive, as it would mid-loop.
+    deliver_interrupts(c);
     Thread* me = g_current;
     Thread* best = best_ready();
     if (best && best->priority <= me->priority) {

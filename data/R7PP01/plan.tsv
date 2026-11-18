@@ -45,3 +45,4 @@
 80200520	802008F0	lift	revolution/os: OSAlloc (heaps) and OSArena (arena bounds), no hardware access
 80201C50	80201CDC	lift	revolution/os: OSReport (formats through MSL's vprintf)
 8020C674	8020C728	lift	revolution/os: __init_user, __init_cpp and exit (the EABI's constructors and destructors)
+8021636C	8021698C	lift	revolution/wbc: its API (WBCSetupCalibration, WBCRead ...) before WPAD's first function

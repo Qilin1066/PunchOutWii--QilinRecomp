@@ -15,6 +15,7 @@
 #include "boot.hpp"
 #include "functions.hpp"
 #include "gpu.hpp"
+#include "input.hpp"
 #include "qilin/host/display.hpp"
 #include "threads.hpp"
 #include "video.hpp"
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
     rt::provide(punchout::vi_replacements());
     rt::provide(punchout::thread_replacements());
     rt::provide(punchout::sc_replacements());
+    rt::provide(punchout::wpad_replacements());
     punchout::init_gpu();
     punchout::load_game(folder);
 
@@ -58,6 +60,10 @@ int main(int argc, char** argv) {
             rt::log("window closed");
             std::fflush(nullptr);
             std::_Exit(0);  // guest threads are parked on host threads: no static destructors
+        }
+        if (display) {
+            punchout::g_pad_buttons.store(display->buttons(), std::memory_order_relaxed);
+            display->rumble(punchout::g_rumble.load(std::memory_order_relaxed));
         }
         uint32_t w, h;
         if (punchout::take_frame(&sequence, 10, rgba, w, h) && display)

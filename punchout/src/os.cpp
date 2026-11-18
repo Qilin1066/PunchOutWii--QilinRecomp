@@ -32,6 +32,7 @@ void OSInit(Cpu&) {  // once: the game's constructors call it again
     rt::poke32(b::kArenaHiMem2, rt::peek32(0x80003128u));
     rt::log("OSInit: MEM1 arena %08X-%08X, MEM2 arena %08X-%08X", rt::peek32(b::kArenaLoMem1), rt::peek32(b::kArenaHiMem1),
             rt::peek32(b::kArenaLoMem2), rt::peek32(b::kArenaHiMem2));
+    set_interrupts_enabled(true);  // as OSInit ends (801FF504: OSEnableInterrupts)
 }
 
 void OSRegisterVersion(Cpu& c) { rt::log("%s", reinterpret_cast<const char*>(rt::guest_ptr(c.r[3]))); }

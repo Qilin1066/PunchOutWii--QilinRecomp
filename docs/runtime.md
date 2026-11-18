@@ -1,6 +1,6 @@
 # The runtime (roadmap step 3)
 
-Last updated 2026-11-18 (v0.9.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
+Last updated 2026-11-18 (v0.10.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
 
 ## Building and running
 
@@ -23,6 +23,7 @@ At build time `qilin lift <main.dol> -o build-game/generated --plan data/R7PP01/
 | `80200520`–`802008F0` | OSAlloc (heaps), OSArena (arena bounds) | The allocator decides the game's memory layout. |
 | `80201C50`–`80201CDC` | `OSReport` | It formats through MSL's `vprintf` (lifted). |
 | `8020C674`–`8020C728` | `__init_user`, `__init_cpp`, `exit` | The EABI's constructors and destructors. |
+| `8021636C`–`8021698C` | WBC's API | A boundary fix (v0.10.0): the evidence left WBC/WPAD open by ±8 functions. These seven keep WBC's state and do its calibration maths, so WBC (lifted) runs on to WPAD's first function, `__wpadNoAlloc`. |
 
 GX is lifted whole (v0.8.0, `code-analysis.md`): its command stream is the boundary.
 
@@ -34,11 +35,13 @@ With the plan, the lifter turns every replaced or dropped function into a thunk,
 - **Dispatcher:** an indirect call searches the function table, which is sorted by address. A target that starts no function is fatal.
 - **Registry:** the game's replacements are registered by address (`rt::provide`). Registering an address the plan lifts or drops, or one address twice, is fatal at start-up. A call to a replaced function with nothing registered stops the runtime, naming the function, its library and its caller.
 - **Fatal errors** print the reason and the guest's call stack, walked through the back chain. The exit status is 70.
+- **Tracing:** with `PUNCHOUT_TRACE=1`, every call into a replacement is logged with `r3`, `r4` and the caller. That's how a guest stuck waiting for something shows what it waits for.
 
 ## The host platform (`host/`, v0.9.0)
 
 - **Threads:** the main thread owns the window: it handles its events and shows the newest frame the guest has handed over. The guest runs on threads of its own; its main thread starts on a host thread with a 16 MB stack, like every other guest thread. Closing the window ends the program (it will become the console's power button).
 - **Window:** an SDL3 window, resizable and high-DPI.
+- **Input:** the first SDL gamepad (any, by an Xbox pad's button names) and the keyboard. Arrows are the D-pad, X and Z are A and B, C or Space is Y, Enter is Start, Backspace is View, Escape is Guide. The left stick counts as the D-pad past half way. Rumble goes to the pad.
 - **Vulkan:** `Gpu` makes a Vulkan 1.3 device, preferring a discrete GPU. It requires dynamic rendering and synchronization2 (both in v3dv's set) and names whatever a device lacks. `Display` presents through a FIFO swapchain, rebuilt when the window changes. Headless, it draws into an image of its own, which `qilin_vktest` reads back to check the letterboxing (skipped where there's no Vulkan 1.3 device; it passes on Mesa's llvmpipe).
 - **Frames:** at each retrace VI hands over the frame buffer the game set (`video.cpp`), and the main thread shows it at 16:9, letterboxed. For now that's the XFB in guest memory, YUV 4:2:2, converted on the CPU. The renderer's EFB copies will take its place.
 
@@ -64,7 +67,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
   - `DBInit` does nothing.
   - `OSPanic` and `OSSetErrorHandler`: a panic is fatal, and error handlers are kept but never called.
 - **CPU registers:** `PPCSync`; `PPCHalt` ends the process; `PPCMfhid2`/`PPCMthid2`.
-- **Interrupts:** `OSDisableInterrupts`, `OSEnableInterrupts` and `OSRestoreInterrupts` keep one flag, as MSR[EE] does, and each thread keeps its own across switches.
+- **Interrupts:** `OSDisableInterrupts`, `OSEnableInterrupts` and `OSRestoreInterrupts` keep one flag, as MSR[EE] does, and each thread keeps its own across switches. `OSInit` ends with interrupts on, as the real one does; without that, nothing queued for the main thread ever arrives.
 - **Caches:** every flush and invalidate is a no-op, because the host is coherent. `DCZeroRange` zeroes memory.
 - **Locked cache:** its DMA (`LCLoadBlocks`, `LCStoreBlocks`, `LCStore`) is a copy done at once, so `LCQueueWait` has nothing to wait for.
 - **Time:** the time base counts at 60.75 MHz from boot, by the host's steady clock (`OSGetTime`, `OSGetTick`).
@@ -72,6 +75,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **Threads** (`threads.cpp`):
   - **How they run:** each guest thread runs on a host thread of its own (16 MB host stack) with its own registers, and exactly one runs at a time.
   - **When they switch:** the scheduler hands over where the OS would, with the OS's rules: priorities 0–31, first come first served within one, suspend counts, threads created suspended. A switch happens when a thread blocks, yields or wakes one of higher priority.
+  - **Yield is a safe point:** the game waits for its loader thread in a loop around `OSYieldThread`, polling for an asynchronous read, so a yield delivers interrupts, as one would arrive mid-loop on the Wii.
   - **The idle loop:** with every thread blocked, the blocked thread acts as the OS's idle loop. It sleeps to the next timer deadline and delivers interrupts. If nothing can ever wake a thread, the runtime stops and reports a deadlock.
   - **Guest-visible state:** guest structures stay current where the game can read them: an `OSThread`'s state, suspend count, priority and exit value, the current thread at `0x800000E4`, a mutex's owner and count, a message queue's ring.
   - **Covered:**
@@ -89,6 +93,13 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
   - **The retrace:** a timed interrupt at 60 Hz (EuRGB60) from the host clock. It runs the pre- and post-retrace callbacks and wakes the threads in `VIWaitForRetrace`.
   - **Frame buffers:** `VISetNextFrameBuffer` is recorded for the renderer.
 - **Console settings** (`sc.cpp`): 16:9, EuRGB60, English, stereo, a European console. These will become settings.
+- **WPAD** (`wpad.cpp`, v0.10.0): one sideways Wii Remote on channel 0, buttons only (the port's decision: no motion, no Nunchuk, no Balance Board).
+  - **What the game sees:** a bare core controller, resting flat, with nothing in its pointer's view; channels 1–3 are empty.
+  - **Connecting:** it connects when the game sets a connect callback. That callback and the extension callback ("core") then run as interrupts, and the sampling callback runs at the remote's 200 Hz.
+  - **Buttons:** they come from the window's pad or keyboard (`host/`), mapped as the design doc says. The cross pad is turned a quarter for the sideways grip; A is the 2 button (right punch), B the 1 button (left punch), X or Y the A button (Star Punch); Start, View and Guide are +, − and HOME.
+  - **Rumble** reaches the pad.
+  - **Speaker:** its stream is accepted and dropped for now.
+  - **Names:** five one-instruction WPAD functions are branches into WUD, and their targets name them. The size-matched names had them one off.
 - **Interrupt handlers:** `__OSSetInterruptHandler`, `__OSGetInterruptHandler`, `__OSMaskInterrupts` and `__OSUnmaskInterrupts` keep the OS's table and mask. `raise_interrupt(n)` runs a handler as an interrupt; a masked one is dropped for now. Context and shutdown bookkeeping are no-ops, as is the write-gather pipe's address register (its "not yet sent" bit always reads clear).
 
 ## The GPU's front end (`gpu.cpp`, v0.8.0)
@@ -101,10 +112,15 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 
 ## Where boot stands
 
-The game boots, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, enables the locked cache, sets its error handlers and reads the console settings. Then `GXInit` runs, lifted, and its command stream decodes cleanly. The game starts loading its data with `files/art/scripts/flow.dict`, the first file it reads, and that is where boot needs the extracted disc's `files/`.
+The game boots, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, enables the locked cache, sets its error handlers and reads the console settings. Then `GXInit` runs, lifted, and its command stream decodes cleanly. With the extracted disc's `files/`, it then:
+- loads its scripts and global data on its loader thread;
+- sets up the front end;
+- brings up WPAD and KPAD.
+
+It stops at the save system, NAND (`8025D104`).
 
 ## Next
 
 1. **The renderer (roadmap step 4):** the decoded stream on Vulkan: vertex loading, XF transform and lighting, TEV as generated shaders, textures, EFB copies to the XFB and to textures, presenting the XFB that `VISetNextFrameBuffer` names.
-2. **The rest of the boot path:** AI/AX/DSP (audio, which Wwise drives), WPAD with the button-only input, NAND (saves), the HOME Button Menu's dependencies.
+2. **The rest of the boot path:** NAND (saves, in a host folder), AI/AX/DSP (audio, which Wwise drives), the HOME Button Menu's dependencies.
 3. **Tests:** a test of the thread model without the game, using small guest programs built from encoded instructions, like the differential test's.

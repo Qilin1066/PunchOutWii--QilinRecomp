@@ -371,6 +371,10 @@ EXCEPTIONS = [
     (0x80200520, 0x802008F0, "lift", "revolution/os: OSAlloc (heaps) and OSArena (arena bounds), no hardware access"),
     (0x80201C50, 0x80201CDC, "lift", "revolution/os: OSReport (formats through MSL's vprintf)"),
     (0x8020C674, 0x8020C728, "lift", "revolution/os: __init_user, __init_cpp and exit (the EABI's constructors and destructors)"),
+    # The WBC/WPAD boundary the evidence left open (v0.10.0): the seven functions before
+    # __wpadNoAlloc keep WBC's state (r13-12808) and do its calibration maths, so WBC runs on
+    # to 8021698C, and is lifted as planned.
+    (0x8021636C, 0x8021698C, "lift", "revolution/wbc: its API (WBCSetupCalibration, WBCRead ...) before WPAD's first function"),
 ]
 
 

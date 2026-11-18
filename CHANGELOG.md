@@ -11,6 +11,20 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-18
+With the extracted disc, the game loads its data, sets up its front end and brings up the Wii Remote, on the button-only controls.
+
+### Added
+- **WPAD** (`punchout/src/wpad.cpp`): one sideways Wii Remote on channel 0, buttons only, connected, sampled at 200 Hz, with rumble; the other channels empty; no pointer, no extensions, no Balance Board. Buttons come from the pad or keyboard as the design doc maps them.
+- **Pad and keyboard input** in the host layer (SDL gamepads by Xbox names, the left stick as a D-pad), and rumble.
+- **`PUNCHOUT_TRACE=1`** logs every call into a replacement with its caller.
+
+### Fixed
+- `OSInit` leaves interrupts on, as the real one does: before, nothing queued (a read finishing) ever reached the main thread.
+- `OSYieldThread` is a safe point: the game waits for its loader thread by yielding in a loop.
+- The WBC/WPAD boundary: WBC's API (`8021636C`–`8021698C`) was on the WPAD side and is now lifted with the rest of WBC.
+- Five WPAD names that size matching had one off (they're branches into WUD, and their targets name them).
+
 ## [0.9.0] - 2026-11-18
 The host platform: a window, Vulkan 1.3, and the guest on threads of its own.
 

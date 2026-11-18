@@ -27,6 +27,7 @@ struct State {
     GuestMemory memory;
     Program program;
     std::vector<Registered> registered;  // sorted by address
+    bool trace = false;  // PUNCHOUT_TRACE=1: log every call into a replacement
     MmioRead mmio_read = nullptr;
     MmioWrite mmio_write = nullptr;
 };
@@ -64,6 +65,8 @@ void on_replaced(Cpu& c, uint32_t f) {
     const auto it = std::lower_bound(g->registered.begin(), g->registered.end(), f,
                                      [](const Registered& r, uint32_t a) { return r.address < a; });
     if (it != g->registered.end() && it->address == f) [[likely]] {
+        if (g->trace) [[unlikely]]
+            std::fprintf(stderr, "trace: %s (r3=%08X r4=%08X) from %08X\n", it->name, c.r[3], c.r[4], c.lr);
         it->fn(c);
         return;
     }
@@ -110,6 +113,8 @@ void init(const Program& program) {
     if (g) fatal(nullptr, "init called twice");
     g = new State;
     g->program = program;
+    const char* t = std::getenv("PUNCHOUT_TRACE");
+    g->trace = t && *t && *t != '0';
     if (!g->memory.reserve()) fatal(nullptr, "cannot reserve 4 GB of address space for the guest");
     if (!g->memory.commit(kMem1, kMem1Size) || !g->memory.commit(kMem2, kMem2Size) ||
         !g->memory.commit(kLockedCache, kLockedCacheSize))
