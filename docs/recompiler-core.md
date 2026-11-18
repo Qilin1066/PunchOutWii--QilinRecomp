@@ -80,5 +80,5 @@ CodeWarrior makes this simpler than on x86: every instruction is one aligned wor
 `info` (JSON), `insns` (every word of the text sections: address, word, text), `disasm` (a raw file of big-endian words, for the sweep), `profile` (instruction mix of the text sections, with paired-single, floating-point and privileged counts), `cfg` (summary, `--json` for every function), `coverage` (exit status 3 while any word is unknown) and `suspects` (with the rejected starts' addresses). Exit status is non-zero on any error.
 
 ## Next
-1. Library identification (`roadmap-and-design-targets.md`, *Symbol naming*): the SDK, MSL, MetroTRK, HBM and Wwise ranges, then the lift / replace / drop boundary with every privileged instruction and unknown word on the replaced or dropped side.
+1. The hardware-access profile (write-gather pipe stores, other MMIO, uncached mirrors), the C++ exception tables and the frame timing model.
 2. The lifter's first slice (integer, with CR/XER elimination), the generated function table for indirect calls, and the differential test's reference executor.

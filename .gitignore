@@ -36,6 +36,7 @@ cfg.json
 cfg.json.gz
 functions.json
 functions.json.gz
+pal_names.txt
 
 # ---- Build output ----
 /build*/

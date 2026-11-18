@@ -66,7 +66,7 @@ Other code, from its strings and class names:
 - **Audiokinetic Wwise** (`AK::…`, `CAk…`): the sound engine, with its stream manager, plug-in interfaces and Wii Remote speaker support. The disc's `art/wwiseaudio/` has 60 soundbanks and 2,382 streamed files.
 - **Next Level Games' engine**: `nl*` (resources: `nlReadAsync`; events: `nlEventRegistry`, `nlEventGroups`), a scripting language (`SlScriptManager`, `ScriptModule`, `ScriptClass`), the front end (`FESceneManager`), animation blending (`TransitionBlenderNode`, `ScaleBlenderNode`), particle emission, and material techniques (`NLG_CELLRAMP`, `NLG_RIMLIGHTMAP`, `NLG_NORMALMAP` …).
 
-The library ranges (where each starts and ends in `.text`) are the next analysis step; see the roadmap.
+Where each of these starts and ends in `.text`, and what happens to it, is in `code-analysis.md`.
 
 ## Instructions
 

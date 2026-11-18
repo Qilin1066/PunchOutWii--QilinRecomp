@@ -11,6 +11,14 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+Every library in `main.dol` found and its range fixed, without a decomp of this game, and the lift / replace / drop boundary decided per library: 84% of the code lifted, 15% replaced, 1% dropped, with every privileged instruction and every unknown word outside the lifted code.
+
+### Added
+- **`tools/analysis/identify_libraries.py`:** labels functions from four kinds of evidence (size sequences against the Rhythm Heaven Fever decomp, C++ RTTI, the SDK's version banners, strings that name their library), then cuts the text into one contiguous run per library, placing each boundary by call evidence and reporting how far it could move. `--names-out` writes the 1,988 decomp names matched to PAL addresses (derived from the game: not committed).
+- **`third_party/rhf`:** the Rhythm Heaven Fever decomp's `symbols.txt` and `splits.txt` (CC0), copied from BeatTheBeat-QilinComp.
+- **`docs/code-analysis.md`:** the 40 ranges with function, instruction, floating-point, paired-single and privileged counts, and the plan for each. New against Beat the Beat: Wwise and its silence plug-in, THP and WBC lifted; `db` and ESP replaced; MetroTRK's `.init` vectors dropped. The SDK is linked in alphabetical order of library, and the seven init functions found both by banner and by size all carry the right decomp name.
+
 ## [0.1.0] - 2026-11-18
 The start: GBTG-Qilincomp's requirements and scope applied to Punch-Out!! (Europe/Australia, `R7PP01` revision 1), on BeatTheBeat-QilinComp's recompiler core, and the first analysis of the PAL `main.dol`: the decoder agreeing with binutils on every word, 13,487 functions, all 187 jump tables proven, and every word of the code accounted for.
 

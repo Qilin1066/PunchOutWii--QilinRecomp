@@ -13,7 +13,7 @@ What exists, what each project chose, and what it means for this one (C++23, Vul
 - What the game does give: the SDK's build banners, MSL's and MetroTRK's strings, C++ class names in `.rodata` (`AK::`, `homebutton::`, `nw4hbm::`, Next Level Games' `nl*`, `Sl*` and `FE*` classes), and a disc whose file names are readable (`art/`, `art/wwiseaudio/SoundbanksInfo.xml`).
 - The libraries it shares with other games have names elsewhere: the Revolution SDK, MSL, the EABI runtime and MetroTRK are named by the Rhythm Heaven Fever decomp (CC0, vendored in BeatTheBeat-QilinComp) and other Wii decomps (Wii Sports, Super Paper Mario, Mario Kart Wii); the HOME Button Menu and `nw4hbm` by the decomps that link it.
 
-**Takeaways:** names for the libraries come from matching against those decomps by function size sequences and strings, as BeatTheBeat-QilinComp ported US names to PAL; the game and engine code keep address names, with class names where vtables give them.
+**Takeaways:** names for the libraries come from matching against those decomps by function size sequences and strings, as BeatTheBeat-QilinComp ported US names to PAL; the game and engine code keep address names, with class names where vtables give them. Done for the Rhythm Heaven Fever decomp in v0.2.0 (`code-analysis.md`): it names 1,988 functions of the SDK, MSL, the EABI runtime, the HOME Button Menu and RFL.
 
 ## 3. Audiokinetic Wwise on the Wii
 - Wwise is a commercial sound engine; its Wii version runs on top of AX and includes Wii Remote speaker output (`CAkWiimoteMgr`). The game's banks were generated with Wwise's authoring tool (the disc keeps `SoundBanksGeneration.log` and `SoundbanksInfo.xml`, which name the version and every event).

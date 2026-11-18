@@ -43,3 +43,7 @@ jobs:
       - name: Decoder sweep
         if: matrix.sweep
         run: python3 tools/check/verify_decoder.py --qilin build/qilin --sweep
+      # The analysis scripts need the game to run; check they at least compile.
+      - name: Analysis scripts compile
+        if: matrix.sweep
+        run: python3 -m py_compile tools/analysis/identify_libraries.py tools/check/verify_decoder.py

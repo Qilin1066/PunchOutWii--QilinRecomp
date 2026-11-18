@@ -15,7 +15,7 @@ Roadmap step 1, **analysis**, is in progress; the recompiler core (step 2) has i
 | Function discovery + CFG (tail calls, vtables and callbacks, CodeWarrior jump tables including strength-reduced and loop-invariant ones, register save/restore chains) | ✅ 13,487 functions, all 187 jump tables proven; every word of the code accounted for (`qilin coverage`: 99.58% code, the rest padding, dead code and 101 identified words of data and debugger stub, none of it lifted) |
 | CI: Linux x64 (GCC 14, Clang 19), Linux ARM64, macOS ARM64 and x64, Windows x64, warnings as errors, plus the decoder sweep | ✅ |
 | What's linked in: Revolution SDK `0x4199_60831`, MSL, MetroTRK, HOME Button Menu, Audiokinetic Wwise, Next Level Games' engine | ✅ from their strings (`docs/dol-analysis.md`) |
-| Library ranges and the lift / replace / drop boundary; names for the libraries | next (no decomp exists for this game; see `docs/prior-art.md`) |
+| Every library found, its range fixed, and the lift / replace / drop boundary decided | ✅ 40 ranges from four kinds of evidence (size matches against the Rhythm Heaven Fever decomp, RTTI, SDK version banners, strings), 1,988 SDK and runtime functions named; 84% of the code lifted, 15% replaced, 1% dropped (`docs/code-analysis.md`) |
 | Hardware-access profile, exception tables, timing model | next |
 | Lifter → C++, differential test | later (see roadmap) |
 | Runtime: OS, DVD, NAND, GX on Vulkan, AX audio, Wii Remote / Nunchuk / Balance Board input | later (see roadmap) |
@@ -57,6 +57,14 @@ build/qilin coverage path/to/main.dol [--list]            # every word: code, pa
 build/qilin suspects path/to/main.dol                     # functions with problems, and rejected starts, for review
 ```
 
+### Libraries
+
+```sh
+python3 tools/analysis/identify_libraries.py --qilin build/qilin --dol path/to/main.dol [--names-out pal_names.txt]
+```
+
+Finds every library in `main.dol` and prints its range, counts and plan (`docs/code-analysis.md`). The names file is derived from the game: don't commit it.
+
 ### Decoder check
 
 ```sh
@@ -73,6 +81,8 @@ This compares the decoder with GNU objdump (`-M broadway,raw`): mnemonic and eve
 | `recomp/src/` | Recompiler core: `dol` loader, `sha256`, `decoder` (Broadway), `cfg` (function discovery + control flow), `main` (CLI) |
 | `recomp/tests/` | Unit tests on a synthetic in-memory DOL, the decoder and synthetic programs, so they need no game files |
 | `tools/check/` | The decoder cross-check against GNU objdump |
+| `tools/analysis/` | `identify_libraries.py`: the libraries in `main.dol`, their ranges and the boundary |
+| `third_party/rhf/` | The Rhythm Heaven Fever decomp's symbols and splits (CC0), for the libraries both games share |
 | `docs/` | Roadmap and design targets, prior art, naming, analysis and status notes |
 
 ## Design targets (short version)
@@ -80,7 +90,7 @@ This compares the decoder with GNU objdump (`-M broadway,raw`): mnemonic and eve
 - **Efficiency and reliability come first.** Every choice is judged by whether it makes the game cheaper to run on low-end hardware, and whether it fails loudly instead of misbehaving quietly.
 - **Static recompilation, PowerPC → C++, compiled ahead of time.** No interpreter, no JIT, no emulator underneath. Hand-written C++ can override any lifted function.
 - **Vulkan 1.3 only.** GX is translated at API level to Vulkan, with a deliberately small baseline feature set (1.3 core plus what the Pi 4's driver offers) so one render path runs on everything from low-end ARM GPUs upwards. macOS runs through MoltenVK.
-- **The SDK's hardware-facing libraries are replaced natively**, not recompiled: OS, GX, AI/AX/DSP, DVD, VI, WPAD/KPAD and WBC (Balance Board), NAND. The C/C++ runtime, the SDK's pure-software libraries, THP, the HOME Button Menu, Audiokinetic Wwise and Next Level Games' engine are lifted with the game, for exact behaviour.
+- **The SDK's hardware-facing libraries are replaced natively**, not recompiled: OS, GX, AI/AX/DSP, DVD, VI, WPAD (with the Bluetooth stack under it), NAND. The C/C++ runtime, the SDK's pure-software libraries (KPAD and WBC, the Balance Board's, among them), THP, the HOME Button Menu, Audiokinetic Wwise and Next Level Games' engine are lifted with the game, for exact behaviour.
 - **Ground truth is Dolphin** running the original game, reaction timing included: cue-to-attack timing and dodge windows are behaviour in Punch-Out!!.
 
 See `docs/` for the full roadmap and the analysis notes.
