@@ -30,7 +30,7 @@ callers and callees are on). Code before the first label is the game and its
 engine. `.init` is split by the decomp's names, as in BeatTheBeat-QilinComp.
 
 Usage:
-  identify_libraries.py --qilin build/qilin --dol main.dol [--names-out pal_names.txt] [--segments]
+  identify_libraries.py --qilin build/qilin --dol main.dol [--names-out pal_names.txt]
 
 Prints the library table (Markdown) and the boundary checks. The names file is
 derived from the game binary: keep it out of git.
@@ -464,26 +464,21 @@ def segment(funcs, seeds, source, edges, calls, first_text):
 
 # ---------------------------------------------------------------- main
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--qilin", required=True)
-    ap.add_argument("--dol", required=True)
-    ap.add_argument("--names-out", help="write the decomp names matched to PAL addresses (derived from the game: keep out of git)")
-    ap.add_argument("--segments", action="store_true", help="also list every segment, in address order")
-    args = ap.parse_args()
-
-    dol = Dol(args.dol)
+def analyse(qilin, dol_path):
+    """Everything the library table is built from, for this script and the others in tools/analysis."""
+    dol = Dol(dol_path)
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = os.path.join(tmp, "cfg.json")
-        run([args.qilin, "cfg", args.dol, "--json", cfg_path])
+        run([qilin, "cfg", dol_path, "--json", cfg_path])
         cfg = json.load(open(cfg_path))
         listing = os.path.join(tmp, "insns.txt")
-        run([args.qilin, "insns", args.dol, "-o", listing])
+        run([qilin, "insns", dol_path, "-o", listing])
         insns = {}
         for line in open(listing):
             p = line.split(None, 2)
-            insns[int(p[0], 16)] = (int(p[1], 16), p[2].split()[0] if len(p) > 2 and p[2].strip() else "")
-    coverage = run([args.qilin, "coverage", args.dol, "--list"])
+            text = p[2].strip() if len(p) > 2 else ""
+            insns[int(p[0], 16)] = (int(p[1], 16), text.split()[0] if text else "", text)
+    coverage = run([qilin, "coverage", dol_path, "--list"])
     unknown = [(int(m[1], 16), int(m[2], 16)) for m in re.finditer(r"^\s+([0-9A-F]{8})-([0-9A-F]{8})", coverage, re.M)]
 
     fdefs = sorted(cfg["functions"], key=lambda f: int(f["start"], 16))
@@ -584,6 +579,29 @@ def main():
         seg.update(words=words, fp=fp, ps=ps, priv=priv)
         seg["matched"] = sum(1 for i in seg["funcs"] if i in names)
         seg["evidence"] = sum(1 for i in seg["funcs"] if i in seeds)
+
+    return dict(dol=dol, insns=insns, fdefs=fdefs, funcs=funcs, labels=labels, segs=segs, names=names, seeds=seeds,
+                unknown=unknown, boundaries=boundaries, sized=sized, classes=classes, refs=refs, banner=banner,
+                first_text=first_text, edges=edges, calls=calls)
+
+
+def segment_of(result, address):
+    """The segment holding a text address, or None."""
+    for seg in result["segs"]:
+        if seg["start"] <= address < seg["end"]:
+            return seg
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--qilin", required=True)
+    ap.add_argument("--dol", required=True)
+    ap.add_argument("--names-out", help="write the decomp names matched to PAL addresses (derived from the game: keep out of git)")
+    args = ap.parse_args()
+    r = analyse(args.qilin, args.dol)
+    segs, funcs, names, seeds, unknown, boundaries = r["segs"], r["funcs"], r["names"], r["seeds"], r["unknown"], r["boundaries"]
+    sized, classes, refs, banner = r["sized"], r["classes"], r["refs"], r["banner"]
 
     plan_words = collections.Counter()
     print("| Library | PAL range | Functions | Decomp names | Words | fp | ps | priv | Plan |")

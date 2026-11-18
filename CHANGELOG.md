@@ -11,6 +11,18 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-18
+The rest of roadmap step 1's code analysis: where the code touches the hardware, whether it can throw, and how it keeps time (`docs/runtime-analysis.md`).
+
+### Added
+- **`tools/analysis/hardware_access.py`:** traces the base of every load, store and cache-block instruction through its function and classifies the address (write-gather pipe, legacy and Hollywood registers, uncached MEM1/MEM2, locked cache), by library. Lifted code touches no register and no mirror; it writes the GX FIFO directly (the engine's mesh drawers, 803 stores in 26 functions; the HOME Button Menu; RFL), so the FIFO decoder is required.
+- **Exceptions:** no `__throw`, unwinder or catch matching is linked, and only RFL, MSL and the runtime have exception tables. Nothing can throw; the tables are dead data.
+- **Timing:** the engine swaps every retrace (swap mode 1, set in data, never changed), limits frames to 1/50 or 1/60 s by video mode, and drives gameplay with a float time step that pauses and scales. Whether the main loop's step is fixed or measured is left for the first boot to log; the port presents at 60 Hz either way.
+- `identify_libraries.py` can be imported (`analyse`, `segment_of`) by the other analysis scripts.
+
+### Removed
+- `identify_libraries.py --segments`, which did nothing.
+
 ### Changed
 - **Input is buttons only:** no motion controls and no Balance Board. The game runs its sideways Wii Remote scheme, mapped onto a modern pad or keyboard (`docs/roadmap-and-design-targets.md`).
 

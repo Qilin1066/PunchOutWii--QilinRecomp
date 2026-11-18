@@ -16,7 +16,7 @@ Roadmap step 1, **analysis**, is in progress; the recompiler core (step 2) has i
 | CI: Linux x64 (GCC 14, Clang 19), Linux ARM64, macOS ARM64 and x64, Windows x64, warnings as errors, plus the decoder sweep | ✅ |
 | What's linked in: Revolution SDK `0x4199_60831`, MSL, MetroTRK, HOME Button Menu, Audiokinetic Wwise, Next Level Games' engine | ✅ from their strings (`docs/dol-analysis.md`) |
 | Every library found, its range fixed, and the lift / replace / drop boundary decided | ✅ 40 ranges from four kinds of evidence (size matches against the Rhythm Heaven Fever decomp, RTTI, SDK version banners, strings), 1,988 SDK and runtime functions named; 84% of the code lifted, 15% replaced, 1% dropped (`docs/code-analysis.md`) |
-| Hardware-access profile, exception tables, timing model | next |
+| Hardware-access profile, exception tables, timing model | ✅ lifted code touches no hardware register or uncached mirror, but writes the GX FIFO directly (803 stores in the engine's mesh drawers), so the FIFO decoder is required; no C++ exception can be thrown; one frame per retrace, gameplay driven by a time step in seconds (`docs/runtime-analysis.md`) |
 | Lifter → C++, differential test | later (see roadmap) |
 | Runtime: OS, DVD, NAND, GX on Vulkan, AX audio, input (buttons only: the sideways Wii Remote scheme on a modern pad or keyboard, no motion controls) | later (see roadmap) |
 
@@ -65,6 +65,12 @@ python3 tools/analysis/identify_libraries.py --qilin build/qilin --dol path/to/m
 
 Finds every library in `main.dol` and prints its range, counts and plan (`docs/code-analysis.md`). The names file is derived from the game: don't commit it.
 
+```sh
+python3 tools/analysis/hardware_access.py --qilin build/qilin --dol path/to/main.dol [--list]
+```
+
+Every load and store to a hardware register, the GX FIFO, an uncached mirror or the locked cache that the code builds the address of, by library (`docs/runtime-analysis.md`).
+
 ### Decoder check
 
 ```sh
@@ -81,7 +87,7 @@ This compares the decoder with GNU objdump (`-M broadway,raw`): mnemonic and eve
 | `recomp/src/` | Recompiler core: `dol` loader, `sha256`, `decoder` (Broadway), `cfg` (function discovery + control flow), `main` (CLI) |
 | `recomp/tests/` | Unit tests on a synthetic in-memory DOL, the decoder and synthetic programs, so they need no game files |
 | `tools/check/` | The decoder cross-check against GNU objdump |
-| `tools/analysis/` | `identify_libraries.py`: the libraries in `main.dol`, their ranges and the boundary |
+| `tools/analysis/` | `identify_libraries.py`: the libraries in `main.dol`, their ranges and the boundary; `hardware_access.py`: every hardware, FIFO and mirror access, by library |
 | `third_party/rhf/` | The Rhythm Heaven Fever decomp's symbols and splits (CC0), for the libraries both games share |
 | `docs/` | Roadmap and design targets, prior art, naming, analysis and status notes |
 
