@@ -343,6 +343,78 @@ inline double estimate_rsqrt(double v) {
     return from_bits(static_cast<uint64_t>(s | e | (static_cast<int64_t>(t.base + t.dec * (idx % 2048)) << 26)));
 }
 
+// ---- paired singles: GQR quantisation (psq_l / psq_st)
+// A GQR holds the store type (bits 0-2) and scale (8-13), and the load type
+// (16-18) and scale (24-29). Types: 0 float, 4 u8, 5 u16, 6 s8, 7 s16; 1-3 are
+// invalid. The 6-bit scale s is a power of two: loads multiply by 2^-s and
+// stores by 2^s, with s read as signed (32-63 mean -32..-1).
+enum class Quant : unsigned { kFloat = 0, kU8 = 4, kU16 = 5, kS8 = 6, kS16 = 7 };
+inline bool quant_valid(unsigned type) { return type == 0 || type >= 4; }
+inline unsigned quant_size(unsigned type) { return type == 0 ? 4 : (type == 4 || type == 6) ? 1 : 2; }
+inline float pow2f(int e) { return std::ldexp(1.0f, e); }
+inline int signed_scale(unsigned s) { return s < 32 ? static_cast<int>(s) : static_cast<int>(s) - 64; }
+
+// One loaded element (raw is the big-endian value read, zero-extended) to its double.
+inline double dequantize(unsigned type, unsigned scale, uint32_t raw) {
+    float v;
+    switch (type) {
+    case 4: v = static_cast<float>(static_cast<uint8_t>(raw)); break;
+    case 5: v = static_cast<float>(static_cast<uint16_t>(raw)); break;
+    case 6: v = static_cast<float>(static_cast<int8_t>(static_cast<uint8_t>(raw))); break;
+    case 7: v = static_cast<float>(static_cast<int16_t>(static_cast<uint16_t>(raw))); break;
+    default: return load_single(raw);
+    }
+    return static_cast<double>(v * pow2f(-signed_scale(scale)));
+}
+
+// stfs's conversion, but values in the single-subnormal range become signed zeros.
+inline uint32_t store_single_ftz(double d) {
+    const uint64_t x = bits(d);
+    const uint32_t e = static_cast<uint32_t>((x >> 52) & 0x7FF);
+    if (e > 896 || (x & ~kSign) == 0) return static_cast<uint32_t>(((x >> 32) & 0xC0000000u) | ((x >> 29) & 0x3FFFFFFFu));
+    return static_cast<uint32_t>((x >> 32) & 0x80000000u);
+}
+
+// One element to store: scaled in single precision, clamped, truncated toward
+// zero. A NaN stores as 0 (Dolphin leaves this to the host; unverified).
+inline uint32_t quantize(unsigned type, unsigned scale, double value) {
+    if (type == 0) return store_single_ftz(value);
+    const float v = static_cast<float>(value) * pow2f(signed_scale(scale));
+    float lo, hi;
+    switch (type) {
+    case 4: lo = 0.0f, hi = 255.0f; break;
+    case 5: lo = 0.0f, hi = 65535.0f; break;
+    case 6: lo = -128.0f, hi = 127.0f; break;
+    default: lo = -32768.0f, hi = 32767.0f; break;
+    }
+    if (v != v) return 0;
+    const float c = v < lo ? lo : v > hi ? hi : v;
+    const int32_t i = static_cast<int32_t>(c);
+    return static_cast<uint32_t>(i) & (quant_size(type) == 1 ? 0xFFu : 0xFFFFu);
+}
+
 }  // namespace fp
+
+// psq_l / psq_st over guest memory, with GQR i. w: one element (ps1 = 1.0 on load).
+inline void psq_load(Cpu& c, uint32_t ea, unsigned i, bool w, double& ps0, double& ps1) {
+    const uint32_t g = c.gqr[i];
+    const unsigned type = (g >> 16) & 7, scale = (g >> 24) & 63;
+    if (!fp::quant_valid(type)) c.hooks->trap(c, ea, "psq_l with an invalid GQR load type");
+    const unsigned n = fp::quant_size(type);
+    auto read = [&](uint32_t a) { return n == 1 ? read8(c, a) : n == 2 ? read16(c, a) : read32(c, a); };
+    const double v0 = fp::dequantize(type, scale, read(ea));
+    const double v1 = w ? 1.0 : fp::dequantize(type, scale, read(ea + n));
+    ps0 = v0;
+    ps1 = v1;
+}
+inline void psq_store(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0, double ps1) {
+    const uint32_t g = c.gqr[i];
+    const unsigned type = g & 7, scale = (g >> 8) & 63;
+    if (!fp::quant_valid(type)) c.hooks->trap(c, ea, "psq_st with an invalid GQR store type");
+    const unsigned n = fp::quant_size(type);
+    auto write = [&](uint32_t a, uint32_t v) { n == 1 ? write8(c, a, v) : n == 2 ? write16(c, a, v) : write32(c, a, v); };
+    write(ea, fp::quantize(type, scale, ps0));
+    if (!w) write(ea + n, fp::quantize(type, scale, ps1));
+}
 
 }  // namespace qilin::rt

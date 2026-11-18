@@ -56,6 +56,86 @@ uint32_t mask(unsigned mb, unsigned me) {
 
 }  // namespace
 
+// Paired singles (Broadway's extension): both halves, each a single-precision
+// operation; psq_l/psq_st read and write memory byte by byte here, with the
+// element conversions of rt::fp.
+bool step_paired(State& s, const ppc::Insn& in) {
+    namespace fp = ::qilin::rt::fp;
+    const uint32_t w = in.word;
+    const unsigned D = bits(w, 6, 10), A = bits(w, 11, 15), B = bits(w, 16, 20), C = bits(w, 21, 25);
+    const auto v0 = [&](unsigned n) { return fp::from_bits(s.ps0[n]); };
+    const auto v1 = [&](unsigned n) { return fp::from_bits(s.ps1[n]); };
+    const auto set = [&](double x, double y) { s.ps0[D] = fp::bits(x); s.ps1[D] = fp::bits(y); };
+    uint32_t* r = s.gpr;
+    switch (in.op) {
+    case Op::psq_l: case Op::psq_lu: case Op::psq_lx: case Op::psq_lux:
+    case Op::psq_st: case Op::psq_stu: case Op::psq_stx: case Op::psq_stux: {
+        const bool x = in.op == Op::psq_lx || in.op == Op::psq_lux || in.op == Op::psq_stx || in.op == Op::psq_stux;
+        const bool u = in.op == Op::psq_lu || in.op == Op::psq_lux || in.op == Op::psq_stu || in.op == Op::psq_stux;
+        const bool ld = in.op == Op::psq_l || in.op == Op::psq_lu || in.op == Op::psq_lx || in.op == Op::psq_lux;
+        // d-form: d(12) in bits 20-31, W bit 16, I bits 17-19; indexed: W bit 21, I bits 22-24.
+        const uint32_t d12 = static_cast<uint32_t>(static_cast<int32_t>(bits(w, 20, 31) << 20) >> 20);
+        const unsigned W = x ? bits(w, 21, 21) : bits(w, 16, 16), I = x ? bits(w, 22, 24) : bits(w, 17, 19);
+        const uint32_t ea = (u ? r[A] : (A ? r[A] : 0)) + (x ? r[B] : d12);
+        const uint32_t g = s.gqr[I];
+        const unsigned type = ld ? (g >> 16) & 7 : g & 7, scale = ld ? (g >> 24) & 63 : (g >> 8) & 63;
+        if (type >= 1 && type <= 3) {  // invalid: the runtime traps
+            s.trapped = true;
+            return true;
+        }
+        const unsigned n = type == 0 ? 4 : (type == 4 || type == 6) ? 1 : 2;
+        if (ld) {
+            const double a0 = fp::dequantize(type, scale, load(s, ea, n));
+            const double a1 = W ? 1.0 : fp::dequantize(type, scale, load(s, ea + n, n));
+            set(a0, a1);
+        } else {
+            store(s, ea, fp::quantize(type, scale, v0(D)), n);
+            if (!W) store(s, ea + n, fp::quantize(type, scale, v1(D)), n);
+        }
+        if (u) r[A] = ea;
+        return true;
+    }
+    case Op::ps_add: set(fp::single(fp::add(v0(A), v0(B))), fp::single(fp::add(v1(A), v1(B)))); return true;
+    case Op::ps_sub: set(fp::single(fp::sub(v0(A), v0(B))), fp::single(fp::sub(v1(A), v1(B)))); return true;
+    case Op::ps_div: set(fp::single(fp::div(v0(A), v0(B))), fp::single(fp::div(v1(A), v1(B)))); return true;
+    case Op::ps_mul: set(fp::single(fp::mul(v0(A), fp::round25(v0(C)))), fp::single(fp::mul(v1(A), fp::round25(v1(C))))); return true;
+    case Op::ps_muls0: set(fp::single(fp::mul(v0(A), fp::round25(v0(C)))), fp::single(fp::mul(v1(A), fp::round25(v0(C))))); return true;
+    case Op::ps_muls1: set(fp::single(fp::mul(v0(A), fp::round25(v1(C)))), fp::single(fp::mul(v1(A), fp::round25(v1(C))))); return true;
+    case Op::ps_madd: case Op::ps_msub: case Op::ps_nmadd: case Op::ps_nmsub: case Op::ps_madds0: case Op::ps_madds1: {
+        const bool sub = in.op == Op::ps_msub || in.op == Op::ps_nmsub, neg = in.op == Op::ps_nmadd || in.op == Op::ps_nmsub;
+        const double c0 = in.op == Op::ps_madds1 ? v1(C) : v0(C), c1 = in.op == Op::ps_madds0 ? v0(C) : v1(C);
+        double x = fp::single(fp::madd_single(v0(A), c0, v0(B), sub)), y = fp::single(fp::madd_single(v1(A), c1, v1(B), sub));
+        if (neg) {
+            x = fp::neg_unless_nan(x);
+            y = fp::neg_unless_nan(y);
+        }
+        set(x, y);
+        return true;
+    }
+    case Op::ps_sum0: set(fp::single(fp::add(v0(A), v1(B))), fp::single(v1(C))); return true;
+    case Op::ps_sum1: set(fp::single(v0(C)), fp::single(fp::add(v0(A), v1(B)))); return true;
+    case Op::ps_merge00: { const uint64_t x = s.ps0[A], y = s.ps0[B]; s.ps0[D] = x; s.ps1[D] = y; return true; }
+    case Op::ps_merge01: { const uint64_t x = s.ps0[A], y = s.ps1[B]; s.ps0[D] = x; s.ps1[D] = y; return true; }
+    case Op::ps_merge10: { const uint64_t x = s.ps1[A], y = s.ps0[B]; s.ps0[D] = x; s.ps1[D] = y; return true; }
+    case Op::ps_merge11: { const uint64_t x = s.ps1[A], y = s.ps1[B]; s.ps0[D] = x; s.ps1[D] = y; return true; }
+    case Op::ps_mr: s.ps0[D] = s.ps0[B]; s.ps1[D] = s.ps1[B]; return true;
+    case Op::ps_neg: s.ps0[D] = s.ps0[B] ^ 0x8000000000000000ull; s.ps1[D] = s.ps1[B] ^ 0x8000000000000000ull; return true;
+    case Op::ps_abs: s.ps0[D] = s.ps0[B] & ~0x8000000000000000ull; s.ps1[D] = s.ps1[B] & ~0x8000000000000000ull; return true;
+    case Op::ps_nabs: s.ps0[D] = s.ps0[B] | 0x8000000000000000ull; s.ps1[D] = s.ps1[B] | 0x8000000000000000ull; return true;
+    case Op::ps_sel: {
+        const uint64_t x = v0(A) >= -0.0 ? s.ps0[C] : s.ps0[B], y = v1(A) >= -0.0 ? s.ps1[C] : s.ps1[B];
+        s.ps0[D] = x;
+        s.ps1[D] = y;
+        return true;
+    }
+    case Op::ps_res: set(fp::estimate_reciprocal(v0(B)), fp::estimate_reciprocal(v1(B))); return true;
+    case Op::ps_rsqrte: set(fp::single(fp::estimate_rsqrt(v0(B))), fp::single(fp::estimate_rsqrt(v1(B)))); return true;
+    case Op::ps_cmpu0: case Op::ps_cmpo0: set_crf(s, bits(w, 6, 8), fp::compare(v0(A), v0(B))); return true;
+    case Op::ps_cmpu1: case Op::ps_cmpo1: set_crf(s, bits(w, 6, 8), fp::compare(v1(A), v1(B))); return true;
+    default: return false;
+    }
+}
+
 // Floating point, by the manual's operand fields. FPRs are bit patterns here;
 // values go through rt::fp's primitives (see ref.hpp).
 bool step_float(State& s, const ppc::Insn& in) {
@@ -127,7 +207,7 @@ bool step_float(State& s, const ppc::Insn& in) {
         return true;
     }
     case Op::stfiwx: store(s, base + r[B], static_cast<uint32_t>(s.ps0[D]), 4); return true;
-    default: return false;
+    default: return step_paired(s, in);
     }
 }
 

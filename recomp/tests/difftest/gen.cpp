@@ -35,8 +35,13 @@ bool memory_op(Op op) {
 }
 bool indexed(const ppc::Spec& s) {
     for (ppc::Opnd o : s.operands)
-        if (o == ppc::Opnd::d_rA0) return false;
+        if (o == ppc::Opnd::d_rA0 || o == ppc::Opnd::psq_d_rA0) return false;
     return true;
+}
+bool psq_dform(const ppc::Spec& s) {
+    for (ppc::Opnd o : s.operands)
+        if (o == ppc::Opnd::psq_d_rA0) return true;
+    return false;
 }
 
 }  // namespace
@@ -90,9 +95,12 @@ int main(int argc, char** argv) {
             if (memory_op(s.op)) {
                 if (!indexed(s)) {
                     if (in.ra() == 0) continue;  // the address would be the displacement alone
-                    // Keep displacements small, so the address stays in the test window.
-                    w = (w & 0xFFFF0000u) | (static_cast<uint32_t>(static_cast<int32_t>(rng() % 1024) - 512) & 0xFFFF);
-                    if (ppc::decode(w).op != s.op) continue;
+                    // Keep displacements small, so the address stays in the test window
+                    // (psq_l/psq_st's 12-bit displacement is small already).
+                    if (!psq_dform(s)) {
+                        w = (w & 0xFFFF0000u) | (static_cast<uint32_t>(static_cast<int32_t>(rng() % 1024) - 512) & 0xFFFF);
+                        if (ppc::decode(w).op != s.op) continue;
+                    }
                 } else if (in.ra() == in.rb()) {
                     continue;  // base and index the same register: no one value serves as both
                 }

@@ -11,6 +11,18 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-18
+Lifter slice 3: paired singles. 13,392 of 13,487 functions (99.3%) and 99.8% of the instructions are lifted: every function in the libraries we lift. The 95 stubs left are all in code we replace or drop.
+
+### Added
+- **Paired singles in the lifter:** every `ps_*` instruction the game uses (arithmetic, multiply-adds, `ps_sum`, `ps_merge`, moves, `ps_sel`, the estimates, compares), each half by the same rules as the scalar single-precision instructions, both halves read before either is written.
+- **`psq_l`/`psq_st`** in all their forms, through `psq_load`/`psq_store` in the runtime, which apply the GQR at run time: float, u8, u16, s8 and s16 with signed scales, clamping and truncation on store, `W=1` single-element forms; an invalid GQR type traps. Quantising a NaN to an integer stores 0, which isn't verified on hardware.
+- **Known-answer tests** for the quantisation conversions.
+- **The differential test** covers paired singles from random GQRs: 5,061 cases, 323,904 runs, 0 differences.
+
+### Changed
+- `dcbz_l` and paired-single record forms are the only paired-single encodings left out; they fail loudly with their own reasons.
+
 ## [0.5.0] - 2026-11-18
 Lifter slice 2: floating point, bit for bit as Broadway computes it. 12,782 of 13,487 functions (94.8%) and 82.9% of the instructions are now lifted.
 

@@ -38,7 +38,10 @@ bool in_slice(const Insn& in, std::string* why) {
     };
     if (!in.valid()) return no("an invalid word");
     const ppc::Spec& s = ppc::spec(in.op);
-    if (s.flags & ppc::kPaired) return no("paired singles");
+    if (s.flags & ppc::kPaired) {
+        if (in.op == Op::dcbz_l) return no("locked cache (dcbz_l)");
+        if ((s.flags & ppc::kRc) && in.rc()) return no(std::format("paired-single record form ({}.)", s.name));
+    }
     if (s.flags & ppc::kFloat) {
         switch (in.op) {
         case Op::mffs: case Op::mtfsf: case Op::mtfsfi: case Op::mtfsb0: case Op::mtfsb1: case Op::mcrfs:
@@ -243,6 +246,12 @@ private:
     std::string call_to(uint32_t target) {
         callees_.insert(target);
         return std::format("{} {}(c); {}", sync_out(), fn_name(target), sync_in());
+    }
+
+    // A paired result: each half computed from the old values, then both written.
+    bool pair(std::string& out, unsigned d, const std::string& v0, const std::string& v1) {
+        out = std::format("    {{ const double t0 = {}; const double t1 = {}; {} = t0; {} = t1; }}\n", v0, v1, F(d), P(d));
+        return true;
     }
 
     // A single-precision result: both halves of the FPR (Broadway with paired singles on).
@@ -605,6 +614,68 @@ private:
                              s1 ? std::format("write32(c, ea, fp::store_single({}))", F(d)) : std::format("write64(c, ea, fp::bits({}))", F(d)), R(a)));
             return true;
         }
+        // ---------------------------------------------------------------- paired singles
+        case Op::psq_l: case Op::psq_lu: case Op::psq_lx: case Op::psq_lux:
+        case Op::psq_st: case Op::psq_stu: case Op::psq_stx: case Op::psq_stux: {
+            const bool x = in.op == Op::psq_lx || in.op == Op::psq_lux || in.op == Op::psq_stx || in.op == Op::psq_stux;
+            const bool u = in.op == Op::psq_lu || in.op == Op::psq_lux || in.op == Op::psq_stu || in.op == Op::psq_stux;
+            const bool load = in.op == Op::psq_l || in.op == Op::psq_lu || in.op == Op::psq_lx || in.op == Op::psq_lux;
+            const unsigned i = x ? in.psqx_i() : in.psq_i(), w = x ? in.psqx_w() : in.psq_w();
+            const std::string base = u ? R(a) : RA0(a);
+            const std::string ea = x ? (base == "0u" ? R(b) : std::format("{} + {}", base, R(b)))
+                                     : (base == "0u" ? std::format("{}u", static_cast<uint32_t>(in.psq_d())) : base + plus(in.psq_d()));
+            std::string s = std::format("{{ const uint32_t ea = {}; ", ea);
+            s += load ? std::format("psq_load(c, ea, {}, {}, {}, {});", i, w != 0, F(d), P(d))
+                      : std::format("psq_store(c, ea, {}, {}, {}, {});", i, w != 0, F(d), P(d));
+            if (u) s += std::format(" {} = ea;", R(a));
+            line(s + " }");
+            return true;
+        }
+        case Op::ps_add: return pair(out, d, std::format("fp::single(fp::add({}, {}))", F(a), F(b)), std::format("fp::single(fp::add({}, {}))", P(a), P(b)));
+        case Op::ps_sub: return pair(out, d, std::format("fp::single(fp::sub({}, {}))", F(a), F(b)), std::format("fp::single(fp::sub({}, {}))", P(a), P(b)));
+        case Op::ps_div: return pair(out, d, std::format("fp::single(fp::div({}, {}))", F(a), F(b)), std::format("fp::single(fp::div({}, {}))", P(a), P(b)));
+        case Op::ps_mul: {
+            const unsigned cr = in.rc_reg();
+            return pair(out, d, std::format("fp::single(fp::mul({}, fp::round25({})))", F(a), F(cr)),
+                        std::format("fp::single(fp::mul({}, fp::round25({})))", P(a), P(cr)));
+        }
+        case Op::ps_muls0: case Op::ps_muls1: {
+            const std::string cv = in.op == Op::ps_muls0 ? F(in.rc_reg()) : P(in.rc_reg());
+            return pair(out, d, std::format("fp::single(fp::mul({}, fp::round25({})))", F(a), cv),
+                        std::format("fp::single(fp::mul({}, fp::round25({})))", P(a), cv));
+        }
+        case Op::ps_madd: case Op::ps_msub: case Op::ps_nmadd: case Op::ps_nmsub:
+        case Op::ps_madds0: case Op::ps_madds1: {
+            const bool sub = in.op == Op::ps_msub || in.op == Op::ps_nmsub, neg = in.op == Op::ps_nmadd || in.op == Op::ps_nmsub;
+            const unsigned cr = in.rc_reg();
+            const std::string c0 = in.op == Op::ps_madds1 ? P(cr) : F(cr), c1 = in.op == Op::ps_madds0 ? F(cr) : P(cr);
+            auto one = [&](const std::string& x, const std::string& cv, const std::string& y) {
+                const std::string v = std::format("fp::single(fp::madd_single({}, {}, {}, {}))", x, cv, y, sub);
+                return neg ? "fp::neg_unless_nan(" + v + ")" : v;
+            };
+            return pair(out, d, one(F(a), c0, F(b)), one(P(a), c1, P(b)));
+        }
+        case Op::ps_sum0:
+            return pair(out, d, std::format("fp::single(fp::add({}, {}))", F(a), P(b)), std::format("fp::single({})", P(in.rc_reg())));
+        case Op::ps_sum1:
+            return pair(out, d, std::format("fp::single({})", F(in.rc_reg())), std::format("fp::single(fp::add({}, {}))", F(a), P(b)));
+        case Op::ps_merge00: return pair(out, d, F(a), F(b));
+        case Op::ps_merge01: return pair(out, d, F(a), P(b));
+        case Op::ps_merge10: return pair(out, d, P(a), F(b));
+        case Op::ps_merge11: return pair(out, d, P(a), P(b));
+        case Op::ps_mr: return pair(out, d, F(b), P(b));
+        case Op::ps_neg: return pair(out, d, std::format("fp::from_bits(fp::bits({}) ^ fp::kSign)", F(b)), std::format("fp::from_bits(fp::bits({}) ^ fp::kSign)", P(b)));
+        case Op::ps_abs: return pair(out, d, std::format("fp::from_bits(fp::bits({}) & ~fp::kSign)", F(b)), std::format("fp::from_bits(fp::bits({}) & ~fp::kSign)", P(b)));
+        case Op::ps_nabs: return pair(out, d, std::format("fp::from_bits(fp::bits({}) | fp::kSign)", F(b)), std::format("fp::from_bits(fp::bits({}) | fp::kSign)", P(b)));
+        case Op::ps_sel: {
+            const unsigned cr = in.rc_reg();
+            return pair(out, d, std::format("{} >= -0.0 ? {} : {}", F(a), F(cr), F(b)), std::format("{} >= -0.0 ? {} : {}", P(a), P(cr), P(b)));
+        }
+        case Op::ps_res: return pair(out, d, std::format("fp::estimate_reciprocal({})", F(b)), std::format("fp::estimate_reciprocal({})", P(b)));
+        case Op::ps_rsqrte:
+            return pair(out, d, std::format("fp::single(fp::estimate_rsqrt({}))", F(b)), std::format("fp::single(fp::estimate_rsqrt({}))", P(b)));
+        case Op::ps_cmpu0: case Op::ps_cmpo0: line(std::format("{} = fp::compare({}, {});", CR(in.crfd()), F(a), F(b))); return true;
+        case Op::ps_cmpu1: case Op::ps_cmpo1: line(std::format("{} = fp::compare({}, {});", CR(in.crfd()), P(a), P(b))); return true;
         default:
             error_ = std::format("{} isn't handled by the lifter", ppc::spec(in.op).name);
             return false;

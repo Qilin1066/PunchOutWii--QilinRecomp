@@ -50,7 +50,7 @@ bool memory_op(ppc::Op op) {
 }
 bool indexed(ppc::Op op) {
     for (ppc::Opnd o : ppc::spec(op).operands)
-        if (o == ppc::Opnd::d_rA0) return false;
+        if (o == ppc::Opnd::d_rA0 || o == ppc::Opnd::psq_d_rA0) return false;
     return true;
 }
 
@@ -103,7 +103,7 @@ int main() {
             rt::Cpu c;
             for (uint32_t& r : c.r) r = value();
             if (t.kind == 0 && memory_op(in.op)) {
-                const uint32_t addr = kWin + 0x800 + (rng() % 0x2800);  // room for d (+-512), an index (< 0x400) and lmw
+                const uint32_t addr = kWin + 0x900 + (rng() % 0x2600);  // room for d (+-512, psq +-2048), an index (< 0x400) and lmw
                 if (!indexed(in.op)) {
                     c.r[in.ra()] = addr;
                 } else if (in.ra() == 0) {
@@ -117,7 +117,13 @@ int main() {
             c.set_xer(static_cast<uint32_t>(rng()));
             c.lr = value();
             c.ctr = t.kind ? (rng() % 2 ? rng() % 3 : value()) : value();
-            for (uint32_t& g : c.gqr) g = static_cast<uint32_t>(rng());
+            // GQRs: a valid type (float, u8, u16, s8, s16) in both halves 15 times in 16,
+            // anything (invalid types trap) the rest.
+            for (uint32_t& g : c.gqr) {
+                static const unsigned types[] = {0, 4, 5, 6, 7};
+                g = static_cast<uint32_t>(rng());
+                if (rng() % 16) g = (g & ~0x00070007u) | types[rng() % 5] | (types[rng() % 5] << 16);
+            }
             uint64_t f0[32], f1[32];
             for (unsigned n = 0; n < 32; ++n) {
                 f0[n] = fvalue();

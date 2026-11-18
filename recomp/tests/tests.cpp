@@ -1,5 +1,6 @@
 // Self-contained tests: SHA-256, a synthetic DOL built in memory, the
 // Broadway decoder, and function discovery on a synthetic program. No game files required (runs in CI).
+#include <limits>
 #include <algorithm>
 #include <cstring>
 #include <print>
@@ -587,9 +588,15 @@ void test_lift() {
     // Outside the slice: the reason, and where.
     LiftInput ps;
     ps.start = 0x80003000;
-    ps.insns = {{0x80003000, ppc::decode(0x1021102Au)}, {0x80003004, ppc::decode(0x4E800020u)}};  // ps_add f1,f1,f2; blr
+    ps.insns = {{0x80003000, ppc::decode(0x100327ECu)}, {0x80003004, ppc::decode(0x4E800020u)}};  // dcbz_l r3,r4; blr
     const Lifted no = lift(ps);
-    CHECK(!no.ok && no.why == "paired singles" && no.why_at == 0x80003000);
+    CHECK(!no.ok && no.why == "locked cache (dcbz_l)" && no.why_at == 0x80003000);
+    // Paired singles: both halves from the old values, then written.
+    LiftInput pa;
+    pa.start = 0x80003000;
+    pa.insns = {{0x80003000, ppc::decode(0x1021102Au)}, {0x80003004, ppc::decode(0x4E800020u)}};  // ps_add f1,f1,f2; blr
+    const Lifted pl = lift(pa);
+    CHECK(pl.ok && pl.code.contains("const double t0 = fp::single(fp::add(f1, f2)); const double t1 = fp::single(fp::add(p1, p2)); f1 = t0; p1 = t1;"));
     std::string why;
     CHECK(!in_slice(ppc::decode(0x7C632614u), &why) && why.contains("overflow-enable"));  // addo r3,r3,r4
 }
@@ -600,6 +607,19 @@ void test_fp() {
     namespace fp = ::qilin::rt::fp;
     auto b = [](double d) { return fp::bits(d); };
     auto d = [](uint64_t x) { return fp::from_bits(x); };
+    // GQR quantisation (psq_l / psq_st): types 4 u8, 5 u16, 6 s8, 7 s16, 0 float;
+    // the 6-bit scale is signed (63 means -1), loads multiply by 2^-s, stores by 2^s.
+    CHECK(fp::dequantize(4, 0, 0xFF) == 255.0 && fp::dequantize(6, 0, 0x80) == -128.0);
+    CHECK(fp::dequantize(5, 4, 4096) == 256.0 && fp::dequantize(7, 63, 0xFFFF) == -2.0);
+    CHECK(fp::dequantize(7, 8, 0x0180) == 1.5 && fp::dequantize(0, 17, 0x3F800000u) == 1.0);  // float ignores the scale
+    CHECK(fp::quantize(7, 0, 1e6) == 0x7FFF && fp::quantize(7, 0, -1e6) == 0x8000);              // clamped
+    CHECK(fp::quantize(6, 0, -200.0) == 0x80 && fp::quantize(4, 0, -3.0) == 0 && fp::quantize(5, 0, 70000.0) == 0xFFFF);
+    CHECK(fp::quantize(6, 0, 2.9) == 2 && fp::quantize(6, 0, -2.9) == 0xFE);                     // toward zero
+    CHECK(fp::quantize(4, 1, 3.0) == 6 && fp::quantize(7, 63, 9.0) == 4);                         // 2^1, 2^-1 (4.5 → 4)
+    CHECK(fp::quantize(7, 0, std::numeric_limits<double>::quiet_NaN()) == 0);
+    CHECK(fp::quantize(0, 0, 1.0) == 0x3F800000u && fp::quantize(0, 0, -0.0) == 0x80000000u);
+    CHECK(fp::quantize(0, 0, d(0x3800000000000000ull)) == 0 && fp::quantize(0, 0, -d(0x3800000000000000ull)) == 0x80000000u);  // 2^-127: single subnormal → signed zero
+    CHECK(fp::quantize(0, 0, d(0x3810000000000000ull)) == 0x00800000u);                          // 2^-126: smallest normal kept
     // frsqrte: input and Broadway's result, from the Dolphin project's hardware-derived
     // unit tests (Source/UnitTests/Common/FloatUtilsTest.cpp, Core/PowerPC/TestValues.h).
     static const std::pair<uint64_t, uint64_t> rsqrt[] = {
