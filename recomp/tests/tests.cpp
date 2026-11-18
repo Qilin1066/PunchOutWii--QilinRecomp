@@ -11,6 +11,7 @@
 #include "decoder.hpp"
 #include "dol.hpp"
 #include "lift.hpp"
+#include "qilin/rt/cpu.hpp"
 #include "sha256.hpp"
 
 using namespace qilin;
@@ -574,14 +575,91 @@ void test_lift() {
     CHECK(itail.ok && itail.code.contains("c.hooks->call(c, ctr & ~3u); return;"));
     const Lifted chain = lifted(0x80003180);  // falls into the next entry point
     CHECK(chain.ok && chain.code.contains("fn_80003184(c); return;"));
-    // Outside the slice: the reason, and where.
+    // Floating point: ps0 locals, single-precision results in both halves.
     LiftInput fp;
     fp.start = 0x80003000;
-    fp.insns = {{0x80003000, ppc::decode(0xFC21102Au)}, {0x80003004, ppc::decode(0x4E800020u)}};  // fadd f1,f1,f2; blr
-    const Lifted no = lift(fp);
-    CHECK(!no.ok && no.why == "floating point" && no.why_at == 0x80003000);
+    fp.insns = {{0x80003000, ppc::decode(0xFC21102Au)},   // fadd f1,f1,f2
+                {0x80003004, ppc::decode(0xEC6400B2u)},   // fmuls f3,f4,f2
+                {0x80003008, ppc::decode(0x4E800020u)}};  // blr
+    const Lifted fl = lift(fp);
+    CHECK(fl.ok && fl.code.contains("f1 = fp::flush(fp::add(f1, f2));"));
+    CHECK(fl.code.contains("fp::single(fp::mul(f4, fp::round25(f2)))") && fl.code.contains("p3 = t;"));
+    // Outside the slice: the reason, and where.
+    LiftInput ps;
+    ps.start = 0x80003000;
+    ps.insns = {{0x80003000, ppc::decode(0x1021102Au)}, {0x80003004, ppc::decode(0x4E800020u)}};  // ps_add f1,f1,f2; blr
+    const Lifted no = lift(ps);
+    CHECK(!no.ok && no.why == "paired singles" && no.why_at == 0x80003000);
     std::string why;
     CHECK(!in_slice(ppc::decode(0x7C632614u), &why) && why.contains("overflow-enable"));  // addo r3,r3,r4
+}
+
+// The floating-point primitives lifted code and the differential test's
+// reference both use (rt::fp), against known answers.
+void test_fp() {
+    namespace fp = ::qilin::rt::fp;
+    auto b = [](double d) { return fp::bits(d); };
+    auto d = [](uint64_t x) { return fp::from_bits(x); };
+    // frsqrte: input and Broadway's result, from the Dolphin project's hardware-derived
+    // unit tests (Source/UnitTests/Common/FloatUtilsTest.cpp, Core/PowerPC/TestValues.h).
+    static const std::pair<uint64_t, uint64_t> rsqrt[] = {
+        {0x0000000000000000ull, 0x7FF0000000000000ull}, {0x0000000000000001ull, 0x617FFE8000000000ull}, {0x0000000001000000ull, 0x60BFFE8000000000ull},
+        {0x000FFFFFFFFFFFFFull, 0x5FE000082C000000ull}, {0x0010000000000000ull, 0x5FDFFE8000000000ull}, {0x0010000000000002ull, 0x5FDFFE8000000000ull},
+        {0x3FF0000000000000ull, 0x3FEFFE8000000000ull}, {0x7FEFFFFFFFFFFFFFull, 0x1FF000082C000000ull}, {0x7FF0000000000000ull, 0x0000000000000000ull},
+        {0x7FF0000000000001ull, 0x7FF8000000000001ull}, {0x7FF7FFFFFFFFFFFFull, 0x7FFFFFFFFFFFFFFFull}, {0x7FF8000000000000ull, 0x7FF8000000000000ull},
+        {0x7FFFFFFFFFFFFFFFull, 0x7FFFFFFFFFFFFFFFull}, {0x8000000000000000ull, 0xFFF0000000000000ull}, {0x8000000000000001ull, 0x7FF8000000000000ull},
+        {0x8000000001000000ull, 0x7FF8000000000000ull}, {0x800FFFFFFFFFFFFFull, 0x7FF8000000000000ull}, {0x8010000000000000ull, 0x7FF8000000000000ull},
+        {0x8010000000000002ull, 0x7FF8000000000000ull}, {0xBFF0000000000000ull, 0x7FF8000000000000ull}, {0xFFEFFFFFFFFFFFFFull, 0x7FF8000000000000ull},
+        {0xFFF0000000000000ull, 0x7FF8000000000000ull}, {0xFFF0000000000001ull, 0xFFF8000000000001ull}, {0xFFF7FFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull},
+        {0xFFF8000000000000ull, 0xFFF8000000000000ull}, {0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull}, {0x3800000000000000ull, 0x43E69FA000000000ull},
+        {0x3810000000000000ull, 0x43DFFE8000000000ull}, {0xB800000000000000ull, 0x7FF8000000000000ull}, {0xB810000000000000ull, 0x7FF8000000000000ull},
+        {0x3800123456789ABCull, 0x43E6936060000000ull}, {0x3810123456789ABCull, 0x43DFED3070000000ull}, {0xB800123456789ABCull, 0x7FF8000000000000ull},
+        {0xB810123456789ABCull, 0x7FF8000000000000ull}, {0x3680000000000000ull, 0x44A69FA000000000ull}, {0x36A0000000000000ull, 0x44969FA000000000ull},
+        {0x36B0000000000000ull, 0x448FFE8000000000ull}, {0xB680000000000000ull, 0x7FF8000000000000ull}, {0xB6A0000000000000ull, 0x7FF8000000000000ull},
+        {0xB6B0000000000000ull, 0x7FF8000000000000ull}, {0x3680123456789ABCull, 0x44A6936060000000ull}, {0x36A0123456789ABCull, 0x4496936060000000ull},
+        {0x36B0123456789ABCull, 0x448FED3070000000ull}, {0xB680123456789ABCull, 0x7FF8000000000000ull}, {0xB6A0123456789ABCull, 0x7FF8000000000000ull},
+        {0xB6B0123456789ABCull, 0x7FF8000000000000ull}, {0x47C0000000000000ull, 0x3C069FA000000000ull}, {0x47D0000000000000ull, 0x3BFFFE8000000000ull},
+        {0xC7C0000000000000ull, 0x7FF8000000000000ull}, {0xC7D0000000000000ull, 0x7FF8000000000000ull}, {0x37F0000000000000ull, 0x43EFFE8000000000ull},
+        {0x37E0000000000000ull, 0x43F69FA000000000ull}, {0xB7F0000000000000ull, 0x7FF8000000000000ull}, {0xB7E0000000000000ull, 0x7FF8000000000000ull},
+        {0x3FF8000000000000ull, 0x3FEA204000000000ull}, {0x408F400000000000ull, 0x3FA0310800000000ull}, {0xC008000000000000ull, 0x7FF8000000000000ull}};
+    for (const auto& [in, want] : rsqrt) {
+        if (b(fp::estimate_rsqrt(d(in))) != want) std::println(stderr, "  frsqrte({:016X}) = {:016X}, not {:016X}", in, b(fp::estimate_rsqrt(d(in))), want);
+        CHECK(b(fp::estimate_rsqrt(d(in))) == want);
+    }
+    CHECK(b(fp::estimate_reciprocal(1.0)) == 0x3FEFFF0000000000ull);  // the table's first entry, by hand
+    // fmadds rounds once: the case found in Mario Strikers Charged, where a double fma
+    // rounded again to single gives 0xBF55BF18 instead of hardware's 0xBF55BF17.
+    const double ma = fp::load_single(0x42480000u), mc = fp::load_single(0xBC88CC38u), mb = fp::load_single(0x1B1C72A0u);
+    CHECK(fp::store_single(fp::single(fp::madd_single(ma, mc, mb, false))) == 0xBF55BF17u);
+    CHECK(fp::store_single(static_cast<double>(static_cast<float>(std::fma(ma, mc, mb)))) == 0xBF55BF18u);
+    // lfs / stfs: the manual's bitwise conversions.
+    CHECK(fp::load_single(0x3F800000u) == 1.0);
+    CHECK(b(fp::load_single(0x7F800001u)) == 0x7FF0000020000000ull);  // a signalling NaN stays signalling
+    CHECK(b(fp::load_single(0x00000001u)) == 0x36A0000000000000ull);  // the smallest subnormal single, normalised
+    CHECK(fp::store_single(1.0) == 0x3F800000u);
+    CHECK(fp::store_single(d(0x36A0000000000000ull)) == 0x00000001u);  // 2^-149
+    CHECK(fp::store_single(d(0x36B0000000000000ull)) == 0x00000002u);  // 2^-148
+    CHECK(fp::store_single(d(0x3FF0000010000001ull)) == 0x3F800000u);  // truncates, doesn't round
+    // frC's 25-bit rounding.
+    CHECK(b(fp::round25(d(0x3FF0000004000000ull))) == 0x3FF0000000000000ull);
+    CHECK(b(fp::round25(d(0x3FF0000008000000ull))) == 0x3FF0000010000000ull);
+    // fctiw / fctiwz.
+    CHECK(b(fp::to_int(3.7, true)) == 0xFFF8000000000003ull);
+    CHECK(b(fp::to_int(2.5, false)) == 0xFFF8000000000002ull);  // ties to even
+    CHECK(b(fp::to_int(-0.5, true)) == 0xFFF8000100000000ull);  // negative, converts to zero
+    CHECK(b(fp::to_int(1e10, true)) == 0xFFF800007FFFFFFFull);
+    CHECK(b(fp::to_int(-1e10, true)) == 0xFFF8000080000000ull);
+    CHECK(b(fp::to_int(d(fp::kDefaultNan), true)) == 0xFFF8000080000000ull);
+    // NaNs: the first NaN operand made quiet, else the default NaN (positive, unlike x86's).
+    CHECK(b(fp::add(d(0x7FF0000000000001ull), 1.0)) == 0x7FF8000000000001ull);
+    CHECK(b(fp::add(1.0, d(0xFFF8000000000005ull))) == 0xFFF8000000000005ull);
+    CHECK(b(fp::sub(std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity())) == fp::kDefaultNan);
+    CHECK(b(fp::madd(1.0, d(0x7FF8000000000003ull), d(0x7FF8000000000002ull), true)) == 0x7FF8000000000002ull);  // b before c, unnegated
+    // FPSCR[NI]: subnormal results become signed zeros.
+    CHECK(b(fp::flush(d(0x8000000000000001ull))) == 0x8000000000000000ull);
+    CHECK(b(fp::single(d(0xB800000000000000ull))) == 0x8000000000000000ull);  // -2^-127: a subnormal single
+    CHECK(fp::single(d(0x3810000000000000ull)) == d(0x3810000000000000ull));   // 2^-126: the smallest normal single
+    CHECK(fp::compare(1.0, d(fp::kDefaultNan)) == 1 && fp::compare(1.0, 2.0) == 8 && fp::compare(-0.0, 0.0) == 2);
 }
 
 void test_cfg_switches() {
@@ -700,6 +778,7 @@ int main() {
     test_cfg();
     test_cfg_switches();
     test_lift();
+    test_fp();
     if (failures) {
         std::println(stderr, "{} check(s) failed", failures);
         return 1;

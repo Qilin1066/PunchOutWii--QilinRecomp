@@ -1,6 +1,8 @@
 // qilin_difftest: every generated case, run lifted and on the reference
 // interpreter from the same random states; registers, CR, XER, LR, CTR,
 // GQRs, the reservation, traps, indirect calls and memory must all agree.
+#include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -68,6 +70,30 @@ int main() {
         return rng() % 4 == 0 ? special[rng() % std::size(special)] : static_cast<uint32_t>(rng());
     };
 
+    // FPR values: the edge cases, values a single holds exactly (what single-
+    // precision code sees), ordinary doubles, and raw bit patterns.
+    auto fvalue = [&]() -> uint64_t {
+        static const uint64_t special[] = {
+            0, 0x8000000000000000ull, 0x3FF0000000000000ull, 0xBFF0000000000000ull, 0x7FF0000000000000ull,
+            0xFFF0000000000000ull, 0x7FF8000000000000ull, 0xFFF8000000000001ull, 0x7FF0000000000001ull,  // QNaN, -QNaN, SNaN
+            0xFFF7FFFFFFFFFFFFull, 1, 0x800FFFFFFFFFFFFFull, 0x0010000000000000ull,                      // -SNaN, subnormals, min normal
+            0x3810000000000000ull, 0x3800000000000000ull, 0x36A0000000000000ull, 0x3680000000000000ull,   // single boundaries
+            0x47EFFFFFE0000000ull, 0x47F0000000000000ull, 0x41E0000000000000ull, 0xC1E0000000000000ull,   // FLT_MAX, 2^128, +-2^31
+            0x3FE0000000000000ull, 0xBFE0000000000000ull, 0x4330000000000000ull};
+        switch (rng() % 6) {
+        case 0: return special[rng() % std::size(special)];
+        case 1: case 2: {  // a single
+            const uint32_t f = static_cast<uint32_t>(rng());
+            return std::bit_cast<uint64_t>(static_cast<double>(std::bit_cast<float>(f)));
+        }
+        case 3: {  // an ordinary double around 1
+            const double v = std::ldexp(static_cast<double>(rng()) / 4294967296.0 + 0.5, static_cast<int>(rng() % 40) - 20);
+            return std::bit_cast<uint64_t>(rng() % 2 ? -v : v);
+        }
+        default: return (uint64_t{static_cast<uint32_t>(rng())} << 32) | static_cast<uint32_t>(rng());
+        }
+    };
+
     unsigned failures = 0, runs = 0;
     for (unsigned k = 0; k < difftest::kCaseCount; ++k) {
         const Case& t = difftest::kCases[k];
@@ -92,6 +118,13 @@ int main() {
             c.lr = value();
             c.ctr = t.kind ? (rng() % 2 ? rng() % 3 : value()) : value();
             for (uint32_t& g : c.gqr) g = static_cast<uint32_t>(rng());
+            uint64_t f0[32], f1[32];
+            for (unsigned n = 0; n < 32; ++n) {
+                f0[n] = fvalue();
+                f1[n] = fvalue();
+                c.ps0[n] = std::bit_cast<double>(f0[n]);
+                c.ps1[n] = std::bit_cast<double>(f1[n]);
+            }
             c.reserve = rng() % 2;
             if (in.op == ppc::Op::stwcx_rc) {
                 const uint32_t ea = (in.ra() ? c.r[in.ra()] : 0) + c.r[in.rb()];
@@ -108,6 +141,8 @@ int main() {
             s.lr = c.lr;
             s.ctr = c.ctr;
             std::memcpy(s.gqr, c.gqr, sizeof s.gqr);
+            std::memcpy(s.ps0, f0, sizeof f0);
+            std::memcpy(s.ps1, f1, sizeof f1);
             s.reserve = c.reserve;
             s.reserve_addr = c.reserved;
             s.mem = memory.base();
@@ -159,6 +194,11 @@ int main() {
             if (c.xer() != (s.xer & 0xE000007Fu)) diffs.push_back(std::format("xer {:08X} vs {:08X}", c.xer(), s.xer & 0xE000007Fu));
             if (c.lr != s.lr) diffs.push_back(std::format("lr {:08X} vs {:08X}", c.lr, s.lr));
             if (c.ctr != s.ctr) diffs.push_back(std::format("ctr {:08X} vs {:08X}", c.ctr, s.ctr));
+            for (unsigned n = 0; n < 32; ++n) {
+                const uint64_t x0 = std::bit_cast<uint64_t>(c.ps0[n]), x1 = std::bit_cast<uint64_t>(c.ps1[n]);
+                if (x0 != s.ps0[n]) diffs.push_back(std::format("f{}.ps0 {:016X} vs {:016X}", n, x0, s.ps0[n]));
+                if (x1 != s.ps1[n]) diffs.push_back(std::format("f{}.ps1 {:016X} vs {:016X}", n, x1, s.ps1[n]));
+            }
             for (unsigned g = 0; g < 8; ++g)
                 if (c.gqr[g] != s.gqr[g]) diffs.push_back(std::format("gqr{} differs", g));
             if (static_cast<bool>(c.reserve) != s.reserve || (s.reserve && c.reserved != s.reserve_addr))

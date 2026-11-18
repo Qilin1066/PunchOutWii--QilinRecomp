@@ -11,6 +11,18 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-18
+Lifter slice 2: floating point, bit for bit as Broadway computes it. 12,782 of 13,487 functions (94.8%) and 82.9% of the instructions are now lifted.
+
+### Added
+- **Floating point in the lifter:** every FP arithmetic, compare, move, conversion, load and store the game uses, with FPRs as host locals (ps0, and ps1 where single-precision results fill it). `rt::fp` reproduces Broadway: NI mode (the game's OS sets it), NaN selection and the PowerPC default NaN, rounding to single with frC at 25 bits, single multiply-adds rounded once, `fctiw`'s result pattern, the bitwise single conversions of `lfs`/`stfs`, and the `fres`/`frsqrte` tables. The rules and tables are those Dolphin's interpreter records from hardware tests; the code is our own. FPSCR access and FP record forms (only in the replaced OS, or nowhere) stay outside and fail loudly.
+- **Known-answer tests** for those primitives, including Dolphin's 57 hardware-derived `frsqrte` results and the `fmadds` case where rounding twice differs from hardware.
+- **The differential test** covers floating point: 1,080 more cases from random FPR states (special values, subnormals, single boundaries, singles, raw bits), comparing both halves of every FPR: 4,173 cases, 267,072 runs, 0 differences.
+
+### Changed
+- Everything builds with `-ffp-contract=off` (GCC, Clang), so the host compiler never fuses a multiply and an add on its own.
+- The `divw` rule recorded in 0.4.0 is now confirmed against Dolphin's `Interpreter_Integer.cpp`.
+
 ## [0.4.0] - 2026-11-18
 The lifter's first slice: integer code to C++, with every function either lifted or a stub that says why not, all of it compiling and linking, and a differential test against an independent reference interpreter.
 

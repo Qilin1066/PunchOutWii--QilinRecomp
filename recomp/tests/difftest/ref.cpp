@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "qilin/rt/cpu.hpp"
+
 namespace qilin::ref {
 
 using ppc::Op;
@@ -53,6 +55,81 @@ uint32_t mask(unsigned mb, unsigned me) {
 }
 
 }  // namespace
+
+// Floating point, by the manual's operand fields. FPRs are bit patterns here;
+// values go through rt::fp's primitives (see ref.hpp).
+bool step_float(State& s, const ppc::Insn& in) {
+    namespace fp = ::qilin::rt::fp;
+    const uint32_t w = in.word;
+    const unsigned D = bits(w, 6, 10), A = bits(w, 11, 15), B = bits(w, 16, 20), C = bits(w, 21, 25);
+    const auto val = [&](unsigned n) { return fp::from_bits(s.ps0[n]); };
+    const auto ps0 = [&](unsigned n, double v) { s.ps0[n] = fp::bits(v); };
+    const auto both = [&](unsigned n, double v) { s.ps0[n] = s.ps1[n] = fp::bits(v); };
+    const double a = val(A), b = val(B), c = val(C);
+    uint32_t* r = s.gpr;
+    const uint32_t simm = static_cast<uint32_t>(exts16(bits(w, 16, 31)));
+    const uint32_t base = A ? r[A] : 0;
+    switch (in.op) {
+    case Op::fadd: ps0(D, fp::flush(fp::add(a, b))); return true;
+    case Op::fsub: ps0(D, fp::flush(fp::sub(a, b))); return true;
+    case Op::fmul: ps0(D, fp::flush(fp::mul(a, c))); return true;
+    case Op::fdiv: ps0(D, fp::flush(fp::div(a, b))); return true;
+    case Op::fadds: both(D, fp::single(fp::add(a, b))); return true;
+    case Op::fsubs: both(D, fp::single(fp::sub(a, b))); return true;
+    case Op::fmuls: both(D, fp::single(fp::mul(a, fp::round25(c)))); return true;
+    case Op::fdivs: both(D, fp::single(fp::div(a, b))); return true;
+    case Op::fmadd: ps0(D, fp::flush(fp::madd(a, c, b, false))); return true;
+    case Op::fmsub: ps0(D, fp::flush(fp::madd(a, c, b, true))); return true;
+    case Op::fnmadd: ps0(D, fp::neg_unless_nan(fp::flush(fp::madd(a, c, b, false)))); return true;
+    case Op::fnmsub: ps0(D, fp::neg_unless_nan(fp::flush(fp::madd(a, c, b, true)))); return true;
+    case Op::fmadds: both(D, fp::single(fp::madd_single(a, c, b, false))); return true;
+    case Op::fmsubs: both(D, fp::single(fp::madd_single(a, c, b, true))); return true;
+    case Op::fnmadds: both(D, fp::neg_unless_nan(fp::single(fp::madd_single(a, c, b, false)))); return true;
+    case Op::fnmsubs: both(D, fp::neg_unless_nan(fp::single(fp::madd_single(a, c, b, true)))); return true;
+    case Op::frsp: both(D, fp::single(b)); return true;
+    case Op::fres: both(D, fp::estimate_reciprocal(b)); return true;
+    case Op::frsqrte: ps0(D, fp::estimate_rsqrt(b)); return true;
+    case Op::fctiw: ps0(D, fp::to_int(b, false)); return true;
+    case Op::fctiwz: ps0(D, fp::to_int(b, true)); return true;
+    case Op::fmr: s.ps0[D] = s.ps0[B]; return true;
+    case Op::fneg: s.ps0[D] = s.ps0[B] ^ 0x8000000000000000ull; return true;
+    case Op::fabs: s.ps0[D] = s.ps0[B] & 0x7FFFFFFFFFFFFFFFull; return true;
+    case Op::fnabs: s.ps0[D] = s.ps0[B] | 0x8000000000000000ull; return true;
+    case Op::fsel: s.ps0[D] = (a >= -0.0) ? s.ps0[C] : s.ps0[B]; return true;
+    case Op::fcmpu: case Op::fcmpo: set_crf(s, bits(w, 6, 8), fp::compare(a, b)); return true;
+    case Op::lfs: case Op::lfsx: case Op::lfsu: case Op::lfsux: {
+        const bool x = in.op == Op::lfsx || in.op == Op::lfsux, u = in.op == Op::lfsu || in.op == Op::lfsux;
+        const uint32_t ea = (u ? r[A] : base) + (x ? r[B] : simm);
+        both(D, fp::load_single(load(s, ea, 4)));
+        if (u) r[A] = ea;
+        return true;
+    }
+    case Op::lfd: case Op::lfdx: case Op::lfdu: case Op::lfdux: {
+        const bool x = in.op == Op::lfdx || in.op == Op::lfdux, u = in.op == Op::lfdu || in.op == Op::lfdux;
+        const uint32_t ea = (u ? r[A] : base) + (x ? r[B] : simm);
+        s.ps0[D] = uint64_t{load(s, ea, 4)} << 32 | load(s, ea + 4, 4);
+        if (u) r[A] = ea;
+        return true;
+    }
+    case Op::stfs: case Op::stfsx: case Op::stfsu: case Op::stfsux: {
+        const bool x = in.op == Op::stfsx || in.op == Op::stfsux, u = in.op == Op::stfsu || in.op == Op::stfsux;
+        const uint32_t ea = (u ? r[A] : base) + (x ? r[B] : simm);
+        store(s, ea, fp::store_single(val(D)), 4);
+        if (u) r[A] = ea;
+        return true;
+    }
+    case Op::stfd: case Op::stfdx: case Op::stfdu: case Op::stfdux: {
+        const bool x = in.op == Op::stfdx || in.op == Op::stfdux, u = in.op == Op::stfdu || in.op == Op::stfdux;
+        const uint32_t ea = (u ? r[A] : base) + (x ? r[B] : simm);
+        store(s, ea, static_cast<uint32_t>(s.ps0[D] >> 32), 4);
+        store(s, ea + 4, static_cast<uint32_t>(s.ps0[D]), 4);
+        if (u) r[A] = ea;
+        return true;
+    }
+    case Op::stfiwx: store(s, base + r[B], static_cast<uint32_t>(s.ps0[D]), 4); return true;
+    default: return false;
+    }
+}
 
 bool branch_taken(State& s, uint32_t bo, uint32_t bi) {
     // BO bits, IBM numbering 0..4 (bit 0 is the 16s place).
@@ -253,8 +330,9 @@ bool step(State& s, const ppc::Insn& in, uint32_t pc) {
             s.trapped = true;
         return true;
     }
-    default: return false;
+    default: break;
     }
+    return step_float(s, in);
 }
 
 }  // namespace qilin::ref

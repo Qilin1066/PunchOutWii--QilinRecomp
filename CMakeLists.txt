@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.4.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.5.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -35,6 +35,13 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 
 option(QILIN_WERROR "Treat warnings in our own code as errors" OFF)
+
+# Floating point is bit-exact with the guest: the host compiler must not fuse
+# a multiply and an add on its own (Broadway's fmadd family is fused, and is
+# written as std::fma; nothing else is).
+if(NOT MSVC)
+    add_compile_options(-ffp-contract=off)
+endif()
 
 # ---- Warnings for our own targets ----
 add_library(qilin_warnings INTERFACE)
@@ -89,7 +96,7 @@ target_link_libraries(qilin_rt PRIVATE qilin_warnings)
 # ---- Tests (no game files needed) ----
 enable_testing()
 add_executable(qilin_tests recomp/tests/tests.cpp)
-target_link_libraries(qilin_tests PRIVATE qilin_core qilin_warnings)
+target_link_libraries(qilin_tests PRIVATE qilin_core qilin_rt qilin_warnings)
 qilin_tool(qilin_tests)
 add_test(NAME qilin_tests COMMAND qilin_tests)
 

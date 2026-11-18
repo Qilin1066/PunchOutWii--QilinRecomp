@@ -50,6 +50,8 @@ What exists, what each project chose, and what it means for this one (C++23, Vul
 
 **Takeaways:** ground truth for behaviour; we don't copy its code. Where we need a hardware fact that only Dolphin's source records (the `fres`/`frsqrte` tables, for instance), we derive it from hardware documentation or measurement and check it against Dolphin's results, and note the source here.
 
+**Used so far** (v0.5.0, from a checkout of `master` at `438b557`, 2026-11-18): `divw`'s results where the architecture leaves them undefined (`Interpreter_Integer.cpp`), and for floating point the NaN rules, NI flushing, single rounding with frC rounded to 25 bits, the single multiply-add's one rounding, `fctiw`'s result pattern, the bitwise `lfs`/`stfs` conversions and the `fres`/`frsqrte` tables (`Interpreter_FPUtils.h`, `Interpreter_FloatingPoint.cpp`, `Common/FloatUtils.cpp`), plus 57 `frsqrte` input/result pairs from its unit tests as known answers. The tables and test values are numbers measured from the hardware; the code in `runtime/include/qilin/rt/cpu.hpp` is written from these rules, not copied.
+
 ## 9. GNU binutils' `broadway` disassembler
 - `objdump -M broadway,raw` decodes the 750CL's instructions with the paired singles, without simplified mnemonics. It is our decoder's cross-check (`tools/check/verify_decoder.py`). It differs from Broadway in reviewed ways: it leaves out `mftb`, accepts `fsqrt`, `fsqrts`, `tlbia`, `tlbld` and `tlbli` (not on the 750CL), accepts later ISAs' hint fields that are reserved on Broadway, and doesn't check several invalid forms. The full list is in the script.
 
