@@ -11,6 +11,9 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+### Changed
+- **Input is buttons only:** no motion controls and no Balance Board. The game runs its sideways Wii Remote scheme, mapped onto a modern pad or keyboard (`docs/roadmap-and-design-targets.md`).
+
 ## [0.2.0] - 2026-11-18
 Every library in `main.dol` found and its range fixed, without a decomp of this game, and the lift / replace / drop boundary decided per library: 84% of the code lifted, 15% replaced, 1% dropped, with every privileged instruction and every unknown word outside the lifted code.
 

@@ -18,7 +18,7 @@ Roadmap step 1, **analysis**, is in progress; the recompiler core (step 2) has i
 | Every library found, its range fixed, and the lift / replace / drop boundary decided | ✅ 40 ranges from four kinds of evidence (size matches against the Rhythm Heaven Fever decomp, RTTI, SDK version banners, strings), 1,988 SDK and runtime functions named; 84% of the code lifted, 15% replaced, 1% dropped (`docs/code-analysis.md`) |
 | Hardware-access profile, exception tables, timing model | next |
 | Lifter → C++, differential test | later (see roadmap) |
-| Runtime: OS, DVD, NAND, GX on Vulkan, AX audio, Wii Remote / Nunchuk / Balance Board input | later (see roadmap) |
+| Runtime: OS, DVD, NAND, GX on Vulkan, AX audio, input (buttons only: the sideways Wii Remote scheme on a modern pad or keyboard, no motion controls) | later (see roadmap) |
 
 ## Versions and changes
 

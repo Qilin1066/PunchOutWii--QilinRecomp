@@ -86,7 +86,7 @@ The rules are BeatTheBeat-QilinComp's: a library that drives hardware registers 
 
 - **Audiokinetic Wwise** (`80288EB0`–`80311504`, 2,043 functions) and its **silence source plug-in**: lifted. Its mixing, streaming and event timing are the game's audio behaviour, and it reaches the hardware only through replaced APIs: AX for output, and the game's file layer over DVD for banks and streams. The Wii Remote speaker output it drives goes through WPAD.
 - **THP**: lifted. The decoder is pure computation (most of the 424 paired singles); its file reading and audio go through DVD and AX.
-- **WBC** (Balance Board): lifted, like KPAD: calibration and weight maths over the data WPAD delivers. 8 floating-point instructions and no privileged ones.
+- **WBC** (Balance Board): lifted, like KPAD: calibration and weight maths over the data WPAD delivers. 8 floating-point instructions and no privileged ones. The port has no Balance Board (buttons only), but the game still calls WBC, which then sees none connected.
 - **`db`** (debugger hooks): replaced by nothing (there is no debugger); its 2 privileged instructions go with it.
 - **ESP** (e-ticket services over IOS): replaced.
 - **MetroTRK, its `.init` vectors, and NdevExi2A**: dropped. They exist for the development kit's debugger.
