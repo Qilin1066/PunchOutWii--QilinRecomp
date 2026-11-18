@@ -21,7 +21,7 @@
 801E83A8	801EABF0	replace	revolution/esp (e-ticket services)
 801EABF0	801ED3A8	replace	revolution/exi
 801ED3A8	801EEB94	replace	revolution/fs
-801EEB94	801F6754	replace	revolution/gx
+801EEB94	801F6754	lift	revolution/gx
 801F6754	801F8878	replace	revolution/ipc
 801F8878	801FC1E4	lift	revolution/kpad (Wii Remote processing over WPAD)
 801FC1E4	801FD7E0	lift	revolution/mem (heaps)

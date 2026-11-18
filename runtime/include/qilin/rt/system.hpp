@@ -54,6 +54,12 @@ void init(const Program& program);
 // drops: registering a lifted function is a mistake and stops the runtime.
 void provide(std::span<const Provided> replacements);
 
+// Hardware registers (0xCC000000-0xCD00FFFF, the write-gather pipe among
+// them): accesses there go to these. Without them, any access is fatal.
+using MmioRead = uint32_t (*)(Cpu&, uint32_t address, unsigned size);
+using MmioWrite = void (*)(Cpu&, uint32_t address, uint32_t value, unsigned size);
+void set_mmio(MmioRead read, MmioWrite write);
+
 // A Cpu for a new guest thread: zeroed registers, guest memory and the hooks.
 Cpu new_cpu();
 uint8_t* guest_base();

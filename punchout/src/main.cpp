@@ -6,6 +6,7 @@
 
 #include "boot.hpp"
 #include "functions.hpp"
+#include "gpu.hpp"
 #include "threads.hpp"
 
 int main(int argc, char** argv) {
@@ -21,6 +22,7 @@ int main(int argc, char** argv) {
     rt::provide(punchout::vi_replacements());
     rt::provide(punchout::thread_replacements());
     rt::provide(punchout::sc_replacements());
+    punchout::init_gpu();
     punchout::load_game(argv[1]);
     punchout::start_game();
 }

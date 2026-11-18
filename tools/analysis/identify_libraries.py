@@ -81,7 +81,7 @@ PLAN = {
     "revolution/esp (e-ticket services)": ("replace", ""),
     "revolution/exi": ("replace", ""),
     "revolution/fs": ("replace", ""),
-    "revolution/gx": ("replace", ""),
+    "revolution/gx": ("lift", "its command stream is the boundary: the runtime decodes the FIFO, as the engine writes it directly too"),
     "revolution/ipc": ("replace", ""),
     "revolution/kpad (Wii Remote processing over WPAD)": ("lift", ""),
     "revolution/mem (heaps)": ("lift", ""),

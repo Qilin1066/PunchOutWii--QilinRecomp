@@ -39,6 +39,10 @@ bool interrupts_enabled();
 void set_interrupts_enabled(bool on);  // a thread switch restores the new thread's
 bool in_interrupt();                   // inside an interrupt's work
 
+// Raise OS interrupt `n` (__OS_INTERRUPT_*: 17 CP, 18 PE token, 19 PE
+// finish ...): its registered handler runs as an interrupt, if unmasked.
+void raise_interrupt(uint32_t n);
+
 // threads.cpp: after an interrupt's work, switch if it readied a thread of
 // higher priority than the one running.
 void preempt(qilin::rt::Cpu& c);

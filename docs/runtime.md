@@ -1,6 +1,6 @@
 # The runtime (roadmap step 3)
 
-Last updated 2026-11-18 (v0.7.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
+Last updated 2026-11-18 (v0.8.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
 
 ## Building and running
 
@@ -24,11 +24,13 @@ At build time `qilin lift <main.dol> -o build-game/generated --plan data/R7PP01/
 | `80201C50`–`80201CDC` | `OSReport` | It formats through MSL's `vprintf` (lifted). |
 | `8020C674`–`8020C728` | `__init_user`, `__init_cpp`, `exit` | The EABI's constructors and destructors. |
 
-With the plan, the lifter turns every replaced or dropped function into a thunk, `c.hooks->replaced(c, address)`, into the runtime's registry. On the game, **11,350 functions are lifted, 1,944 replaced and 193 dropped, with no stubs: every instruction outside replaced and dropped code is lifted.**
+GX is lifted whole (v0.8.0, `code-analysis.md`): its command stream is the boundary.
+
+With the plan, the lifter turns every replaced or dropped function into a thunk, `c.hooks->replaced(c, address)`, into the runtime's registry. On the game, **11,535 functions are lifted, 1,759 replaced and 193 dropped, with no stubs: every instruction outside replaced and dropped code is lifted.**
 
 ## The guest machine (`runtime/`)
 
-- **Memory:** the 4 GB guest address space is reserved in one block. MEM1 (`0x80000000`, 24 MB), MEM2 (`0x90000000`, 64 MB) and the locked cache (`0xE0000000`, 16 KB) are backed by memory. Lifted code reaches cached MEM1 and MEM2 directly, and everything from `0xC0000000` up through the hooks. There, the uncached mirrors of MEM1 and MEM2 map to the same memory, and the locked cache is plain memory. A hardware register stops the runtime with its address. Nothing is handled there yet, including the GX write-gather pipe at `0xCC008000`.
+- **Memory:** the 4 GB guest address space is reserved in one block. MEM1 (`0x80000000`, 24 MB), MEM2 (`0x90000000`, 64 MB) and the locked cache (`0xE0000000`, 16 KB) are backed by memory. Lifted code reaches cached MEM1 and MEM2 directly, and everything from `0xC0000000` up through the hooks. There, the uncached mirrors of MEM1 and MEM2 map to the same memory, and the locked cache is plain memory. Hardware registers (`0xCC000000`–`0xCD00FFFF`) go to the game's MMIO handlers (`rt::set_mmio`); anything else stops the runtime with its address.
 - **Dispatcher:** an indirect call searches the function table, which is sorted by address. A target that starts no function is fatal.
 - **Registry:** the game's replacements are registered by address (`rt::provide`). Registering an address the plan lifts or drops, or one address twice, is fatal at start-up. A call to a replaced function with nothing registered stops the runtime, naming the function, its library and its caller.
 - **Fatal errors** print the reason and the guest's call stack, walked through the back chain. The exit status is 70.
@@ -80,16 +82,22 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
   - **The retrace:** a timed interrupt at 60 Hz (EuRGB60) from the host clock. It runs the pre- and post-retrace callbacks and wakes the threads in `VIWaitForRetrace`.
   - **Frame buffers:** `VISetNextFrameBuffer` is recorded for the renderer.
 - **Console settings** (`sc.cpp`): 16:9, EuRGB60, English, stereo, a European console. These will become settings.
+- **Interrupt handlers:** `__OSSetInterruptHandler`, `__OSGetInterruptHandler`, `__OSMaskInterrupts` and `__OSUnmaskInterrupts` keep the OS's table and mask. `raise_interrupt(n)` runs a handler as an interrupt; a masked one is dropped for now. Context and shutdown bookkeeping are no-ops, as is the write-gather pipe's address register (its "not yet sent" bit always reads clear).
+
+## The GPU's front end (`gpu.cpp`, v0.8.0)
+
+- **Registers:** the command processor, pixel engine and processor-interface FIFO registers GX touches, and the write-gather pipe (any address in its 32-byte block at `0xCC008000`).
+- **Decoding:** the command processor decodes as the stream arrives. There's no FIFO in guest memory to overflow, so it reads as idle, its read pointer is its write pointer, and the PI's write pointer moves through the CPU FIFO's ring as on hardware.
+- **Commands:** the decoder knows every command (NOP, CP, XF, BP and indexed loads, display-list calls, primitives). It keeps the vertex descriptors and attribute tables it needs to size vertex data, by the hardware's rules as Dolphin documents them. An unknown byte stops the runtime with the bytes around it, because it means the decoder has lost its place.
+- **Interrupts:** draw-done (BP `0x45`) and token commands (`0x47`, `0x48`) raise the pixel engine's finish and token interrupts, which reach GX's own handlers; the token register reads back the last token.
+- **Counting:** every five seconds it logs the draws, vertices, display lists, frame-buffer copies and command bytes it has seen. Drawing them is the renderer's job (next).
 
 ## Where boot stands
 
-The game boots, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, enables the locked cache, sets its error handlers and reads the console settings. It stops at the first GX call, `GXAdjustForOverscan` (`801F26DC`), from the engine's video set-up.
+The game boots, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, enables the locked cache, sets its error handlers and reads the console settings. Then `GXInit` runs, lifted, and its command stream decodes cleanly. The game starts loading its data with `files/art/scripts/flow.dict`, the first file it reads, and that is where boot needs the extracted disc's `files/`.
 
 ## Next
 
-1. **GX (roadmap step 4).**
-   - **Pure GX, lifted:** GX functions that only compute or fill guest structures, such as `GXAdjustForOverscan`, `GXInitTexObj*`, `GXInitLightAttn` and `GXGetTexBufferSize`, will be lifted like the OS's heap code; the plan says which.
-   - **The rest, replaced:** the functions that write the command FIFO will write to a native FIFO.
-   - **The decoder:** the command-stream decoder takes that FIFO, the lifted code's own writes to `0xCC008000` and display lists, and drives Vulkan.
+1. **The renderer (roadmap step 4):** the decoded stream on Vulkan: vertex loading, XF transform and lighting, TEV as generated shaders, textures, EFB copies to the XFB and to textures, presenting the XFB that `VISetNextFrameBuffer` names.
 2. **The rest of the boot path:** AI/AX/DSP (audio, which Wwise drives), WPAD with the button-only input, NAND (saves), the HOME Button Menu's dependencies.
 3. **Tests:** a test of the thread model without the game, using small guest programs built from encoded instructions, like the differential test's.

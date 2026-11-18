@@ -11,6 +11,17 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-18
+GX is lifted whole, and the runtime decodes its command stream: the game brings up its graphics and starts loading data.
+
+### Changed
+- **GX is lifted** instead of replaced. The engine writes GPU commands straight into the FIFO, so the command stream is the boundary: GX's state tracking and register packing stay exactly as shipped (11,535 functions lifted, 1,759 replaced, 193 dropped, 0 stubs; 85% of the code lifted).
+
+### Added
+- **The GPU's front end** (`punchout/src/gpu.cpp`): the CP, PE and PI registers GX uses, the write-gather pipe, and a decoder for the whole command stream (CP, XF and BP loads, indexed loads, display lists, primitives sized from the vertex descriptor and attribute tables), raising the pixel engine's draw-done and token interrupts. An unknown command stops the runtime with the bytes around it.
+- **Hardware registers reach the game layer** through `rt::set_mmio`.
+- **Interrupt handlers and masks** (`__OSSetInterruptHandler`, `__OSUnmaskInterrupts` …), and the write-gather pipe's address register.
+
 ## [0.7.0] - 2026-11-18
 The runtime skeleton: the recompiled game builds from your own `main.dol`, boots as `__start` boots it, runs its static constructors and enters `main`, as far as its first graphics call.
 

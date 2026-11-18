@@ -27,28 +27,36 @@ struct State {
     GuestMemory memory;
     Program program;
     std::vector<Registered> registered;  // sorted by address
+    MmioRead mmio_read = nullptr;
+    MmioWrite mmio_write = nullptr;
 };
 State* g = nullptr;
 
 void vreport(Cpu* c, const char* format, va_list args);
 
 // The uncached mirrors of MEM1 and MEM2 are the same memory, and the locked
-// cache is 16 KB of memory of its own; everything else in the slow range is
-// hardware, which nothing handles yet.
-uint8_t* slow_ptr(Cpu& c, uint32_t a, unsigned size, bool store) {
+// cache is 16 KB of memory of its own; hardware registers go to the MMIO
+// handlers; anything else stops the runtime.
+uint8_t* slow_ptr(Cpu& c, uint32_t a, unsigned size) {
     if ((a >= 0xC0000000u && a + size <= 0xC0000000u + kMem1Size) || (a >= 0xD0000000u && a + size <= 0xD0000000u + kMem2Size))
         return c.mem + (a - 0x40000000u);
     if (a >= kLockedCache && a + size <= kLockedCache + kLockedCacheSize) return c.mem + a;
-    fatal(&c, "%s of %u bytes at %08X: hardware %s isn't handled yet", store ? "store" : "load", size, a,
-          a == 0xCC008000u ? "(the GX write-gather pipe)" : "registers");
+    return nullptr;
 }
+bool is_hardware(uint32_t a) { return a >= 0xCC000000u && a < 0xCD010000u; }
 uint32_t on_read(Cpu& c, uint32_t a, unsigned size) {
-    const uint8_t* p = slow_ptr(c, a, size, false);
-    return size == 1 ? p[0] : size == 2 ? uint32_t{p[0]} << 8 | p[1] : uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3];
+    if (const uint8_t* p = slow_ptr(c, a, size))
+        return size == 1 ? p[0] : size == 2 ? uint32_t{p[0]} << 8 | p[1] : uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3];
+    if (is_hardware(a) && g->mmio_read) return g->mmio_read(c, a, size);
+    fatal(&c, "load of %u bytes from %08X: nothing is there", size, a);
 }
 void on_write(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
-    uint8_t* p = slow_ptr(c, a, size, true);
-    for (unsigned i = 0; i < size; ++i) p[i] = static_cast<uint8_t>(v >> (8 * (size - 1 - i)));
+    if (uint8_t* p = slow_ptr(c, a, size)) {
+        for (unsigned i = 0; i < size; ++i) p[i] = static_cast<uint8_t>(v >> (8 * (size - 1 - i)));
+        return;
+    }
+    if (is_hardware(a) && g->mmio_write) return g->mmio_write(c, a, v, size);
+    fatal(&c, "store of %u bytes (%08X) to %08X: nothing is there", size, v, a);
 }
 void on_call(Cpu& c, uint32_t target) { call(c, target); }
 void on_trap(Cpu& c, uint32_t pc, const char* why) { fatal(&c, "guest trap at %08X: %s", pc, why); }
@@ -124,6 +132,11 @@ void provide(std::span<const Provided> replacements) {
     for (size_t i = 1; i < g->registered.size(); ++i)
         if (g->registered[i - 1].address == g->registered[i].address)
             fatal(nullptr, "%08X is replaced twice (%s, %s)", g->registered[i].address, g->registered[i - 1].name, g->registered[i].name);
+}
+
+void set_mmio(MmioRead read, MmioWrite write) {
+    g->mmio_read = read;
+    g->mmio_write = write;
 }
 
 Cpu new_cpu() {

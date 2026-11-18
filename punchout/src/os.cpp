@@ -107,6 +107,39 @@ void OSRestoreInterrupts(Cpu& c) {
     c.r[3] = was;
 }
 
+// ---- interrupt handlers, by the OS's numbering; a mask bit per interrupt,
+// bit 31 for interrupt 0 (as __OSMaskInterrupts takes it). Masked at boot.
+uint32_t g_handlers[32] = {};
+uint32_t g_mask = 0xFFFFFFFFu;
+void __OSSetInterruptHandler(Cpu& c) {  // (interrupt, handler) -> the previous handler
+    const uint32_t n = c.r[3];
+    if (n >= 32) rt::fatal(&c, "__OSSetInterruptHandler(%u)", n);
+    const uint32_t was = g_handlers[n];
+    g_handlers[n] = c.r[4];
+    c.r[3] = was;
+}
+void __OSGetInterruptHandler(Cpu& c) { c.r[3] = c.r[3] < 32 ? g_handlers[c.r[3]] : 0; }
+void __OSMaskInterrupts(Cpu& c) {  // (mask) -> the mask before
+    const uint32_t was = g_mask;
+    g_mask |= c.r[3];
+    c.r[3] = was;
+}
+void __OSUnmaskInterrupts(Cpu& c) {
+    const uint32_t was = g_mask;
+    g_mask &= ~c.r[3];
+    c.r[3] = was;
+}
+// Contexts: the guest's thread switching is native, so only bookkeeping is left.
+void OSSetCurrentContext(Cpu& c) { rt::poke32(0x800000D4u, c.r[3]); rt::poke32(0x800000C0u, c.r[3] & 0x3FFFFFFFu); }
+void OSClearContext(Cpu&) {}
+void OSRegisterShutdownFunction(Cpu&) {}
+
+// The write-gather pipe's address register: the FIFO is drained as written, so
+// its "data not yet sent" bit (0) always reads clear.
+uint32_t g_wpar = 0;
+void PPCMfwpar(Cpu& c) { c.r[3] = g_wpar & ~1u; }
+void PPCMtwpar(Cpu& c) { g_wpar = c.r[3]; }
+
 // ---- caches: the host's are coherent, so only dcbz's zeroing is left to do.
 void nothing(Cpu&) {}
 void DCZeroRange(Cpu& c) {
@@ -167,6 +200,15 @@ const rt::Provided kReplacements[] = {
     {0x80201070u, "LCStoreBlocks", LCStoreBlocks},
     {0x80201094u, "LCStore", LCStore},
     {0x80201134u, "LCQueueWait", nothing},
+    {0x80205348u, "__OSSetInterruptHandler", __OSSetInterruptHandler},
+    {0x8020535Cu, "__OSGetInterruptHandler", __OSGetInterruptHandler},
+    {0x8020568Cu, "__OSMaskInterrupts", __OSMaskInterrupts},
+    {0x8020570Cu, "__OSUnmaskInterrupts", __OSUnmaskInterrupts},
+    {0x8020161Cu, "OSSetCurrentContext", OSSetCurrentContext},
+    {0x80201844u, "OSClearContext", OSClearContext},
+    {0x80206850u, "OSRegisterShutdownFunction", OSRegisterShutdownFunction},
+    {0x801E1764u, "PPCMfwpar", PPCMfwpar},
+    {0x801E1770u, "PPCMtwpar", PPCMtwpar},
     {0x80209370u, "OSGetTime", OSGetTime},
     {0x80209388u, "OSGetTick", OSGetTick},
 };
@@ -176,6 +218,15 @@ const rt::Provided kReplacements[] = {
 std::span<const rt::Provided> os_replacements() { return kReplacements; }
 
 void post_interrupt(std::function<void(Cpu&)> work) { g_pending.push_back(std::move(work)); }
+
+void raise_interrupt(uint32_t n) {
+    post_interrupt([n](Cpu& c) {
+        if (g_mask & (0x80000000u >> n)) return;  // masked: lost, as nothing re-raises it yet
+        const uint32_t h = g_handlers[n];
+        if (!h) rt::fatal(&c, "interrupt %u has no handler", n);
+        guest_callback(c, h, n, rt::peek32(0x800000D4u));
+    });
+}
 bool interrupts_enabled() { return g_enabled; }
 
 namespace {

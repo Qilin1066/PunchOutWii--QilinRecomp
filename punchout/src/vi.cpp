@@ -5,6 +5,7 @@
 // The rate is 60 Hz: the console's settings report EuRGB60 (sc.cpp), which
 // this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
 #include "boot.hpp"
+#include "gpu.hpp"
 #include "os.hpp"
 #include "threads.hpp"
 
@@ -22,8 +23,23 @@ uint32_t g_pre_cb = 0, g_post_cb = 0;
 uint32_t g_retraces = 0;       // VIGetRetraceCount
 uint64_t g_next_retrace = 0;   // time base of the next retrace
 uint32_t g_next_fb = 0, g_current_fb = 0;
+uint32_t g_frames = 0;  // frame buffers handed over
 bool g_black = true;
 uint32_t g_mode = 0;           // the GXRenderModeObj last configured
+
+// Every five seconds: what the GPU's front end has seen.
+void report() {
+    static Stats last;
+    static uint32_t last_frames = 0;
+    const Stats& s = gpu_stats();
+    rt::log("%u retraces: %u frame buffers shown, %llu draws, %llu vertices, %llu display lists, %llu XFB and %llu texture copies, %llu KB of commands (last 5 s)",
+            g_retraces, g_frames - last_frames, static_cast<unsigned long long>(s.draws - last.draws),
+            static_cast<unsigned long long>(s.vertices - last.vertices), static_cast<unsigned long long>(s.display_lists - last.display_lists),
+            static_cast<unsigned long long>(s.xfb_copies - last.xfb_copies), static_cast<unsigned long long>(s.texture_copies - last.texture_copies),
+            static_cast<unsigned long long>((s.fifo_bytes - last.fifo_bytes) / 1024));
+    last = s;
+    last_frames = g_frames;
+}
 
 // Post a retrace for each one the host clock has passed.
 void poll_retrace() {
@@ -33,6 +49,7 @@ void poll_retrace() {
         g_next_retrace += kRetraceTicks;
         post_interrupt([](Cpu& c) {
             ++g_retraces;
+            if (g_retraces % 300 == 0) report();
             if (g_pre_cb) guest_callback(c, g_pre_cb, g_retraces, 0);
             g_current_fb = g_next_fb;  // VIFlush'd settings take effect at the retrace
             if (g_post_cb) guest_callback(c, g_post_cb, g_retraces, 0);
@@ -67,7 +84,10 @@ void VIWaitForRetrace(Cpu& c) {
 
 void VIConfigure(Cpu& c) { g_mode = c.r[3]; }
 void VIFlush(Cpu&) {}
-void VISetNextFrameBuffer(Cpu& c) { g_next_fb = c.r[3]; }
+void VISetNextFrameBuffer(Cpu& c) {
+    g_next_fb = c.r[3];
+    ++g_frames;
+}
 void VISetBlack(Cpu& c) { g_black = c.r[3] != 0; }
 void VIGetRetraceCount(Cpu& c) { c.r[3] = g_retraces; }
 void VIGetTvFormat(Cpu& c) { c.r[3] = kVI_EURGB60; }

@@ -49,7 +49,7 @@ Words are 4-byte instructions in the library's functions; *fp* counts floating-p
 | revolution/esp (e-ticket services) | `801E83A8`–`801EABF0` | 33 | 13 | 2,578 | 0 | 0 | 0 | replace |
 | revolution/exi | `801EABF0`–`801ED3A8` | 35 | 17 | 2,542 | 0 | 0 | 0 | replace |
 | revolution/fs | `801ED3A8`–`801EEB94` | 29 | 25 | 1,529 | 0 | 0 | 0 | replace |
-| revolution/gx | `801EEB94`–`801F6754` | 185 | 144 | 7,920 | 438 | 78 | 0 | replace |
+| revolution/gx | `801EEB94`–`801F6754` | 185 | 144 | 7,920 | 438 | 78 | 0 | lift (v0.8.0: its command stream is the boundary, see below) |
 | revolution/ipc | `801F6754`–`801F8878` | 37 | 22 | 2,121 | 0 | 0 | 0 | replace |
 | revolution/kpad (Wii Remote processing over WPAD) | `801F8878`–`801FC1E4` | 32 | 9 | 3,675 | 1,367 | 52 | 0 | lift |
 | revolution/mem (heaps) | `801FC1E4`–`801FD7E0` | 22 | 20 | 1,407 | 140 | 4 | 0 | lift |
@@ -70,7 +70,7 @@ Words are 4-byte instructions in the library's functions; *fp* counts floating-p
 | NdevExi2A (development-kit link) | `80288414`–`80288EB0` | 14 | 13 | 678 | 0 | 0 | 0 | drop |
 | Audiokinetic Wwise | `80288EB0`–`80311504` | 2,043 | 0 | 137,403 | 7,666 | 320 | 0 | lift (sound engine on AX) |
 
-Totals in `.text` and the code part of `.init`: **665,671 words lifted (84%)**, 122,469 replaced (15%), 6,892 dropped (1%). Beat the Beat lifts 74%: here Wwise (137,403 words) and Next Level Games' engine take the place of NW4R, and they're lifted.
+Totals in `.text` and the code part of `.init`: **673,591 words lifted (85%)**, 114,549 replaced (14%), 6,892 dropped (1%), with GX lifted (v0.8.0; 665,671, 122,469 and 6,892 before). Beat the Beat lifts 74%: here Wwise (137,403 words) and Next Level Games' engine take the place of NW4R, and they're lifted.
 
 **Boundaries the evidence leaves open**, in functions either way: MetroTRK/MSL ±16 (the size matches put MSL's allocator at `801CA388`; the call evidence alone ties), VI/WBC ±8, NAND/HOME Button Menu ±3, `db`/`dsp` ±2, KPAD/MEM ±2, RFL/NdevExi2A ±2, and ±1 at `base`/`db`, DVD/ESP and SI/THP. The boundary between the game's code and Wwise's silence source plug-in is where the plug-in's first virtual function is; a non-virtual function or two before it could still be the plug-in's. Where an open boundary separates a lifted library from a replaced one (VI/WBC, NAND/HBM, SI/THP), the runtime settles it: an unregistered call into replaced code stops with its address.
 
@@ -78,11 +78,13 @@ Totals in `.text` and the code part of `.init`: **665,671 words lifted (84%)**, 
 
 - **Every privileged instruction is on the replaced or dropped side:** 58 in `.init`'s debugger vectors, 2 in `.init`'s start-up, 2 in `base`, 2 in `db`, 42 in the OS, 51 in MetroTRK, and the 2 `mtmsr` in MetroTRK's exception entries that no function reaches (`dol-analysis.md`). 159 in all, none in lifted code.
 - **No unknown word (`qilin coverage`) is in lifted code:** the debugger stub's name string in `.init` (12) and MetroTRK's exception entries (53) are on the dropped side, and `__init_data`'s tables (36) are data after the start-up code, in no library.
-- **The paired-single code is on the lifted side** (game and engine 2,321, Wwise 320, THP 424, MTX 398, HOME Button Menu 182, KPAD 52, RFL 50 …), except GX's matrix and vertex helpers (78) and the OS's context switch, which saves and restores the paired-single registers (117); both are replaced.
+- **The paired-single code is on the lifted side** (game and engine 2,321, Wwise 320, THP 424, MTX 398, HOME Button Menu 182, KPAD 52, RFL 50 …), GX's matrix and vertex helpers (78) included since GX is lifted, except the OS's context switch, which saves and restores the paired-single registers (117) and is replaced.
 
 ## Why each library is lifted or replaced
 
-The rules are BeatTheBeat-QilinComp's: a library that drives hardware registers or IOS directly is **replaced** at its API (OS, `base`, DVD, VI, AI, AX, DSP, GX, EXI, SI, FS, IPC, NAND, SC, ESP, WPAD, the Bluetooth stack and USB under it); software whose exact behaviour matters more than native speed, reaching the hardware only through a replaced API, is **lifted** (MSL, the EABI runtime, ARC, AXFX, KPAD, MEM, MTX, TPL, the HOME Button Menu, RFL). The libraries this game adds:
+The rules are BeatTheBeat-QilinComp's: a library that drives hardware registers or IOS directly is **replaced** at its API (OS, `base`, DVD, VI, AI, AX, DSP, EXI, SI, FS, IPC, NAND, SC, ESP, WPAD, the Bluetooth stack and USB under it); software whose exact behaviour matters more than native speed, reaching the hardware only through a replaced API, is **lifted** (MSL, the EABI runtime, ARC, AXFX, KPAD, MEM, MTX, TPL, the HOME Button Menu, RFL). **GX is the exception** (v0.8.0): it's lifted whole, and the hardware it drives is emulated instead. The engine writes GPU commands straight into the FIFO (`runtime-analysis.md`), so a decoder for GX's command stream is needed whatever happens to GX; with it, GX's own state tracking and register packing stay exactly as shipped, and the runtime only adds the few registers GX touches (command processor, pixel engine, the FIFO's pointers) and the draw-done and token interrupts. This is how Dolphin treats GX too.
+
+The libraries this game adds:
 
 - **Audiokinetic Wwise** (`80288EB0`–`80311504`, 2,043 functions) and its **silence source plug-in**: lifted. Its mixing, streaming and event timing are the game's audio behaviour, and it reaches the hardware only through replaced APIs: AX for output, and the game's file layer over DVD for banks and streams. The Wii Remote speaker output it drives goes through WPAD.
 - **THP**: lifted. The decoder is pure computation (most of the 424 paired singles); its file reading and audio go through DVD and AX.
