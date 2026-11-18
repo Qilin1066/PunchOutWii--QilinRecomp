@@ -10,13 +10,13 @@
 801C4790	801CA388	drop	MetroTRK (debugger stub)
 801CA388	801DAF34	lift	EABI MSL (C library)
 801DAF34	801DBE54	lift	EABI runtime
-801DBE54	801DC3D8	replace	revolution/ai
+801DBE54	801DC3D8	lift	revolution/ai
 801DC3D8	801DCD50	lift	revolution/arc (U8 archives)
-801DCD50	801E07E8	replace	revolution/ax
+801DCD50	801E07E8	lift	revolution/ax
 801E07E8	801E1688	lift	revolution/axfx (reverb, chorus, delay on the CPU)
 801E1688	801E1820	replace	revolution/base (CPU registers: HID, MMCR …)
 801E1820	801E1890	replace	revolution/db (debugger hooks)
-801E1890	801E2440	replace	revolution/dsp
+801E1890	801E2440	lift	revolution/dsp
 801E2440	801E83A8	replace	revolution/dvd
 801E83A8	801EABF0	replace	revolution/esp (e-ticket services)
 801EABF0	801ED3A8	replace	revolution/exi

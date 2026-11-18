@@ -15,6 +15,7 @@
 // by YAGCD and Dolphin (VideoCommon: OpcodeDecoding.h, CPMemory.h,
 // VertexLoader_*.h, PixelEngine.h; GPL-2.0-or-later; facts only, our code).
 #include "gpu.hpp"
+#include "hw.hpp"
 
 #include <algorithm>
 #include <array>
@@ -318,7 +319,10 @@ void write_reg(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
 }  // namespace
 
 void init_gpu() {
-    rt::set_mmio(read_reg, write_reg);
+    map_mmio({0xCC000000u, 0xCC000080u, "the command processor", read_reg, write_reg});
+    map_mmio({0xCC001000u, 0xCC001080u, "the pixel engine", read_reg, write_reg});
+    map_mmio({0xCC003000u, 0xCC003100u, "the processor interface", read_reg, write_reg});
+    map_mmio({0xCC008000u, 0xCC008020u, "the write-gather pipe", read_reg, write_reg});
     add_timer_source(poll_pe, pe_deadline);
 }
 const Stats& gpu_stats() { return g_stats; }

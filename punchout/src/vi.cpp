@@ -5,6 +5,7 @@
 // The rate is 60 Hz: the console's settings report EuRGB60 (sc.cpp), which
 // this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
 #include "boot.hpp"
+#include "audio.hpp"
 #include "gpu.hpp"
 #include "video.hpp"
 #include "os.hpp"
@@ -40,6 +41,13 @@ void report() {
             static_cast<unsigned long long>((s.fifo_bytes - last.fifo_bytes) / 1024));
     last = s;
     last_frames = g_frames;
+    static AudioStats a_last;
+    const AudioStats& a = audio_stats();
+    rt::log("  sound: %llu DMA buffers, %llu command lists, %llu voice-frames, %llu mails in and %llu out",
+            static_cast<unsigned long long>(a.dma_periods - a_last.dma_periods), static_cast<unsigned long long>(a.command_lists - a_last.command_lists),
+            static_cast<unsigned long long>(a.voices - a_last.voices), static_cast<unsigned long long>(a.mails_in - a_last.mails_in),
+            static_cast<unsigned long long>(a.mails_out - a_last.mails_out));
+    a_last = a;
 }
 
 // Post a retrace for each one the host clock has passed.

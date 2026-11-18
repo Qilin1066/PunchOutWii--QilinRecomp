@@ -12,6 +12,7 @@
 #include "decoder.hpp"
 #include "dol.hpp"
 #include "lift.hpp"
+#include "idle.hpp"
 #include "qilin/rt/cpu.hpp"
 #include "sha256.hpp"
 
@@ -791,6 +792,35 @@ void test_cfg_switches() {
 
 }  // namespace
 
+
+// Poll loops (idle.hpp): waiting on memory, not scanning it.
+void test_poll_loops() {
+    using namespace qilin;
+    const auto loop = [](std::initializer_list<uint32_t> words) {
+        std::vector<std::pair<uint32_t, ppc::Insn>> v;
+        uint32_t a = 0x80001000;
+        for (uint32_t w : words) v.emplace_back(a, ppc::decode(w)), a += 4;
+        return poll_loop(v, 0x80001000, a - 4, [](uint32_t, RegEffects&) { return false; });
+    };
+    // lwz r0,-14408(r13); cmpwi r0,0; beq back: waits for a flag.
+    CHECK(loop({0x800DC7B8, 0x2C000000, 0x4182FFF8}));
+    // A local kept on its own frame doesn't change that: + stw r0,8(r1).
+    CHECK(loop({0x800DC7B8, 0x90010008, 0x2C000000, 0x4082FFF4}));
+    // lbzu r0,1(r3); cmpwi; bne back: a scan (r3 advances).
+    CHECK(!loop({0x8C030001, 0x2C000000, 0x4082FFF8}));
+    // lbz r0,0(r3); addi r3,r3,1; cmpwi; bne back: the same scan, spelt out.
+    CHECK(!loop({0x88030000, 0x38630001, 0x2C000000, 0x4082FFF4}));
+    // A store anywhere but the frame: stw r0,0(r4).
+    CHECK(!loop({0x800DC7B8, 0x90040000, 0x2C000000, 0x4082FFF4}));
+    // A list walk through a local: lwz r5,8(r1); lwz r4,0(r5); stw r4,8(r1); cmpwi; bne back.
+    CHECK(!loop({0x80A10008, 0x80850000, 0x90810008, 0x2C000000, 0x4082FFF0}));
+    // A list walk where the write to r3 is on another path: cmpwi r31,0; bne +12;
+    // li r3,1; b out; lwz r3,0(r3); cmpwi r3,0; bne back.
+    CHECK(!loop({0x2C1F0000, 0x4082000C, 0x38600001, 0x48000014, 0x80630000, 0x2C030000, 0x4082FFE8}));
+    // bdnz counts down CTR: a delay loop, not a poll.
+    CHECK(!loop({0x800DC7B8, 0x4200FFF8}));
+}
+
 int main() {
     test_sha256();
     test_dol();
@@ -799,6 +829,7 @@ int main() {
     test_cfg_switches();
     test_lift();
     test_fp();
+    test_poll_loops();
     if (failures) {
         std::println(stderr, "{} check(s) failed", failures);
         return 1;

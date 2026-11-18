@@ -4,7 +4,7 @@
 //
 // The guest runs on threads of its own (threads.cpp); this thread owns the
 // window: it handles its events and shows each frame the guest hands over.
-// --headless runs without a window (for testing).
+// --headless runs without a window or sound (for testing).
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -14,8 +14,10 @@
 
 #include "boot.hpp"
 #include "functions.hpp"
-#include "gpu.hpp"
+#include "audio.hpp"
+#include "hw.hpp"
 #include "input.hpp"
+#include "qilin/host/audio.hpp"
 #include "qilin/host/display.hpp"
 #include "threads.hpp"
 #include "video.hpp"
@@ -42,7 +44,7 @@ int main(int argc, char** argv) {
     rt::provide(punchout::sc_replacements());
     rt::provide(punchout::wpad_replacements());
     rt::provide(punchout::nand_replacements());
-    punchout::init_gpu();
+    punchout::init_hardware();
     punchout::load_game(folder);
 
     std::unique_ptr<qilin::host::Display> display;
@@ -51,6 +53,13 @@ int main(int argc, char** argv) {
         o.title = "Punch-Out!!";
         display = std::make_unique<qilin::host::Display>(o);
         rt::log("drawing with %s", display->device_name().c_str());
+    }
+    std::unique_ptr<qilin::host::AudioOut> audio;
+    if (!headless) {
+        audio = std::make_unique<qilin::host::AudioOut>();
+        punchout::set_audio_sink([](const int16_t* lr, size_t frames, unsigned rate, void* out) {
+            static_cast<qilin::host::AudioOut*>(out)->push(lr, frames, rate);
+        }, audio.get());
     }
     punchout::run_on_host_thread([](void*) { punchout::start_game(); }, nullptr);
 

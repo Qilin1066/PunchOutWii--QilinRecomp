@@ -6,7 +6,7 @@ A static recompilation of **Punch-Out!!** (Next Level Games / Nintendo, Wii, 200
 
 ## Status
 
-Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime (step 3) boots the game into `main`, up to its first graphics call.
+Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime (step 3) runs the game's front end with sound; nothing is drawn yet (step 4).
 
 | Piece | State |
 |---|---|
@@ -18,8 +18,8 @@ Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime
 | Every library found, its range fixed, and the lift / replace / drop boundary decided | ✅ 40 ranges from four kinds of evidence (size matches against the Rhythm Heaven Fever decomp, RTTI, SDK version banners, strings), 1,988 SDK and runtime functions named; 84% of the code lifted, 15% replaced, 1% dropped (`docs/code-analysis.md`) |
 | Hardware-access profile, exception tables, timing model | ✅ lifted code touches no hardware register or uncached mirror, but writes the GX FIFO directly (803 stores in the engine's mesh drawers), so the FIFO decoder is required; no C++ exception can be thrown; one frame per retrace, gameplay driven by a time step in seconds (`docs/runtime-analysis.md`) |
 | Lifter → C++, differential test | ✅ integer code, floating point and paired singles with GQR quantisation (bit-exact with Broadway: NI mode, NaN rules, single rounding, the estimate tables): 13,392 of 13,487 functions (99.3%) lifted, every one in the libraries we lift; the 95 stubs, all in code we replace or drop, trap with the reason; all of it compiles and links; 323,904 differential runs against an independent reference interpreter and known-answer tests from hardware data, 0 differences (`docs/recompiler-core.md`) |
-| Runtime skeleton: the game built from your own `main.dol`, booted as `__start` boots it, a replacement registry that names anything missing; OS (threads, mutexes, message queues, alarms, interrupts, time, locked cache), DVD from the extracted disc, VI's retrace, console settings | 🔨 boots, runs the static constructors, enters `main` and brings up GX (lifted whole, its command stream decoded by the runtime); needs the extracted disc's `files/` from there (`docs/runtime.md`) |
-| GX on Vulkan, AX audio, NAND saves, input (buttons only: the sideways Wii Remote scheme on a modern pad or keyboard, no motion controls) | later (see roadmap) |
+| Runtime skeleton: the game built from your own `main.dol`, booted as `__start` boots it, a replacement registry that names anything missing; OS (threads, mutexes, message queues, alarms, interrupts, time, locked cache), DVD from the extracted disc, VI's retrace, console settings | ✅ runs the front end at 59 frames a second from the extracted disc: GX lifted with its command stream decoded, NAND saves, input, and sound (AI/AX/DSP lifted, the DSP's AX microcode emulated, out through SDL3) (`docs/runtime.md`) |
+| GX on Vulkan (the renderer) | next (see roadmap) |
 
 ## Versions and changes
 
@@ -99,7 +99,7 @@ This compares the decoder with GNU objdump (`-M broadway,raw`): mnemonic and eve
 - **Efficiency and reliability come first.** Every choice is judged by whether it makes the game cheaper to run on low-end hardware, and whether it fails loudly instead of misbehaving quietly.
 - **Static recompilation, PowerPC → C++, compiled ahead of time.** No interpreter, no JIT, no emulator underneath. Hand-written C++ can override any lifted function.
 - **Vulkan 1.3 only.** GX is translated at API level to Vulkan, with a deliberately small baseline feature set (1.3 core plus what the Pi 4's driver offers) so one render path runs on everything from low-end ARM GPUs upwards. macOS runs through MoltenVK.
-- **The SDK's hardware-facing libraries are replaced natively**, not recompiled: OS, GX, AI/AX/DSP, DVD, VI, WPAD (with the Bluetooth stack under it), NAND. The C/C++ runtime, the SDK's pure-software libraries (KPAD and WBC, the Balance Board's, among them), THP, the HOME Button Menu, Audiokinetic Wwise and Next Level Games' engine are lifted with the game, for exact behaviour.
+- **The SDK's hardware-facing libraries are replaced natively**, not recompiled: OS, DVD, VI, WPAD (with the Bluetooth stack under it), NAND. GX, AI, AX and DSP are lifted, with the GPU's command stream and the DSP's AX microcode emulated under them. The C/C++ runtime, the SDK's pure-software libraries (KPAD and WBC, the Balance Board's, among them), THP, the HOME Button Menu, Audiokinetic Wwise and Next Level Games' engine are lifted with the game, for exact behaviour.
 - **Ground truth is Dolphin** running the original game, reaction timing included: cue-to-attack timing and dodge windows are behaviour in Punch-Out!!.
 
 See `docs/` for the full roadmap and the analysis notes.

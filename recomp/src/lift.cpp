@@ -1,4 +1,5 @@
 #include "lift.hpp"
+#include "idle.hpp"
 
 #include <algorithm>
 #include <format>
@@ -243,6 +244,15 @@ private:
         out = std::format("{} {}(c); return;", sync_out(), fn_name(target));
         return true;
     }
+    // A poll loop's back edge calls hooks->idle (idle.hpp).
+    bool idle_loop(uint32_t pc, uint32_t target) const {
+        if (!f_.pure_call) return false;
+        return poll_loop(f_.insns, target, pc, f_.pure_call);
+    }
+    std::string idle_then(uint32_t target) {
+        return std::format("{{ {} c.hooks->idle(c); {} goto L_{:08X}; }}", sync_out(), sync_in(), target);
+    }
+
     std::string call_to(uint32_t target) {
         callees_.insert(target);
         return std::format("{} {}(c); {}", sync_out(), fn_name(target), sync_in());
@@ -495,7 +505,7 @@ private:
                 return true;
             }
             if (present_.contains(t)) {
-                line(std::format("goto L_{:08X};", t));
+                line(idle_loop(pc, t) ? idle_then(t) : std::format("goto L_{:08X};", t));
                 return true;
             }
             std::string s;
@@ -521,7 +531,8 @@ private:
                 return true;
             }
             if (present_.contains(t)) {
-                line(std::format("{}if ({}) goto L_{:08X};", pre, cond, t));
+                if (idle_loop(pc, t)) line(std::format("{}if ({}) {}", pre, cond, idle_then(t)));
+                else line(std::format("{}if ({}) goto L_{:08X};", pre, cond, t));
                 return true;
             }
             std::string s;
@@ -711,6 +722,16 @@ LiftInput lift_input(const Cfg& cfg, const Function& f) {
     in.falls_into = f.falls_into;
     const auto& fs = cfg.functions();
     in.is_function = [&fs](uint32_t a) { return fs.contains(a); };
+    in.pure_call = [&cfg](uint32_t target, RegEffects& e) {
+        const FunctionInsns code = [&cfg](uint32_t start) {
+            std::vector<std::pair<uint32_t, Insn>> v;
+            const auto it = cfg.functions().find(start);
+            if (it != cfg.functions().end())
+                for (uint32_t a : it->second.insns) v.emplace_back(a, cfg.insn(a));
+            return v;
+        };
+        return pure_function(target, code, e);
+    };
     return in;
 }
 

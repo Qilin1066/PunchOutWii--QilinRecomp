@@ -32,6 +32,7 @@ struct CpuHooks {
     void (*call)(Cpu&, uint32_t target);  // bctrl / bctr / blrl to a computed address
     void (*trap)(Cpu&, uint32_t pc, const char* why);  // must not return
     void (*replaced)(Cpu&, uint32_t function);         // a function the plan replaces or drops was called
+    void (*idle)(Cpu&);  // the back edge of a poll loop: a chance for interrupts to arrive (registers written back)
 };
 
 struct Cpu {

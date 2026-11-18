@@ -2,9 +2,11 @@
 // interrupts, caches, time. Arguments arrive in r3..., results go in r3 (and
 // r4 for 64-bit values), as the EABI passes them.
 #include "os.hpp"
+#include "audio.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -136,14 +138,18 @@ void __OSSetInterruptHandler(Cpu& c) {  // (interrupt, handler) -> the previous 
     c.r[3] = was;
 }
 void __OSGetInterruptHandler(Cpu& c) { c.r[3] = c.r[3] < 32 ? g_handlers[c.r[3]] : 0; }
+// The OS keeps the devices' own enables in step with its mask: for the DSP
+// group (5 AI DMA, 6 ARAM, 7 DSP) those are bits of the DSP control register.
 void __OSMaskInterrupts(Cpu& c) {  // (mask) -> the mask before
     const uint32_t was = g_mask;
     g_mask |= c.r[3];
+    dsp_interrupt_enables(g_mask);
     c.r[3] = was;
 }
 void __OSUnmaskInterrupts(Cpu& c) {
     const uint32_t was = g_mask;
     g_mask &= ~c.r[3];
+    dsp_interrupt_enables(g_mask);
     c.r[3] = was;
 }
 // Contexts: the guest's thread switching is native, so only bookkeeping is left.
@@ -240,18 +246,21 @@ std::span<const rt::Provided> os_replacements() { return kReplacements; }
 
 void post_interrupt(std::function<void(Cpu&)> work) { g_pending.push_back(std::move(work)); }
 
+bool call_interrupt_handler(Cpu& c, uint32_t n) {
+    if (g_mask & (0x80000000u >> n)) return false;
+    const uint32_t h = g_handlers[n];
+    if (!h) rt::fatal(&c, "interrupt %u has no handler", n);
+    guest_callback(c, h, n, rt::peek32(0x800000D4u));
+    return true;
+}
 void raise_interrupt(uint32_t n) {
     post_interrupt([n](Cpu& c) {
-        if (g_mask & (0x80000000u >> n)) {  // masked: lost, as nothing re-raises it yet
+        if (!call_interrupt_handler(c, n))  // masked: lost, as nothing re-raises it yet
             rt::log("interrupt %u arrived masked and was dropped", n);
-            return;
-        }
-        const uint32_t h = g_handlers[n];
-        if (!h) rt::fatal(&c, "interrupt %u has no handler", n);
-        guest_callback(c, h, n, rt::peek32(0x800000D4u));
     });
 }
 bool interrupts_enabled() { return g_enabled; }
+uint32_t interrupt_mask() { return g_mask; }
 
 namespace {
 const auto g_boot = std::chrono::steady_clock::now();
@@ -294,6 +303,20 @@ bool run_pending(Cpu& c) {
 void deliver_interrupts(Cpu& c) {
     if (!g_enabled || g_in_interrupt) return;
     if (run_pending(c)) preempt(c);
+}
+
+void poll_loop(Cpu& c) {
+    if (g_enabled && !g_in_interrupt) {
+        if (run_pending(c)) {
+            preempt(c);
+            return;
+        }
+    } else {
+        for (const auto& timer : g_timers) timer.poll();  // the hardware's state moves on; delivery waits
+    }
+    // Nothing came: wait for the next timed event, a millisecond at most, rather than spin.
+    const uint64_t now = time_base(), next = std::min(next_timer_deadline(), now + kTimerHz / 1000);
+    if (next > now) std::this_thread::sleep_for(std::chrono::nanoseconds((next - now) * 4000 / 243));
 }
 
 bool deliver_interrupts_idle(Cpu& c) {

@@ -35,13 +35,20 @@ void deliver_interrupts(qilin::rt::Cpu& c);
 // that runs while every thread is blocked. True if anything ran.
 bool deliver_interrupts_idle(qilin::rt::Cpu& c);
 bool has_pending_interrupts();
+// The back edge of a lifted poll loop (rt::set_idle): deliver what's due, or
+// sleep until the next timed event (a millisecond at most).
+void poll_loop(qilin::rt::Cpu& c);
 bool interrupts_enabled();
+uint32_t interrupt_mask();  // the OS's: bit 31-n set masks interrupt n
 void set_interrupts_enabled(bool on);  // a thread switch restores the new thread's
 bool in_interrupt();                   // inside an interrupt's work
 
 // Raise OS interrupt `n` (__OS_INTERRUPT_*: 17 CP, 18 PE token, 19 PE
 // finish ...): its registered handler runs as an interrupt, if unmasked.
 void raise_interrupt(uint32_t n);
+// Inside an interrupt's work: run OS interrupt `n`'s handler now. False if
+// the OS has it masked (nothing ran). For level-triggered sources (the DSP).
+bool call_interrupt_handler(qilin::rt::Cpu& c, uint32_t n);
 
 // threads.cpp: after an interrupt's work, switch if it readied a thread of
 // higher priority than the one running.

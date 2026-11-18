@@ -60,6 +60,12 @@ using MmioRead = uint32_t (*)(Cpu&, uint32_t address, unsigned size);
 using MmioWrite = void (*)(Cpu&, uint32_t address, uint32_t value, unsigned size);
 void set_mmio(MmioRead read, MmioWrite write);
 
+// Lifted poll loops (a branch back over only loads and compares) call this on
+// every pass, with the registers written back: where interrupts can arrive.
+// Without one, they spin.
+using IdleHook = void (*)(Cpu&);
+void set_idle(IdleHook hook);
+
 // A Cpu for a new guest thread: zeroed registers, guest memory and the hooks.
 Cpu new_cpu();
 uint8_t* guest_base();

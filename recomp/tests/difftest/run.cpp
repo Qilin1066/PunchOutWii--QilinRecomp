@@ -46,7 +46,7 @@ void on_replaced(rt::Cpu&, uint32_t f) {
     std::println(stderr, "difftest: unexpected call to replaced function {:08X}", f);
     std::abort();
 }
-const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap, on_replaced};
+const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap, on_replaced, [](rt::Cpu&) {}};
 
 bool memory_op(ppc::Op op) {
     const auto f = ppc::spec(op).flags;

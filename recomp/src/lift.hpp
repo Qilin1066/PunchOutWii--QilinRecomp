@@ -19,6 +19,7 @@
 
 #include "cfg.hpp"
 #include "decoder.hpp"
+#include "idle.hpp"
 
 namespace qilin {
 
@@ -29,6 +30,8 @@ struct LiftInput {
     std::set<uint32_t> not_calls;                       // `bl` to the next instruction (reads the PC)
     uint32_t falls_into = 0;                            // the next function, if execution runs into it
     std::function<bool(uint32_t)> is_function;          // a known function start (tail and call targets)
+    // A call target that is pure (idle.hpp), with its effects: lets poll loops call getters.
+    std::function<bool(uint32_t, RegEffects&)> pure_call;
 };
 
 struct Lifted {

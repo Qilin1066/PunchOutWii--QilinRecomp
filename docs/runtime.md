@@ -121,23 +121,35 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **GPU latency:** the game relies on the GPU being behind. It writes draw-done, installs the callback for it, then waits. So these interrupts come 50 µs after the command is decoded, as timed events. Dolphin likewise schedules them at least 500 CPU cycles out.
 - **Counting:** every five seconds it logs the draws, vertices, display lists, frame-buffer copies and command bytes it has seen. Drawing them is the renderer's job (next).
 
+## Hardware registers (`hw.cpp`, v0.12.0)
+
+Each device maps its own ranges of `0xCC000000`-`0xCD00FFFF` (the GPU's CP, PE, PI and write-gather pipe; the DSP; the audio interface). An access outside every range is fatal and names the address.
+
+## Sound (`dsp.cpp`, `ax.cpp`, v0.12.0)
+
+AI, AX and DSP are lifted; the hardware under them is emulated.
+- **The DSP's registers:** the mailboxes both ways, the control register (reset, halt, init, the three interrupt flags with their enables, written 1 to clear), the audio DMA (source, length in 32-byte blocks, blocks left). The interrupt is a level, as on hardware: while a flag is set with its enable, the OS's handler for it runs (5 AI DMA, 6 ARAM, 7 DSP), again until it's acknowledged. The OS's own mask functions set those enables, as the real OS does.
+- **The microcode:** the DSP starts in its ROM's task loader, which takes the uploaded program's address, length and start by mail. The program is identified by its hash; three Wii AX versions are known (they differ in command numbering and parameter-block layout), and an unknown one is fatal. Punch-Out!! boots `4CC52064`.
+- **AX at a high level** (`ax.cpp`): the mail protocol (`0xBABE` + length, then the list's address; `DSP_SYNC` after the output, `DSP_YIELD` at the end, then the task manager's resume or continue), and every command: buffer setup, the voice list, aux send and return, the compressor, the output (96 stereo samples, every 3 ms), the Wii Remote speakers' buses. For each voice: the accelerator reads ADPCM, PCM8 or PCM16 from memory with its loop rules; a sample-rate converter (polyphase if `dsp_coef.bin`, a dump of the DSP ROM's table, is in the user folder, else linear); the volume envelope, low-pass and biquad filters; per-bus volumes with ramps. Formats, arithmetic and order are Dolphin's facts; the code is ours.
+- **The audio DMA** is the clock: 8 samples a block at the AI's rate (32 kHz). When a buffer has played it reloads and raises the AI DMA flag; AX answers by queueing the next buffer and sending the next command list, so the DMA paces all of the sound. Its samples go to SDL3 (`host/audio.hpp`); more than 150 ms queued is dropped, and if the guest falls 100 ms behind the clock skips ahead.
+- **The AI's registers:** the control (rates, the sample counter running), volume, the sample counter. Its sample-counter interrupt is fatal if enabled; nothing does yet.
+
+## Poll loops (v0.12.0)
+
+Code that waits for an interrupt by spinning, as in `while (flag == 0) {}` or `while (RFLGetAsyncStatus() == BUSY) {}`, would never see it, because interrupts arrive at safe points. The lifter finds such loops (`recomp/src/idle.*`): a loop is a poll when no pass can tell itself from the last. It may only load, compute into registers, store into its own stack frame, and call pure getters. Nothing may be carried from one pass to the next, in registers or stack slots, on any path. Their back edges call the runtime's idle hook, which delivers what's due or sleeps until the next timed event (at most 1 ms). In this game: the DSP mailbox waits, AX's start-up and the Mii library's status loops (49 back edges, 11 functions). A scan such as `while (*p++)` isn't one, and the unit tests say so.
+
 ## Where boot stands
 
-The game boots, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, enables the locked cache, sets its error handlers and reads the console settings. Then `GXInit` runs, lifted, and its command stream decodes cleanly. With the extracted disc's `files/`, it then:
-- loads its scripts and global data on its loader thread;
-- sets up the front end;
-- brings up WPAD and KPAD.
+The game boots, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, enables the locked cache, sets its error handlers and reads the console settings. `GXInit` runs, lifted, and its command stream decodes cleanly. It loads its scripts and global data, sets up the front end, brings up WPAD and KPAD, opens the save system, runs its frame loop and shows its boot flow. Then:
+- Wwise starts AX; the DSP boots the AX microcode and mixes every 3 ms;
+- the HOME Button Menu loads its archives and sounds;
+- the Mii library reads its database;
+- the front end runs: 59 frames a second, about 900 draws and 15,000 vertices a second, with sound playing.
 
-Then it:
-- opens the save system (NAND);
-- runs its frame loop (draw-done, the retrace callbacks);
-- shows its boot flow (`game: BootFlowScreen, disabling DPD 0`);
-- loads its front-end screens.
-
-It stops at audio: Wwise asks whether the audio interface is up (`AICheckInit`, `801DBF74`).
+It runs until closed. What's on screen is the next step: nothing is drawn yet.
 
 ## Next
 
 1. **The renderer (roadmap step 4):** the decoded stream on Vulkan: vertex loading, XF transform and lighting, TEV as generated shaders, textures, EFB copies to the XFB and to textures, presenting the XFB that `VISetNextFrameBuffer` names.
-2. **The rest of the boot path:** AI/AX/DSP (audio, which Wwise drives: AX's voices mixed natively, out through SDL3), the HOME Button Menu's dependencies.
+2. **The rest of the game's paths:** what the menus, fights and movies reach that the front end doesn't.
 3. **Tests:** a test of the thread model without the game, using small guest programs built from encoded instructions, like the differential test's.

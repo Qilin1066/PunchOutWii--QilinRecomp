@@ -78,7 +78,12 @@ void on_replaced(Cpu& c, uint32_t f) {
           e != rep.end() && e->address == f ? e->library : "?", c.lr);
 }
 
-const CpuHooks kHooks{on_read, on_write, on_call, on_trap, on_replaced};
+IdleHook g_idle = nullptr;
+void on_idle(Cpu& c) {
+    if (g_idle) g_idle(c);
+}
+
+const CpuHooks kHooks{on_read, on_write, on_call, on_trap, on_replaced, on_idle};
 
 bool in_ram(uint32_t a, uint32_t n) {
     return (a >= kMem1 && a - kMem1 + n <= kMem1Size) || (a >= kMem2 && a - kMem2 + n <= kMem2Size);
@@ -139,6 +144,7 @@ void provide(std::span<const Provided> replacements) {
             fatal(nullptr, "%08X is replaced twice (%s, %s)", g->registered[i].address, g->registered[i - 1].name, g->registered[i].name);
 }
 
+void set_idle(IdleHook hook) { g_idle = hook; }
 void set_mmio(MmioRead read, MmioWrite write) {
     g->mmio_read = read;
     g->mmio_write = write;

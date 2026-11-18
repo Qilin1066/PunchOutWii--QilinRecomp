@@ -11,6 +11,22 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-18
+Sound, and the front end running: past audio start-up, the game reaches its menus at 59 frames a second, mixing sound every 3 ms.
+
+### Added
+- **Sound** (`punchout/src/dsp.cpp`, `ax.cpp`, `host/audio.*`): AI, AX and DSP are lifted. The runtime emulates the DSP (registers, mailboxes, the level-triggered interrupt, the ROM's task loader, the audio DMA) and runs the AX microcode the game boots at a high level, after Dolphin's documentation of it:
+  - command lists, voices (ADPCM, PCM8, PCM16, loops, resampling, envelope, low-pass and biquad filters, ramps);
+  - aux buses, the compressor, output.
+  - Out through SDL3 at 32 kHz. Polyphase resampling needs the DSP ROM's table as `dsp_coef.bin` in the user folder; without it, linear.
+- **The audio interface's registers:** rates, volume, the sample counter.
+- **Hardware registers by device** (`hw.cpp`): each device maps its ranges; anything else is fatal.
+- **Poll loops** (`recomp/src/idle.*`): loops that wait on memory call the runtime's idle hook on their back edge, where interrupts arrive and an idle wait sleeps. The lifter tells them from scans by dataflow over registers and stack slots, with unit tests.
+
+### Changed
+- The OS's interrupt mask functions set the DSP control register's interrupt enables, as the real OS does.
+- The five-second stats line reports sound: DMA buffers, command lists, voices, mails.
+
 ## [0.11.0] - 2026-11-18
 Saves, and the game's frame loop: it shows its boot flow and loads its front end, up to audio.
 
