@@ -17,7 +17,7 @@ Roadmap step 1, **analysis**, is in progress; the recompiler core (step 2) has i
 | What's linked in: Revolution SDK `0x4199_60831`, MSL, MetroTRK, HOME Button Menu, Audiokinetic Wwise, Next Level Games' engine | ✅ from their strings (`docs/dol-analysis.md`) |
 | Every library found, its range fixed, and the lift / replace / drop boundary decided | ✅ 40 ranges from four kinds of evidence (size matches against the Rhythm Heaven Fever decomp, RTTI, SDK version banners, strings), 1,988 SDK and runtime functions named; 84% of the code lifted, 15% replaced, 1% dropped (`docs/code-analysis.md`) |
 | Hardware-access profile, exception tables, timing model | ✅ lifted code touches no hardware register or uncached mirror, but writes the GX FIFO directly (803 stores in the engine's mesh drawers), so the FIFO decoder is required; no C++ exception can be thrown; one frame per retrace, gameplay driven by a time step in seconds (`docs/runtime-analysis.md`) |
-| Lifter → C++, differential test | later (see roadmap) |
+| Lifter → C++, differential test | 🔨 slice 1, integer code: 10,917 of 13,487 functions (80.9%) lifted, the rest stubs that trap with the reason (2,455 wait for floating point); all of it compiles and links; 197,952 differential runs against an independent reference interpreter, 0 differences (`docs/recompiler-core.md`) |
 | Runtime: OS, DVD, NAND, GX on Vulkan, AX audio, input (buttons only: the sideways Wii Remote scheme on a modern pad or keyboard, no motion controls) | later (see roadmap) |
 
 ## Versions and changes
@@ -55,6 +55,7 @@ build/qilin disasm  words.bin [--base 0x80004000]         # a file of big-endian
 build/qilin cfg     path/to/main.dol [--json cfg.json]    # function discovery + control flow, summary
 build/qilin coverage path/to/main.dol [--list]            # every word: code, padding, dead or unknown (exit 3 if any unknown)
 build/qilin suspects path/to/main.dol                     # functions with problems, and rejected starts, for review
+build/qilin lift    path/to/main.dol -o generated         # every function as C++ (or a stub saying why not); keep out of git
 ```
 
 ### Libraries
@@ -84,8 +85,9 @@ This compares the decoder with GNU objdump (`-M broadway,raw`): mnemonic and eve
 
 | Path | What |
 |---|---|
-| `recomp/src/` | Recompiler core: `dol` loader, `sha256`, `decoder` (Broadway), `cfg` (function discovery + control flow), `main` (CLI) |
-| `recomp/tests/` | Unit tests on a synthetic in-memory DOL, the decoder and synthetic programs, so they need no game files |
+| `recomp/src/` | Recompiler core: `dol` loader, `sha256`, `decoder` (Broadway), `cfg` (function discovery + control flow), `lift` (the lifter), `main` (CLI) |
+| `recomp/tests/` | Unit tests on a synthetic in-memory DOL, the decoder and synthetic programs, so they need no game files; `difftest/`: the lifter's differential test (case generator, reference interpreter, runner) |
+| `runtime/` | What the lifted code runs on: the guest CPU state and memory access (`include/qilin/rt/cpu.hpp`), the 4 GB guest address space (`memory.*`) |
 | `tools/check/` | The decoder cross-check against GNU objdump |
 | `tools/analysis/` | `identify_libraries.py`: the libraries in `main.dol`, their ranges and the boundary; `hardware_access.py`: every hardware, FIFO and mirror access, by library |
 | `third_party/rhf/` | The Rhythm Heaven Fever decomp's symbols and splits (CC0), for the libraries both games share |

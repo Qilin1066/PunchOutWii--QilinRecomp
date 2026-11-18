@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.3.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.4.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -70,6 +70,7 @@ add_library(qilin_core STATIC
     recomp/src/dol_json.cpp
     recomp/src/decoder.cpp
     recomp/src/cfg.cpp
+    recomp/src/lift.cpp
 )
 target_include_directories(qilin_core PUBLIC recomp/src)
 target_link_libraries(qilin_core PUBLIC qilin_dol PRIVATE qilin_warnings)
@@ -80,9 +81,39 @@ target_link_libraries(qilin PRIVATE qilin_core qilin_warnings)
 qilin_tool(qilin)
 target_compile_definitions(qilin PRIVATE QILIN_VERSION="${PROJECT_VERSION}")
 
+# ---- Runtime (what players run: no std::format) ----
+add_library(qilin_rt STATIC runtime/src/memory.cpp)
+target_include_directories(qilin_rt PUBLIC runtime/include)
+target_link_libraries(qilin_rt PRIVATE qilin_warnings)
+
 # ---- Tests (no game files needed) ----
 enable_testing()
 add_executable(qilin_tests recomp/tests/tests.cpp)
 target_link_libraries(qilin_tests PRIVATE qilin_core qilin_warnings)
 qilin_tool(qilin_tests)
 add_test(NAME qilin_tests COMMAND qilin_tests)
+
+# The lifter's differential test: random encodings of every instruction in the
+# slice, lifted at build time, run against an independent reference interpreter.
+add_executable(qilin_difftest_gen recomp/tests/difftest/gen.cpp)
+target_link_libraries(qilin_difftest_gen PRIVATE qilin_core qilin_warnings)
+qilin_tool(qilin_difftest_gen)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/difftest_cases.cpp
+    COMMAND qilin_difftest_gen ${CMAKE_CURRENT_BINARY_DIR}/difftest_cases.cpp
+    DEPENDS qilin_difftest_gen
+    COMMENT "Generating the lifter's differential test cases")
+add_executable(qilin_difftest
+    recomp/tests/difftest/run.cpp
+    recomp/tests/difftest/ref.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/difftest_cases.cpp)
+target_include_directories(qilin_difftest PRIVATE recomp/tests/difftest)
+target_link_libraries(qilin_difftest PRIVATE qilin_core qilin_rt qilin_warnings)
+qilin_tool(qilin_difftest)
+# Generated code: the lifter's output isn't held to our warning set (unused labels, locals).
+if(MSVC)
+    set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/difftest_cases.cpp PROPERTIES COMPILE_OPTIONS "/w")
+else()
+    set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/difftest_cases.cpp PROPERTIES COMPILE_OPTIONS "-w")
+endif()
+add_test(NAME qilin_difftest COMMAND qilin_difftest)

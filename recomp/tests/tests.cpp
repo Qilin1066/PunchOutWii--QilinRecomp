@@ -10,6 +10,7 @@
 #include "cfg.hpp"
 #include "decoder.hpp"
 #include "dol.hpp"
+#include "lift.hpp"
 #include "sha256.hpp"
 
 using namespace qilin;
@@ -548,6 +549,41 @@ bool proven_two(const std::optional<Function>& f, uint32_t c0, uint32_t c1) {
            f->jtabs[0].entries == std::vector<uint32_t>{c0, c1};
 }
 
+// The lifter on the synthetic program: control flow (its semantics are the
+// differential test's job, qilin_difftest).
+void test_lift() {
+    const Program p;
+    auto dol = Dol::parse(p.bytes);
+    CHECK(dol.has_value());
+    if (!dol) return;
+    Cfg cfg(*dol);
+    cfg.run();
+    const auto& fs = cfg.functions();
+    auto lifted = [&](uint32_t a) { return lift(lift_input(cfg, fs.at(a))); };
+    const Lifted entry = lifted(0x80003100);
+    CHECK(entry.ok);
+    CHECK(entry.code.contains("void fn_80003100(Cpu& c)"));
+    CHECK(entry.code.contains("fn_80003140(c);"));          // a call
+    CHECK(entry.code.contains("fn_800031C0(c); return;"));  // the tail call
+    const Lifted sw = lifted(0x80003140);
+    CHECK(sw.ok);
+    CHECK(sw.code.contains("switch (ctr) { case 0x80003160u: goto L_80003160; case 0x80003168u: goto L_80003168; case 0x80003178u: goto L_80003178;"));
+    const Lifted pc = lifted(0x800031A0);  // the get-PC idiom: LR gets the next address, no call
+    CHECK(pc.ok && pc.code.contains("lr = 0x800031A4u;") && !pc.code.contains("fn_800031A4"));
+    const Lifted itail = lifted(0x80003210);
+    CHECK(itail.ok && itail.code.contains("c.hooks->call(c, ctr & ~3u); return;"));
+    const Lifted chain = lifted(0x80003180);  // falls into the next entry point
+    CHECK(chain.ok && chain.code.contains("fn_80003184(c); return;"));
+    // Outside the slice: the reason, and where.
+    LiftInput fp;
+    fp.start = 0x80003000;
+    fp.insns = {{0x80003000, ppc::decode(0xFC21102Au)}, {0x80003004, ppc::decode(0x4E800020u)}};  // fadd f1,f1,f2; blr
+    const Lifted no = lift(fp);
+    CHECK(!no.ok && no.why == "floating point" && no.why_at == 0x80003000);
+    std::string why;
+    CHECK(!in_slice(ppc::decode(0x7C632614u), &why) && why.contains("overflow-enable"));  // addo r3,r3,r4
+}
+
 void test_cfg_switches() {
     using P = Program;
     const uint32_t blr = 0x4E800020, mtctr_r0 = 0x7C0903A6, bctr = 0x4E800420;
@@ -663,6 +699,7 @@ int main() {
     test_decoder();
     test_cfg();
     test_cfg_switches();
+    test_lift();
     if (failures) {
         std::println(stderr, "{} check(s) failed", failures);
         return 1;

@@ -11,6 +11,15 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-18
+The lifter's first slice: integer code to C++, with every function either lifted or a stub that says why not, all of it compiling and linking, and a differential test against an independent reference interpreter.
+
+### Added
+- **`recomp/src/lift.*` and `qilin lift`:** one guest function to one C++ function over the runtime's `Cpu`. Guest registers and CR fields are host locals, synced at calls and returns; branches are `goto`s, jump tables a `switch` that traps on anything else, tail calls and fall-throughs calls; indirect calls go through the runtime's dispatcher. Slice 1 covers the integer instruction set the game uses, all branches, the CR operations, LR, CTR, XER and the GQRs. On the game: 10,917 of 13,487 functions (80.9%), 57.8% of the instructions; 2,455 of the 2,570 stubs wait for floating point.
+- **`runtime/`:** `qilin/rt/cpu.hpp` (the guest state; memory access, byte-swapped, with everything from `0xC0000000` up sent to the runtime's hooks) and `qilin_rt`'s `GuestMemory` (the 4 GB guest address space, reserved, committed by range; POSIX and Windows).
+- **`qilin_difftest`:** 3,093 generated cases (every slice instruction with random valid encodings, and `bc`/`bclr`/`bcctr` programs over every valid BO), 64 random states each, lifted against `recomp/tests/difftest/ref.cpp`, a reference interpreter written from the manual separately from the lifter. 197,952 runs, 0 differences; planted lifter bugs fail at once. In CI on every configuration.
+- **Tests** for the lifter's control flow on the synthetic program (calls, tail calls, the switch, the get-PC idiom, indirect tail calls, falling into the next function, the reasons for a stub).
+
 ## [0.3.0] - 2026-11-18
 The rest of roadmap step 1's code analysis: where the code touches the hardware, whether it can throw, and how it keeps time (`docs/runtime-analysis.md`).
 
