@@ -97,7 +97,14 @@ void VIGetRetraceCount(Cpu& c) { c.r[3] = g_retraces; }
 void VIGetTvFormat(Cpu& c) { c.r[3] = kVI_EURGB60; }
 void VIGetDTVStatus(Cpu& c) { c.r[3] = 0; }  // no component cable: interlaced or EuRGB60 only
 
+// Screen-burn dimming: the Wii dims the picture after minutes without input.
+// Not here (a PC monitor isn't a plasma TV), so these only answer.
+void VIResetDimmingCount(Cpu& c) { c.r[3] = 1; }
+void VIEnableDimming(Cpu&) {}
+
 const rt::Provided kReplacements[] = {
+    {0x80213B8Cu, "VIResetDimmingCount", VIResetDimmingCount},
+    {0x80215604u, "VIEnableDimming", VIEnableDimming},
     {0x80212028u, "VIInit", VIInit},
     {0x80211C78u, "VISetPreRetraceCallback", VISetPreRetraceCallback},
     {0x80211CBCu, "VISetPostRetraceCallback", VISetPostRetraceCallback},

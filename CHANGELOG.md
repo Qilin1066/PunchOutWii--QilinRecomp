@@ -11,6 +11,22 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-18
+Saves, and the game's frame loop: it shows its boot flow and loads its front end, up to audio.
+
+### Added
+- **NAND** (`punchout/src/nand.cpp`): the Wii's flash file system as a folder under the per-user folder (`host/paths.hpp`; `PUNCHOUT_SAVE_DIR` overrides it), with the SDK's paths, current directory, errors, file handles and asynchronous calls.
+- **The game's console output:** the debug serial port it writes to becomes `game: ...` log lines.
+- Screen-burn dimming calls (`VIResetDimmingCount` and the switch) answer without dimming.
+
+### Fixed
+- **The write-gather pipe** now gathers 32-byte bursts, so a command reaches the decoder when the hardware would send it.
+- **The pixel engine's interrupts** come after a GPU latency (50 µs), not at once: the game installs its draw-done callback after issuing the command.
+- **Library boundaries:**
+  - MTX's vector functions at the start of the OS range, and CX's decompression after NAND, are lifted;
+  - MetroTRK's `__TRK_write_console`, which MSL calls for every console write, is replaced by nothing;
+  - `OSGetConsoleType` was taken for `__write_console`; it is now named and answered as itself.
+
 ## [0.10.0] - 2026-11-18
 With the extracted disc, the game loads its data, sets up its front end and brings up the Wii Remote, on the button-only controls.
 

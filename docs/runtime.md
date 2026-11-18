@@ -1,6 +1,6 @@
 # The runtime (roadmap step 3)
 
-Last updated 2026-11-18 (v0.10.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
+Last updated 2026-11-18 (v0.11.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
 
 ## Building and running
 
@@ -23,9 +23,13 @@ At build time `qilin lift <main.dol> -o build-game/generated --plan data/R7PP01/
 | `80200520`–`802008F0` | OSAlloc (heaps), OSArena (arena bounds) | The allocator decides the game's memory layout. |
 | `80201C50`–`80201CDC` | `OSReport` | It formats through MSL's `vprintf` (lifted). |
 | `8020C674`–`8020C728` | `__init_user`, `__init_cpp`, `exit` | The EABI's constructors and destructors. |
+| `801FE598`–`801FE770` | MTX's vector functions | A boundary fix (v0.11.0): the OS range began with three paired-single vector functions. |
+| `8025E6C0`–`8025E840` | CX (`CXGetUncompressedSize`, `CXUncompressLZ`) | A boundary fix (v0.11.0): pure decompression after NAND, before the HOME Button Menu. |
 | `8021636C`–`8021698C` | WBC's API | A boundary fix (v0.10.0): the evidence left WBC/WPAD open by ±8 functions. These seven keep WBC's state and do its calibration maths, so WBC (lifted) runs on to WPAD's first function, `__wpadNoAlloc`. |
 
 GX is lifted whole (v0.8.0, `code-analysis.md`): its command stream is the boundary.
+
+One range goes the other way. `801C93D8`–`801C9494`, MetroTRK's `__TRK_write_console`, is replaced by nothing: MSL's `__write_console` passes console output to the debugger after the UART, so that one function of the dropped debugger stub is reached in normal running.
 
 With the plan, the lifter turns every replaced or dropped function into a thunk, `c.hooks->replaced(c, address)`, into the runtime's registry. On the game, **11,535 functions are lifted, 1,759 replaced and 193 dropped, with no stubs: every instruction outside replaced and dropped code is lifted.**
 
@@ -92,6 +96,11 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **VI** (`vi.cpp`):
   - **The retrace:** a timed interrupt at 60 Hz (EuRGB60) from the host clock. It runs the pre- and post-retrace callbacks and wakes the threads in `VIWaitForRetrace`.
   - **Frame buffers:** `VISetNextFrameBuffer` is recorded for the renderer.
+- **Console output:** `OSGetConsoleType` reports a retail Wii. The C library's console writes go to the debug serial port (`InitializeUART`, `WriteUARTN`), which a retail console doesn't have; here it becomes the game's own log, as `game: ...` lines.
+- **NAND** (`nand.cpp`, v0.11.0): the Wii's flash file system as a folder, `<user folder>/nand/...`. The user folder is the platform's per-user folder from SDL (Windows: `%APPDATA%\Qilin\PunchOut-QilinComp`), or `PUNCHOUT_SAVE_DIR`.
+  - **Paths:** absolute or relative to the current directory (the game's home, `/title/00010000/52375050/data`, to start with).
+  - **Coverage:** create, delete, open, read, write, seek, length, move, type, change directory, the free-space check, and the asynchronous forms, whose callbacks run as interrupts. Errors are NAND's codes.
+  - **Not yet:** the "safe" open and close open the file itself, so a write cut short isn't rolled back.
 - **Console settings** (`sc.cpp`): 16:9, EuRGB60, English, stereo, a European console. These will become settings.
 - **WPAD** (`wpad.cpp`, v0.10.0): one sideways Wii Remote on channel 0, buttons only (the port's decision: no motion, no Nunchuk, no Balance Board).
   - **What the game sees:** a bare core controller, resting flat, with nothing in its pointer's view; channels 1–3 are empty.
@@ -107,7 +116,9 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **Registers:** the command processor, pixel engine and processor-interface FIFO registers GX touches, and the write-gather pipe (any address in its 32-byte block at `0xCC008000`).
 - **Decoding:** the command processor decodes as the stream arrives. There's no FIFO in guest memory to overflow, so it reads as idle, its read pointer is its write pointer, and the PI's write pointer moves through the CPU FIFO's ring as on hardware.
 - **Commands:** the decoder knows every command (NOP, CP, XF, BP and indexed loads, display-list calls, primitives). It keeps the vertex descriptors and attribute tables it needs to size vertex data, by the hardware's rules as Dolphin documents them. An unknown byte stops the runtime with the bytes around it, because it means the decoder has lost its place.
+- **The write-gather pipe** collects 32 bytes before the decoder sees them, as on hardware (a write can straddle two bursts).
 - **Interrupts:** draw-done (BP `0x45`) and token commands (`0x47`, `0x48`) raise the pixel engine's finish and token interrupts, which reach GX's own handlers; the token register reads back the last token.
+- **GPU latency:** the game relies on the GPU being behind. It writes draw-done, installs the callback for it, then waits. So these interrupts come 50 µs after the command is decoded, as timed events. Dolphin likewise schedules them at least 500 CPU cycles out.
 - **Counting:** every five seconds it logs the draws, vertices, display lists, frame-buffer copies and command bytes it has seen. Drawing them is the renderer's job (next).
 
 ## Where boot stands
@@ -117,10 +128,16 @@ The game boots, runs its static constructors (which bring up the OS, DVD, VI and
 - sets up the front end;
 - brings up WPAD and KPAD.
 
-It stops at the save system, NAND (`8025D104`).
+Then it:
+- opens the save system (NAND);
+- runs its frame loop (draw-done, the retrace callbacks);
+- shows its boot flow (`game: BootFlowScreen, disabling DPD 0`);
+- loads its front-end screens.
+
+It stops at audio: Wwise asks whether the audio interface is up (`AICheckInit`, `801DBF74`).
 
 ## Next
 
 1. **The renderer (roadmap step 4):** the decoded stream on Vulkan: vertex loading, XF transform and lighting, TEV as generated shaders, textures, EFB copies to the XFB and to textures, presenting the XFB that `VISetNextFrameBuffer` names.
-2. **The rest of the boot path:** NAND (saves, in a host folder), AI/AX/DSP (audio, which Wwise drives), the HOME Button Menu's dependencies.
+2. **The rest of the boot path:** AI/AX/DSP (audio, which Wwise drives: AX's voices mixed natively, out through SDL3), the HOME Button Menu's dependencies.
 3. **Tests:** a test of the thread model without the game, using small guest programs built from encoded instructions, like the differential test's.

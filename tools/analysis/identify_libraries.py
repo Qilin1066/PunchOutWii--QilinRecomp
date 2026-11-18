@@ -375,6 +375,15 @@ EXCEPTIONS = [
     # __wpadNoAlloc keep WBC's state (r13-12808) and do its calibration maths, so WBC runs on
     # to 8021698C, and is lifted as planned.
     (0x8021636C, 0x8021698C, "lift", "revolution/wbc: its API (WBCSetupCalibration, WBCRead ...) before WPAD's first function"),
+    # The NAND/HBM boundary (±3, v0.11.0): the last two functions before the HOME Button
+    # Menu read a compression header and run an LZ decoder, with no calls: the CX library.
+    (0x8025E6C0, 0x8025E840, "lift", "revolution/cx: CXGetUncompressedSize, CXUncompressLZ (pure code after NAND)"),
+    # The MTX/OS boundary: the first three functions of the OS range are vector maths in
+    # paired singles (scale, dot product, ...), MTX's, ending where __OSFPRInit starts.
+    (0x801FE598, 0x801FE770, "lift", "revolution/mtx: vector functions before the OS's first (__OSFPRInit)"),
+    # MSL's __write_console sends console output to the debugger too, after the UART: that
+    # one MetroTRK function is reached in normal running, so it's replaced (by nothing).
+    (0x801C93D8, 0x801C9494, "replace", "MetroTRK: __TRK_write_console, called by MSL's __write_console"),
 ]
 
 

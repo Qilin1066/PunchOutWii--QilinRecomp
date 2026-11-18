@@ -21,5 +21,6 @@ std::span<const qilin::rt::Provided> dvd_replacements();
 std::span<const qilin::rt::Provided> vi_replacements();
 std::span<const qilin::rt::Provided> sc_replacements();
 std::span<const qilin::rt::Provided> wpad_replacements();
+std::span<const qilin::rt::Provided> nand_replacements();
 
 }  // namespace punchout

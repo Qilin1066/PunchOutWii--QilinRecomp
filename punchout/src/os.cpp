@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <deque>
+#include <string>
 #include <vector>
 
 #include "boot.hpp"
@@ -33,6 +34,21 @@ void OSInit(Cpu&) {  // once: the game's constructors call it again
     rt::log("OSInit: MEM1 arena %08X-%08X, MEM2 arena %08X-%08X", rt::peek32(b::kArenaLoMem1), rt::peek32(b::kArenaHiMem1),
             rt::peek32(b::kArenaLoMem2), rt::peek32(b::kArenaHiMem2));
     set_interrupts_enabled(true);  // as OSInit ends (801FF504: OSEnableInterrupts)
+}
+
+void returns_zero(Cpu& c) { c.r[3] = 0; }
+void OSGetConsoleType(Cpu& c) { c.r[3] = rt::peek32(0x8000002Cu); }  // retail Wii
+
+// The debug serial port (EXI's UART), where the C library's console output
+// (OSReport, printf) goes. A retail console has none and the output is lost;
+// here it's the game's own log, kept as lines with a prefix.
+std::string g_console;
+void InitializeUART(Cpu& c) { c.r[3] = 0; }  // (baud) -> 0: ready
+void WriteUARTN(Cpu& c) {                    // (buffer, count) -> 0
+    g_console.append(reinterpret_cast<const char*>(rt::guest_ptr(c.r[3])), c.r[4]);
+    for (size_t nl; (nl = g_console.find('\n')) != std::string::npos; g_console.erase(0, nl + 1))
+        rt::log("game: %s", g_console.substr(0, nl).c_str());
+    c.r[3] = 0;
 }
 
 void OSRegisterVersion(Cpu& c) { rt::log("%s", reinterpret_cast<const char*>(rt::guest_ptr(c.r[3]))); }
@@ -171,6 +187,10 @@ const rt::Provided kReplacements[] = {
     {0x801E17F8u, "DBInit", DBInit},
     {0x801FF230u, "OSInit", OSInit},
     {0x801FFBD8u, "OSRegisterVersion", OSRegisterVersion},
+    {0x801FE904u, "OSGetConsoleType", OSGetConsoleType},
+    {0x801EB3E0u, "InitializeUART", InitializeUART},
+    {0x801EB428u, "WriteUARTN", WriteUARTN},
+    {0x801C93D8u, "__TRK_write_console (no debugger)", returns_zero},
     {0x80201CDCu, "OSPanic", OSPanic},
     {0x80201E08u, "OSSetErrorHandler", OSSetErrorHandler},
     {0x801E16C0u, "PPCSync", PPCSync},
@@ -222,7 +242,10 @@ void post_interrupt(std::function<void(Cpu&)> work) { g_pending.push_back(std::m
 
 void raise_interrupt(uint32_t n) {
     post_interrupt([n](Cpu& c) {
-        if (g_mask & (0x80000000u >> n)) return;  // masked: lost, as nothing re-raises it yet
+        if (g_mask & (0x80000000u >> n)) {  // masked: lost, as nothing re-raises it yet
+            rt::log("interrupt %u arrived masked and was dropped", n);
+            return;
+        }
         const uint32_t h = g_handlers[n];
         if (!h) rt::fatal(&c, "interrupt %u has no handler", n);
         guest_callback(c, h, n, rt::peek32(0x800000D4u));

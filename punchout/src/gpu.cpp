@@ -16,7 +16,9 @@
 // VertexLoader_*.h, PixelEngine.h; GPL-2.0-or-later; facts only, our code).
 #include "gpu.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <bit>
 #include <vector>
 
@@ -73,16 +75,59 @@ unsigned vertex_size(unsigned vat) {
     return size;
 }
 
+const bool g_trace = [] {
+    const char* t = std::getenv("PUNCHOUT_TRACE");
+    return t && *t && *t != '0';
+}();
+
+// The GPU reaches a draw-done or token command only after the work queued
+// before it, and games rely on that: GX writes draw-done, then installs the
+// callback for it. So the pixel engine's interrupts come a short GPU latency
+// after the command is decoded, as timed events (Dolphin likewise schedules
+// them at least 500 CPU cycles out).
+constexpr uint64_t kGpuLatency = kTimerHz / 20000;  // 50 us
+struct PeEvent {
+    uint64_t at;
+    bool finish;  // or a token
+    uint16_t token;
+    bool interrupt;
+};
+std::vector<PeEvent> g_pe_events;
+
+void poll_pe() {
+    const uint64_t now = time_base();
+    for (size_t i = 0; i < g_pe_events.size();) {
+        const PeEvent e = g_pe_events[i];
+        if (e.at > now) {
+            ++i;
+            continue;
+        }
+        g_pe_events.erase(g_pe_events.begin() + static_cast<long>(i));
+        if (e.finish) {
+            g_finish_pending = true;
+            if (g_pe[kPeCtrl] & 2) raise_interrupt(19);  // __OS_INTERRUPT_PI_PE_FINISH
+        } else {
+            g_token = e.token;
+            if (e.interrupt) {
+                g_token_pending = true;
+                if (g_pe[kPeCtrl] & 1) raise_interrupt(18);  // __OS_INTERRUPT_PI_PE_TOKEN
+            }
+        }
+    }
+}
+uint64_t pe_deadline() {
+    uint64_t t = UINT64_MAX;
+    for (const auto& e : g_pe_events) t = std::min(t, e.at);
+    return t;
+}
+
 void pe_finish() {
-    g_finish_pending = true;
-    if (g_pe[kPeCtrl] & 2) raise_interrupt(19);  // __OS_INTERRUPT_PI_PE_FINISH
+    if (g_trace) rt::log("GPU: draw done (PE control %04X)", g_pe[kPeCtrl]);
+    g_pe_events.push_back({time_base() + kGpuLatency, true, 0, false});
 }
 void pe_token(uint16_t token, bool interrupt) {
-    g_token = token;
-    if (interrupt) {
-        g_token_pending = true;
-        if (g_pe[kPeCtrl] & 1) raise_interrupt(18);  // __OS_INTERRUPT_PI_PE_TOKEN
-    }
+    if (g_trace) rt::log("GPU: token %04X%s (PE control %04X)", token, interrupt ? " with interrupt" : "", g_pe[kPeCtrl]);
+    g_pe_events.push_back({time_base() + kGpuLatency, false, token, interrupt});
 }
 
 void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
@@ -121,11 +166,14 @@ void call_display_list(Cpu& c, uint32_t address, uint32_t size) {
     decode(c, rt::guest_ptr(va), size, used, true);
 }
 
-[[noreturn]] void bad_command(Cpu& c, const uint8_t* at, size_t left, bool in_display_list) {
-    char bytes[3 * 16 + 1] = {};
+[[noreturn]] void bad_command(Cpu& c, const uint8_t* base, size_t used, size_t left, bool in_display_list) {
+    const uint8_t* at = base + used;
+    char before[3 * 48 + 1] = {}, bytes[3 * 16 + 1] = {};
+    const size_t back = used < 48 ? used : 48;
+    for (size_t i = 0; i < back; ++i) std::snprintf(before + 3 * i, 4, "%02X ", at[i - back]);
     for (size_t i = 0; i < left && i < 16; ++i) std::snprintf(bytes + 3 * i, 4, "%02X ", at[i]);
-    rt::fatal(&c, "GX command stream: unknown command %02X %s(next bytes: %s); the decoder has lost its place",
-              at[0], in_display_list ? "in a display list " : "", bytes);
+    rt::fatal(&c, "GX command stream: unknown command %02X %s(before: %s| from it: %s); the decoder has lost its place",
+              at[0], in_display_list ? "in a display list " : "", before, bytes);
 }
 
 uint32_t be32(const uint8_t* p) { return uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3]; }
@@ -169,23 +217,44 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             if (left < 3) return;
             const uint32_t count = uint32_t{p[1]} << 8 | p[2];
             const size_t bytes = size_t{count} * vertex_size(op & 7);
+            if (g_trace && !in_display_list && used == 0)
+                rt::log("GPU: primitive %02X, %u vertices of %u bytes (VCD %08X %08X, VAT %08X %08X %08X)", op, count,
+                        vertex_size(op & 7), g_cpmem[0x50], g_cpmem[0x60], g_cpmem[0x70 + (op & 7)], g_cpmem[0x80 + (op & 7)],
+                        g_cpmem[0x90 + (op & 7)]);
             if (left < 3 + bytes) return;
             ++g_stats.draws;
             g_stats.vertices += count;
             n = 3 + bytes;
         } else {
-            bad_command(c, p, left, in_display_list);
+            bad_command(c, data, used, left, in_display_list);
         }
         used += n;
     }
 }
 
+// The write-gather pipe collects 32 bytes before it sends them on, so the GPU
+// sees a command only once a burst is full. Timing depends on that: GX writes
+// a draw-done command, installs the callback for it and only then flushes
+// (GXFlush pads the pipe with 32 bytes of NOPs).
+uint8_t g_gather[32];
+unsigned g_gathered = 0;
+
+void send_burst(Cpu& c);
+
 void pipe_write(Cpu& c, uint32_t value, unsigned size) {
-    for (unsigned i = 0; i < size; ++i) g_fifo.push_back(static_cast<uint8_t>(value >> (8 * (size - 1 - i))));
-    g_stats.fifo_bytes += size;
+    for (unsigned i = 0; i < size; ++i) {  // a write can straddle two bursts
+        g_gather[g_gathered++] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
+        if (g_gathered == 32) send_burst(c);
+    }
+}
+
+void send_burst(Cpu& c) {
+    g_gathered = 0;
+    g_fifo.insert(g_fifo.end(), g_gather, g_gather + 32);
+    g_stats.fifo_bytes += 32;
     // The PI's write pointer moves through the CPU FIFO's ring as on hardware.
     if (g_pi[kPiFifoEnd] > g_pi[kPiFifoBase]) {
-        uint32_t w = (g_pi[kPiFifoWrite] & 0x03FFFFFFu) + size;
+        uint32_t w = (g_pi[kPiFifoWrite] & 0x03FFFFFFu) + 32;
         if (w >= (g_pi[kPiFifoEnd] & 0x03FFFFFFu)) w = (g_pi[kPiFifoBase] & 0x03FFFFFFu) + (w - (g_pi[kPiFifoEnd] & 0x03FFFFFFu));
         g_pi[kPiFifoWrite] = w;
     }
@@ -248,7 +317,10 @@ void write_reg(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
 
 }  // namespace
 
-void init_gpu() { rt::set_mmio(read_reg, write_reg); }
+void init_gpu() {
+    rt::set_mmio(read_reg, write_reg);
+    add_timer_source(poll_pe, pe_deadline);
+}
 const Stats& gpu_stats() { return g_stats; }
 
 }  // namespace punchout

@@ -41,6 +41,7 @@ int main(int argc, char** argv) {
     rt::provide(punchout::thread_replacements());
     rt::provide(punchout::sc_replacements());
     rt::provide(punchout::wpad_replacements());
+    rt::provide(punchout::nand_replacements());
     punchout::init_gpu();
     punchout::load_game(folder);
 
