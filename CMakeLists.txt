@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.8.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.9.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -93,8 +93,53 @@ add_library(qilin_rt STATIC runtime/src/memory.cpp runtime/src/system.cpp)
 target_include_directories(qilin_rt PUBLIC runtime/include)
 target_link_libraries(qilin_rt PRIVATE qilin_warnings)
 
-# ---- Tests (no game files needed) ----
 enable_testing()
+
+# ---- The host platform: window, input and audio (SDL3), Vulkan ----
+# Fetched at configure time, pinned, built statically: SDL3, the Vulkan headers
+# and volk (which loads Vulkan at run time, so no SDK is needed to build or run).
+option(QILIN_HOST "Build the host platform layer (window, Vulkan, input, audio)" ON)
+if(QILIN_HOST)
+    include(FetchContent)
+    set(FETCHCONTENT_QUIET ON)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+    set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+    set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)  # synthetic input: not needed
+    FetchContent_Declare(SDL3 GIT_REPOSITORY https://github.com/libsdl-org/SDL GIT_TAG release-3.4.20 GIT_SHALLOW ON)
+    FetchContent_Declare(VulkanHeaders GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers
+                         GIT_TAG vulkan-sdk-1.4.363.0 GIT_SHALLOW ON)
+    # volk is one C file: fetched without its own CMake project (SOURCE_SUBDIR points nowhere).
+    FetchContent_Declare(volk GIT_REPOSITORY https://github.com/zeux/volk GIT_TAG vulkan-sdk-1.4.363.0 GIT_SHALLOW ON
+                         SOURCE_SUBDIR no-cmake)
+    FetchContent_MakeAvailable(SDL3 VulkanHeaders volk)
+    add_library(qilin_volk STATIC ${volk_SOURCE_DIR}/volk.c)
+    target_include_directories(qilin_volk PUBLIC ${volk_SOURCE_DIR})
+    target_link_libraries(qilin_volk PUBLIC Vulkan::Headers ${CMAKE_DL_LIBS})
+    target_compile_definitions(qilin_volk PUBLIC VK_NO_PROTOTYPES)
+
+    add_library(qilin_host STATIC host/src/vulkan.cpp host/src/display.cpp)
+    target_include_directories(qilin_host PUBLIC host/include)
+    target_link_libraries(qilin_host PUBLIC qilin_volk PRIVATE SDL3::SDL3-static qilin_warnings)
+    # Vulkan structures are written {sType} with the rest zeroed: that's the idiom, not a mistake.
+    # (On the sources, so it comes after -Wextra on the command line.)
+    if(NOT MSVC)
+        set_source_files_properties(host/src/vulkan.cpp host/src/display.cpp host/tests/vktest.cpp
+                                    PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+    endif()
+
+    # The Vulkan layer's own test: a device, an offscreen frame, read back. Skips
+    # (exit 77) where there's no Vulkan 1.3 device, as on CI runners.
+    add_executable(qilin_vktest host/tests/vktest.cpp)
+    target_link_libraries(qilin_vktest PRIVATE qilin_host qilin_warnings)
+    add_test(NAME qilin_vktest COMMAND qilin_vktest)
+    set_tests_properties(qilin_vktest PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# ---- Tests (no game files needed) ----
 add_executable(qilin_tests recomp/tests/tests.cpp)
 target_link_libraries(qilin_tests PRIVATE qilin_core qilin_rt qilin_warnings)
 qilin_tool(qilin_tests)
@@ -131,6 +176,9 @@ add_test(NAME qilin_difftest COMMAND qilin_difftest)
 # library plan in data/R7PP01, and the punchout executable is built from that.
 set(QILIN_GAME_DOL "" CACHE FILEPATH "Punch-Out!! (PAL, Rev 1) main.dol: builds the punchout executable")
 if(QILIN_GAME_DOL)
+    if(NOT QILIN_HOST)
+        message(FATAL_ERROR "the game needs the host platform layer: configure with QILIN_HOST=ON")
+    endif()
     set(QILIN_LIFT_FILES 32)
     set(gen ${CMAKE_CURRENT_BINARY_DIR}/generated)
     set(gen_sources ${gen}/table.cpp ${gen}/replaced.cpp)
@@ -150,11 +198,11 @@ if(QILIN_GAME_DOL)
                 --files ${QILIN_LIFT_FILES}
         DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
         COMMENT "Lifting the game's main.dol to C++")
-    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp ${gen_sources})
+    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp ${gen_sources})
     target_include_directories(punchout PRIVATE punchout/src ${gen})
-    target_link_libraries(punchout PRIVATE qilin_rt qilin_dol)
+    target_link_libraries(punchout PRIVATE qilin_rt qilin_dol qilin_host)
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
-    set_source_files_properties(punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp
+    set_source_files_properties(punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp
         PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
     if(MSVC)
         set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "/w;/bigobj")

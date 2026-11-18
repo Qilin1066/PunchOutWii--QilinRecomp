@@ -114,21 +114,7 @@ void host_main(Thread* t);
 
 void start_host(Thread* t) {
     t->started = true;
-#if defined(_WIN32)
-    HANDLE h = CreateThread(nullptr, kHostStack, [](LPVOID p) -> DWORD { host_main(static_cast<Thread*>(p)); return 0; }, t,
-                            STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
-    if (!h) rt::fatal(nullptr, "cannot start a host thread for guest thread %08X", t->guest);
-    CloseHandle(h);
-#else
-    pthread_attr_t a;
-    pthread_attr_init(&a);
-    pthread_attr_setstacksize(&a, kHostStack);
-    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-    pthread_t id;
-    if (pthread_create(&id, &a, [](void* p) -> void* { host_main(static_cast<Thread*>(p)); return nullptr; }, t) != 0)
-        rt::fatal(nullptr, "cannot start a host thread for guest thread %08X", t->guest);
-    pthread_attr_destroy(&a);
-#endif
+    run_on_host_thread([](void* p) { host_main(static_cast<Thread*>(p)); }, t);
 }
 
 // Hand the guest CPU to `next`; unless `leaving`, wait until it comes back.
@@ -623,6 +609,36 @@ void wake_all(Cpu& c, uint32_t queue) {
 }
 
 void wait_on(Cpu& c, uint32_t queue) { sleep_on(c, queue); }
+
+void run_on_host_thread(void (*fn)(void*), void* arg) {
+    struct Start {
+        void (*fn)(void*);
+        void* arg;
+    };
+    auto* s = new Start{fn, arg};
+#if defined(_WIN32)
+    HANDLE h = CreateThread(nullptr, kHostStack, [](LPVOID p) -> DWORD {
+        std::unique_ptr<Start> st(static_cast<Start*>(p));
+        st->fn(st->arg);
+        return 0;
+    }, s, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    if (!h) rt::fatal(nullptr, "cannot start a host thread");
+    CloseHandle(h);
+#else
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    pthread_attr_setstacksize(&a, kHostStack);
+    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    pthread_t id;
+    if (pthread_create(&id, &a, [](void* p) -> void* {
+            std::unique_ptr<Start> st(static_cast<Start*>(p));
+            st->fn(st->arg);
+            return nullptr;
+        }, s) != 0)
+        rt::fatal(nullptr, "cannot start a host thread");
+    pthread_attr_destroy(&a);
+#endif
+}
 
 void preempt(Cpu& c) {
     if (!g_current) return;

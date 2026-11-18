@@ -1,6 +1,6 @@
 # The runtime (roadmap step 3)
 
-Last updated 2026-11-18 (v0.8.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
+Last updated 2026-11-18 (v0.9.0). How the lifted game runs: the guest machine, booting, and the native replacements for the libraries the plan replaces (`docs/code-analysis.md`).
 
 ## Building and running
 
@@ -9,7 +9,7 @@ The game is built only from the player's own `main.dol`; nothing derived from it
 ```sh
 cmake -S . -B build-game -DQILIN_GAME_DOL="<extracted disc>/sys/main.dol"
 cmake --build build-game --target punchout
-build-game/punchout "<extracted disc>"      # the folder with sys/ and files/
+build-game/punchout "<extracted disc>"      # the folder with sys/ and files/ (--headless: no window)
 ```
 
 At build time `qilin lift <main.dol> -o build-game/generated --plan data/R7PP01/plan.tsv --files 32` writes the C++ (32 files of functions, the function table, the replaced-function table), which is compiled into `punchout` with the runtime and the replacements in `punchout/src/`. A full build takes about 7 minutes on two cores (GCC 14, `-O2`); after that, changes to the replacements rebuild in seconds. The extracted disc is what Dolphin's *Extract Entire Disc* or `wit extract` produces: `sys/main.dol`, `sys/boot.bin`, `sys/fst.bin` and `files/`.
@@ -34,6 +34,13 @@ With the plan, the lifter turns every replaced or dropped function into a thunk,
 - **Dispatcher:** an indirect call searches the function table, which is sorted by address. A target that starts no function is fatal.
 - **Registry:** the game's replacements are registered by address (`rt::provide`). Registering an address the plan lifts or drops, or one address twice, is fatal at start-up. A call to a replaced function with nothing registered stops the runtime, naming the function, its library and its caller.
 - **Fatal errors** print the reason and the guest's call stack, walked through the back chain. The exit status is 70.
+
+## The host platform (`host/`, v0.9.0)
+
+- **Threads:** the main thread owns the window: it handles its events and shows the newest frame the guest has handed over. The guest runs on threads of its own; its main thread starts on a host thread with a 16 MB stack, like every other guest thread. Closing the window ends the program (it will become the console's power button).
+- **Window:** an SDL3 window, resizable and high-DPI.
+- **Vulkan:** `Gpu` makes a Vulkan 1.3 device, preferring a discrete GPU. It requires dynamic rendering and synchronization2 (both in v3dv's set) and names whatever a device lacks. `Display` presents through a FIFO swapchain, rebuilt when the window changes. Headless, it draws into an image of its own, which `qilin_vktest` reads back to check the letterboxing (skipped where there's no Vulkan 1.3 device; it passes on Mesa's llvmpipe).
+- **Frames:** at each retrace VI hands over the frame buffer the game set (`video.cpp`), and the main thread shows it at 16:9, letterboxed. For now that's the XFB in guest memory, YUV 4:2:2, converted on the CPU. The renderer's EFB copies will take its place.
 
 ## Booting (`punchout/src/boot.cpp`)
 

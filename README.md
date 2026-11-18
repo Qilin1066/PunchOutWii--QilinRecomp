@@ -36,7 +36,7 @@ The whole project (recompiler, runtime and generated code) is **C++23**. You nee
 | Apple Clang | Xcode 16 | |
 | MSVC | Visual Studio 2022 17.10 | |
 
-CMake stops with a clear message if the compiler is older, or if the target is 32-bit. There are no other dependencies.
+CMake stops with a clear message if the compiler is older, or if the target is 32-bit. CMake fetches the rest at pinned versions and builds it in: SDL3 (window, input, audio), the Vulkan headers and volk. To run, you need a Vulkan 1.3 driver.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

@@ -6,6 +6,7 @@
 // this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
 #include "boot.hpp"
 #include "gpu.hpp"
+#include "video.hpp"
 #include "os.hpp"
 #include "threads.hpp"
 
@@ -52,6 +53,9 @@ void poll_retrace() {
             if (g_retraces % 300 == 0) report();
             if (g_pre_cb) guest_callback(c, g_pre_cb, g_retraces, 0);
             g_current_fb = g_next_fb;  // VIFlush'd settings take effect at the retrace
+            // The render mode's frame buffer size: fbWidth at +4, xfbHeight at +8.
+            const uint32_t w = g_mode ? rt::peek16(g_mode + 4) : 0, h = g_mode ? rt::peek16(g_mode + 8) : 0;
+            show_frame(g_black ? 0 : g_current_fb, w, h);
             if (g_post_cb) guest_callback(c, g_post_cb, g_retraces, 0);
             wake_all(c, kRetraceQueue);
         });

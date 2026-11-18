@@ -17,6 +17,10 @@ std::span<const qilin::rt::Provided> thread_replacements();
 void wait_on(qilin::rt::Cpu& c, uint32_t queue);
 void wake_all(qilin::rt::Cpu& c, uint32_t queue);
 
+// Run fn(arg) on a new host thread with a stack big enough for lifted code
+// (16 MB), detached.
+void run_on_host_thread(void (*fn)(void*), void* arg);
+
 // A guest thread's function returned or it called OSExitThread: hand the guest
 // CPU on. Returns once another thread runs; its host thread then ends.
 void finish_thread(qilin::rt::Cpu& c, uint32_t value);

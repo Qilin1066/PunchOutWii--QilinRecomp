@@ -11,6 +11,21 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-18
+The host platform: a window, Vulkan 1.3, and the guest on threads of its own.
+
+### Added
+- **`host/`:** an SDL3 window with a Vulkan 1.3 swapchain, or a headless target. The device check requires dynamic rendering and synchronization2 and names anything missing. Frames are shown letterboxed at the game's aspect.
+- **Dependencies fetched by CMake at pinned versions** and built in: SDL 3.4.20, Vulkan-Headers and volk (`vulkan-sdk-1.4.363.0`; the API used stays 1.3). Building needs no Vulkan SDK.
+- **`qilin_vktest`:** presents a frame headless and checks it read back; skipped without a Vulkan 1.3 device.
+- **`punchout` opens a window:**
+  - the main thread handles the window and shows frames, while the guest runs on host threads of its own;
+  - VI hands over each retrace's frame buffer, converted from YUV for now;
+  - `--headless` runs without a window.
+
+### Changed
+- `docs/roadmap-and-design-targets.md` records the GX decision of 0.8.0, the thread model and the platform layer.
+
 ## [0.8.0] - 2026-11-18
 GX is lifted whole, and the runtime decodes its command stream: the game brings up its graphics and starts loading data.
 
