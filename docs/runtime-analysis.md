@@ -17,6 +17,7 @@ python3 tools/analysis/hardware_access.py --qilin build/qilin --dol path/to/main
 | hw-wii | `0xCD000000`–`0xCD00FFFF`: Hollywood (IPC, GPIO, the Wii's DI/SI/EXI/AI …) |
 | mem1-unc / mem2-unc | `0xC0000000`–`0xC17FFFFF`, `0xD0000000`–`0xD3FFFFFF`: MEM1 and MEM2 through their uncached mirrors |
 | locked | `0xE0000000`–`0xE0003FFF`: the locked cache |
+| lowmem | `0x80000000`–`0x80003FFF`: the OS's globals and the boot information (v0.7.0) |
 
 Accesses found, by library (cells: accesses, then functions):
 

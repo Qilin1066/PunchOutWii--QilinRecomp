@@ -6,7 +6,7 @@ A static recompilation of **Punch-Out!!** (Next Level Games / Nintendo, Wii, 200
 
 ## Status
 
-Roadmap step 1, **analysis**, is in progress; the recompiler core (step 2) has its first pieces.
+Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime (step 3) boots the game into `main`, up to its first graphics call.
 
 | Piece | State |
 |---|---|
@@ -18,7 +18,8 @@ Roadmap step 1, **analysis**, is in progress; the recompiler core (step 2) has i
 | Every library found, its range fixed, and the lift / replace / drop boundary decided | ✅ 40 ranges from four kinds of evidence (size matches against the Rhythm Heaven Fever decomp, RTTI, SDK version banners, strings), 1,988 SDK and runtime functions named; 84% of the code lifted, 15% replaced, 1% dropped (`docs/code-analysis.md`) |
 | Hardware-access profile, exception tables, timing model | ✅ lifted code touches no hardware register or uncached mirror, but writes the GX FIFO directly (803 stores in the engine's mesh drawers), so the FIFO decoder is required; no C++ exception can be thrown; one frame per retrace, gameplay driven by a time step in seconds (`docs/runtime-analysis.md`) |
 | Lifter → C++, differential test | ✅ integer code, floating point and paired singles with GQR quantisation (bit-exact with Broadway: NI mode, NaN rules, single rounding, the estimate tables): 13,392 of 13,487 functions (99.3%) lifted, every one in the libraries we lift; the 95 stubs, all in code we replace or drop, trap with the reason; all of it compiles and links; 323,904 differential runs against an independent reference interpreter and known-answer tests from hardware data, 0 differences (`docs/recompiler-core.md`) |
-| Runtime: OS, DVD, NAND, GX on Vulkan, AX audio, input (buttons only: the sideways Wii Remote scheme on a modern pad or keyboard, no motion controls) | later (see roadmap) |
+| Runtime skeleton: the game built from your own `main.dol`, booted as `__start` boots it, a replacement registry that names anything missing; OS (threads, mutexes, message queues, alarms, interrupts, time, locked cache), DVD from the extracted disc, VI's retrace, console settings | 🔨 boots, runs the static constructors and enters `main`; stops at the first GX call (`docs/runtime.md`) |
+| GX on Vulkan, AX audio, NAND saves, input (buttons only: the sideways Wii Remote scheme on a modern pad or keyboard, no motion controls) | later (see roadmap) |
 
 ## Versions and changes
 

@@ -23,12 +23,15 @@ using GuestFn = void (*)(Cpu&);
 
 // Called for an access outside cached MEM1 and MEM2 (hardware registers, the
 // write-gather pipe, uncached mirrors, the locked cache), for an indirect call,
-// and when guest code traps. Each must not return if it can't handle the case.
+// when guest code traps, and when a replaced or dropped function is called
+// (the runtime runs its native replacement). Each must not return if it can't
+// handle the case.
 struct CpuHooks {
     uint32_t (*read)(Cpu&, uint32_t addr, unsigned size);
     void (*write)(Cpu&, uint32_t addr, uint32_t value, unsigned size);
     void (*call)(Cpu&, uint32_t target);  // bctrl / bctr / blrl to a computed address
     void (*trap)(Cpu&, uint32_t pc, const char* why);  // must not return
+    void (*replaced)(Cpu&, uint32_t function);         // a function the plan replaces or drops was called
 };
 
 struct Cpu {

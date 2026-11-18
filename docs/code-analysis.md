@@ -93,4 +93,4 @@ The rules are BeatTheBeat-QilinComp's: a library that drives hardware registers 
 
 **Game and engine** (`80007280`–`801C4294`, 8,325 functions, 57% of the code) is one segment for now. Separating Next Level Games' engine (`nl*`, the script VM, the renderer, networking) from the game itself is a naming job, not a boundary one: all of it is lifted.
 
-**To decide when the runtime reaches them** (as in BeatTheBeat-QilinComp): whether OS functions with no hardware access (`OSReport`, alarm and thread bookkeeping) are better lifted, and the start-up path, which the runtime runs instead of `__start`.
+**Decided when the runtime reached them** (v0.7.0, `runtime.md`): the OS's heap and arena code, `OSReport` and the EABI's constructor and destructor code are lifted (narrower ranges in `data/R7PP01/plan.tsv`); thread and alarm bookkeeping is replaced with the scheduler; the start-up path is run natively instead of `__start`.

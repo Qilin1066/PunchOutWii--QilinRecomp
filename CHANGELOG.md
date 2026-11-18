@@ -11,6 +11,24 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-18
+The runtime skeleton: the recompiled game builds from your own `main.dol`, boots as `__start` boots it, runs its static constructors and enters `main`, as far as its first graphics call.
+
+### Added
+- **The library plan as data** (`data/R7PP01/plan.tsv`, written by `identify_libraries.py --plan-out`), with narrower ranges that lift pure code inside a replaced library: the OS's heap and arena code, `OSReport`, and the EABI's `__init_user`, `__init_cpp` and `exit`.
+- **`qilin lift --plan`:** replaced and dropped functions become thunks into the runtime's registry; everything else is lifted: 11,350 functions lifted, 1,944 replaced, 193 dropped, 0 stubs. `--files n` writes a fixed number of files for the build.
+- **The guest machine** (`runtime/src/system.cpp`): memory with MEM1, MEM2, the uncached mirrors and the locked cache; the dispatcher; the registry, which refuses a replacement for lifted code and names any replaced function called without one; fatal errors with the guest's call stack.
+- **The `punchout` executable** (`punchout/`), built when CMake is given `QILIN_GAME_DOL`. It checks the build, writes the boot information a retail Wii with IOS53 leaves in low memory, and starts the game natively in `__start`'s order.
+- **Replacements:**
+  - OS start-up, interrupts, caches, the locked cache's DMA, time, memory sizes, reset and power callbacks, error handlers;
+  - threads, mutexes, condition variables, message queues and alarms, with one host thread per guest thread and the OS's scheduling rules;
+  - interrupts delivered at safe points;
+  - DVD from `sys/fst.bin` and `files/`;
+  - VI's retrace at 60 Hz;
+  - the console settings.
+- **`hardware_access.py`** classifies low-memory globals: lifted code reads only the bus clock.
+- `docs/runtime.md`.
+
 ## [0.6.0] - 2026-11-18
 Lifter slice 3: paired singles. 13,392 of 13,487 functions (99.3%) and 99.8% of the instructions are lifted: every function in the libraries we lift. The 95 stubs left are all in code we replace or drop.
 

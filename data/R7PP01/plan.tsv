@@ -1,0 +1,47 @@
+# The library plan: which code is lifted, replaced or dropped (docs/code-analysis.md).
+# Written by tools/analysis/identify_libraries.py --plan-out; read by qilin lift --plan.
+# start	end	plan	library
+80004000	80005F88	drop	.init: debugger stub and interrupt vectors
+80005F88	80005FB4	replace	.init: OS start-up
+80005FB4	800060E8	lift	.init: EABI runtime (memcpy, __fill_mem, memset)
+800060E8	80006420	replace	.init: OS start-up
+80007280	801C4294	lift	game and Next Level Games' engine
+801C4294	801C4790	lift	Wwise plug-in: silence source
+801C4790	801CA388	drop	MetroTRK (debugger stub)
+801CA388	801DAF34	lift	EABI MSL (C library)
+801DAF34	801DBE54	lift	EABI runtime
+801DBE54	801DC3D8	replace	revolution/ai
+801DC3D8	801DCD50	lift	revolution/arc (U8 archives)
+801DCD50	801E07E8	replace	revolution/ax
+801E07E8	801E1688	lift	revolution/axfx (reverb, chorus, delay on the CPU)
+801E1688	801E1820	replace	revolution/base (CPU registers: HID, MMCR …)
+801E1820	801E1890	replace	revolution/db (debugger hooks)
+801E1890	801E2440	replace	revolution/dsp
+801E2440	801E83A8	replace	revolution/dvd
+801E83A8	801EABF0	replace	revolution/esp (e-ticket services)
+801EABF0	801ED3A8	replace	revolution/exi
+801ED3A8	801EEB94	replace	revolution/fs
+801EEB94	801F6754	replace	revolution/gx
+801F6754	801F8878	replace	revolution/ipc
+801F8878	801FC1E4	lift	revolution/kpad (Wii Remote processing over WPAD)
+801FC1E4	801FD7E0	lift	revolution/mem (heaps)
+801FD7E0	801FE598	lift	revolution/mtx
+801FE598	8020CE64	replace	revolution/os
+8020CE64	8020D86C	replace	revolution/si
+8020D86C	8021119C	lift	revolution/thp (movie decoder)
+8021119C	802112D0	lift	revolution/tpl (texture files)
+802112D0	80215FF8	replace	revolution/vi
+80215FFC	8021636C	lift	revolution/wbc (Balance Board)
+8021636C	8022989C	replace	revolution/wpad (Wii Remote)
+8022989C	80257474	replace	revolution/bte (Bluetooth stack, under WPAD)
+80257474	80258968	replace	revolution/usb (under the Bluetooth stack)
+80258968	8025A9C4	replace	revolution/sc (console settings)
+8025A9C4	8025E840	replace	revolution/nand
+8025E840	8027E01C	lift	revolution/hbm (HOME Button Menu, with nw4hbm)
+8027E01C	80288410	lift	RVLFaceLibrary (Miis)
+80288414	80288EB0	drop	NdevExi2A (development-kit link)
+80288EB0	80311504	lift	Audiokinetic Wwise
+# Exceptions: narrower ranges that override the library they sit in.
+80200520	802008F0	lift	revolution/os: OSAlloc (heaps) and OSArena (arena bounds), no hardware access
+80201C50	80201CDC	lift	revolution/os: OSReport (formats through MSL's vprintf)
+8020C674	8020C728	lift	revolution/os: __init_user, __init_cpp and exit (the EABI's constructors and destructors)

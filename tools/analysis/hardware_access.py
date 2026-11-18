@@ -39,6 +39,7 @@ CLASSES = [
     ("mem1-unc", 0xC0000000, 0xC1800000),
     ("mem2-unc", 0xD0000000, 0xD4000000),
     ("locked", 0xE0000000, 0xE0004000),
+    ("lowmem", 0x80000000, 0x80004000),  # the OS globals and boot information in low memory
 ]
 MEMOP = re.compile(r"^(l|st)(b|h|w|f|mw|sw|psq_)\w*$|^(dcbz|dcbz_l|dcbf|dcbst|dcbi|icbi)$")
 DISP = re.compile(r"^(\w+) (\w+),(-?\d+)\((r\d+)\)$")      # stw r4,-32768(r3)

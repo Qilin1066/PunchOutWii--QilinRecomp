@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.6.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.7.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -89,7 +89,7 @@ qilin_tool(qilin)
 target_compile_definitions(qilin PRIVATE QILIN_VERSION="${PROJECT_VERSION}")
 
 # ---- Runtime (what players run: no std::format) ----
-add_library(qilin_rt STATIC runtime/src/memory.cpp)
+add_library(qilin_rt STATIC runtime/src/memory.cpp runtime/src/system.cpp)
 target_include_directories(qilin_rt PUBLIC runtime/include)
 target_link_libraries(qilin_rt PRIVATE qilin_warnings)
 
@@ -124,3 +124,43 @@ else()
     set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/difftest_cases.cpp PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 add_test(NAME qilin_difftest COMMAND qilin_difftest)
+
+# ---- The game: built only from the player's own main.dol ----
+# cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
+# into C++ at build time (into the build tree, never the source tree), with the
+# library plan in data/R7PP01, and the punchout executable is built from that.
+set(QILIN_GAME_DOL "" CACHE FILEPATH "Punch-Out!! (PAL, Rev 1) main.dol: builds the punchout executable")
+if(QILIN_GAME_DOL)
+    set(QILIN_LIFT_FILES 32)
+    set(gen ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    set(gen_sources ${gen}/table.cpp ${gen}/replaced.cpp)
+    math(EXPR last "${QILIN_LIFT_FILES} - 1")
+    foreach(i RANGE ${last})
+        string(LENGTH "${i}" len)
+        if(len EQUAL 1)
+            set(i "00${i}")
+        elseif(len EQUAL 2)
+            set(i "0${i}")
+        endif()
+        list(APPEND gen_sources ${gen}/lifted_${i}.cpp)
+    endforeach()
+    add_custom_command(
+        OUTPUT ${gen}/functions.hpp ${gen_sources}
+        COMMAND qilin lift ${QILIN_GAME_DOL} -o ${gen} --plan ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
+                --files ${QILIN_LIFT_FILES}
+        DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
+        COMMENT "Lifting the game's main.dol to C++")
+    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp ${gen_sources})
+    target_include_directories(punchout PRIVATE punchout/src ${gen})
+    target_link_libraries(punchout PRIVATE qilin_rt qilin_dol)
+    # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
+    set_source_files_properties(punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp
+        PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/W4;/permissive-,-Wall;-Wextra;-Wpedantic;-Wshadow>")
+    if(MSVC)
+        set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "/w;/bigobj")
+        # Lifted code calls nest as deeply as the guest's: a large host stack.
+        target_link_options(punchout PRIVATE /STACK:16777216)
+    else()
+        set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w")
+    endif()
+endif()

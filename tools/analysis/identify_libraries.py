@@ -362,6 +362,18 @@ def small_data_bases(insns, entry):
 PLAN_KEY = {key.split(" ")[0]: key for key in PLAN}
 
 
+# Narrower ranges inside a replaced library that are lifted after all: code with
+# no hardware access whose exact behaviour matters more than a native version
+# (the heap allocator decides the game's memory layout). PAL addresses; each
+# range is whole functions. Read by qilin lift --plan, where the narrowest
+# range holding a function decides.
+EXCEPTIONS = [
+    (0x80200520, 0x802008F0, "lift", "revolution/os: OSAlloc (heaps) and OSArena (arena bounds), no hardware access"),
+    (0x80201C50, 0x80201CDC, "lift", "revolution/os: OSReport (formats through MSL's vprintf)"),
+    (0x8020C674, 0x8020C728, "lift", "revolution/os: __init_user, __init_cpp and exit (the EABI's constructors and destructors)"),
+]
+
+
 def plan_key(rhf_lib):
     if rhf_lib in RHF_LIB:
         return RHF_LIB[rhf_lib]
@@ -598,8 +610,21 @@ def main():
     ap.add_argument("--qilin", required=True)
     ap.add_argument("--dol", required=True)
     ap.add_argument("--names-out", help="write the decomp names matched to PAL addresses (derived from the game: keep out of git)")
+    ap.add_argument("--plan-out", help="write the library plan for qilin lift --plan (start, end, plan, library; tab-separated)")
     args = ap.parse_args()
     r = analyse(args.qilin, args.dol)
+    if args.plan_out:
+        with open(args.plan_out, "w", newline="\n") as f:
+            f.write("# The library plan: which code is lifted, replaced or dropped (docs/code-analysis.md).\n"
+                    "# Written by tools/analysis/identify_libraries.py --plan-out; read by qilin lift --plan.\n"
+                    "# start\tend\tplan\tlibrary\n")
+            for seg in r["segs"]:
+                f.write(f"{seg['start']:08X}\t{seg['end']:08X}\t{PLAN.get(seg['lib'], ('?',))[0]}\t{seg['lib']}\n")
+            f.write("# Exceptions: narrower ranges that override the library they sit in.\n")
+            for lo, hi, plan, note in EXCEPTIONS:
+                if not any(lo == fs for fs, _ in r["funcs"]) or not any(hi == fe for _, fe in r["funcs"]):
+                    raise SystemExit(f"exception {lo:08X}-{hi:08X} doesn't start and end at function boundaries")
+                f.write(f"{lo:08X}\t{hi:08X}\t{plan}\t{note}\n")
     segs, funcs, names, seeds, unknown, boundaries = r["segs"], r["funcs"], r["names"], r["seeds"], r["unknown"], r["boundaries"]
     sized, classes, refs, banner = r["sized"], r["classes"], r["refs"], r["banner"]
 

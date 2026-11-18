@@ -42,7 +42,11 @@ void on_call(rt::Cpu&, uint32_t target) {
     g_called = target;
 }
 void on_trap(rt::Cpu&, uint32_t, const char*) { throw Trapped{}; }
-const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap};
+void on_replaced(rt::Cpu&, uint32_t f) {
+    std::println(stderr, "difftest: unexpected call to replaced function {:08X}", f);
+    std::abort();
+}
+const rt::CpuHooks kHooks{slow_read, slow_write, on_call, on_trap, on_replaced};
 
 bool memory_op(ppc::Op op) {
     const auto f = ppc::spec(op).flags;
