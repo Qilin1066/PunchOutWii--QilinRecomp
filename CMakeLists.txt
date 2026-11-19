@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.13.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.13.1 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -145,6 +145,15 @@ add_executable(qilin_tests recomp/tests/tests.cpp)
 target_link_libraries(qilin_tests PRIVATE qilin_core qilin_rt qilin_warnings)
 qilin_tool(qilin_tests)
 add_test(NAME qilin_tests COMMAND qilin_tests)
+
+# The thread model (the game's scheduler and interrupt layer) with guest
+# functions written in C++: no game files needed.
+add_executable(punchout_threads_test punchout/tests/threads_test.cpp punchout/src/threads.cpp punchout/src/os.cpp)
+target_include_directories(punchout_threads_test PRIVATE punchout/src)
+target_link_libraries(punchout_threads_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(punchout_threads_test)
+add_test(NAME punchout_threads_test COMMAND punchout_threads_test)
+set_tests_properties(punchout_threads_test PROPERTIES TIMEOUT 30)
 
 # The lifter's differential test: random encodings of every instruction in the
 # slice, lifted at build time, run against an independent reference interpreter.

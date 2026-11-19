@@ -14,7 +14,11 @@
 // state, suspend count, priority and exit value, the current thread at
 // 0x800000E4, a mutex's owner and count, a message queue's ring. Who waits on
 // what is kept here, by the guest address of the queue waited on.
+#include <algorithm>
+#include <bit>
+#include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <memory>
@@ -181,6 +185,17 @@ void host_main(Thread* t) {
         value = e.value;
     }
     finish_thread(*t->cpu, value);
+}
+
+// Ready every thread sleeping on `queue`, without switching. True if any.
+bool wake_waiters(uint32_t queue) {
+    const auto it = g_waiters.find(queue);
+    if (it == g_waiters.end() || it->second.empty()) return false;
+    std::deque<Thread*> woken = std::move(it->second);
+    g_waiters.erase(it);
+    for (Thread* t : woken)
+        if (t->state == kWaiting) make_ready(t);
+    return true;
 }
 
 void sleep_on(Cpu& c, uint32_t queue) {
@@ -450,8 +465,11 @@ void OSWaitCond(Cpu& c) {  // (cond, mutex)
     Thread* me = g_current;
     if (rt::peek32(m + 8) != me->guest) return;
     const uint32_t count = rt::peek32(m + 0xC);
+    // Releasing the mutex and going to sleep on the condition are one step: the
+    // OS wakes the mutex's waiters with the scheduler off (OSDisableScheduler),
+    // so none of them can signal before this thread is waiting.
     release_mutex(me, m);
-    wake_all(c, m);
+    wake_waiters(m);
     sleep_on(c, cond);
     lock_mutex(c, m);
     rt::poke32(m + 0xC, count);
@@ -602,13 +620,7 @@ void init_threads(Cpu& main_cpu) {
 }
 
 void wake_all(Cpu& c, uint32_t queue) {
-    const auto it = g_waiters.find(queue);
-    if (it == g_waiters.end() || it->second.empty()) return;
-    std::deque<Thread*> woken = std::move(it->second);
-    g_waiters.erase(it);
-    for (Thread* t : woken)
-        if (t->state == kWaiting) make_ready(t);
-    reschedule(c);
+    if (wake_waiters(queue)) reschedule(c);
 }
 
 void wait_on(Cpu& c, uint32_t queue) { sleep_on(c, queue); }
@@ -656,13 +668,15 @@ void preempt(Cpu& c) {
 void finish_thread(Cpu& c, uint32_t value) {
     Thread* me = g_current;
     rt::poke32(me->guest + kVal, value);
+    // Wake without switching: a thread switched away from here would be put
+    // back as ready, and a joiner would find it not yet finished.
     for (uint32_t m : std::vector(me->mutexes)) {  // the OS unlocks what an exiting thread holds
         release_mutex(me, m);
-        wake_all(c, m);
+        wake_waiters(m);
     }
     me->state = kMoribund;
     store(me);
-    wake_all(c, me->guest + kQueueJoin);
+    wake_waiters(me->guest + kQueueJoin);
     block(c, true);  // the guest CPU belongs to another thread now; this host thread ends
 }
 

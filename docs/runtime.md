@@ -87,6 +87,19 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
     - threads: create, resume, suspend, yield, exit, cancel, join, sleep, wake;
     - mutexes, condition variables, message queues (send, jam, receive);
     - alarms (one-shot and periodic, with user data) and `OSSleepTicks`.
+  - **Atomic steps:** two steps can't be interrupted by a switch, as on the OS.
+    - `OSWaitCond` releases the mutex and goes to sleep on the condition in one step. The OS wakes the mutex's waiters with the scheduler off.
+    - A finishing thread wakes its joiners, and the waiters on its mutexes, without switching, then hands the CPU on once.
+  - **Tested without the game** (`punchout/tests/threads_test.cpp`, v0.13.1). The real scheduler and interrupt layer run small guest programs written in C++, entered through a function table as lifted code is. The order of events is checked against the OS's rules:
+    - preemption on resume;
+    - a blocking receive and the send that preempts;
+    - queue order, a full queue and jam;
+    - a mutex with a condition, recursion included;
+    - yield within a priority;
+    - suspend counts;
+    - exit values, detached threads, mutexes released on exit;
+    - an alarm firing while every thread waits;
+    - `OSSleepTicks`.
   - **Not yet:** priority inheritance on mutexes.
 - **Interrupts and callbacks** (`os.hpp`):
   - **Safe points:** completions are queued and delivered at safe points, which are whenever the guest enables interrupts and inside every replacement that waits or polls. Each is entered with the guest's registers written back, so a delivery is the same as an interrupt arriving at that instruction. If a delivery wakes a thread of higher priority, the switch happens right after it.
@@ -192,4 +205,3 @@ From there it needs more of the disc: its Wwise sound bank's files (`files/art/w
 
 1. **The renderer's gaps** as the game reaches them, and checking pictures against hardware behaviour on the player's PC.
 2. **The rest of the game's paths:** what the menus, fights and movies reach that the front end doesn't.
-3. **Tests:** a test of the thread model without the game, using small guest programs built from encoded instructions, like the differential test's.

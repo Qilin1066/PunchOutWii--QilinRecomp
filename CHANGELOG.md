@@ -11,6 +11,17 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-19
+Thread fixes, found by a new test of the thread model that needs no game files.
+
+### Fixed
+- **A lost wakeup in `OSWaitCond`:** it released the mutex with a reschedule before sleeping on the condition. A higher-priority thread could take the mutex and signal before anyone was waiting, and the signal was lost. Now releasing and sleeping are one step, as the OS does with its scheduler off.
+- **Joining a thread that wakes someone as it ends:** a finishing thread that woke a higher-priority joiner was switched away from and put back as ready, so the joiner found it not finished and waited for ever (a deadlock). A finishing thread now wakes its joiners and mutex waiters without switching.
+
+### Added
+- **A test of the thread model** (`punchout_threads_test`, in `ctest`). The real scheduler and interrupt layer run small guest programs written in C++, and the order of events is checked against the OS's rules: preemption, message queues, mutexes and conditions, yield, suspend counts, exit and join, alarms and `OSSleepTicks`. It needs no game files, so CI runs it on every platform.
+- **CI checks the shaders:** `punchout/src/shaders.inc` records a hash of the shader sources. `tools/build_shaders.py --check` fails if the sources have changed without regenerating, and it also compiles them where glslang is installed. The check uses a hash, not the SPIR-V bytes, because those differ between glslang versions.
+
 ## [0.13.0] - 2026-11-19
 The renderer: the game draws, on Vulkan. It shows the strap screen and the save dialog, takes the pointer and A, creates its save and goes on to the intro movie.
 
