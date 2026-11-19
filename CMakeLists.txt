@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.18.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.18.1 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -159,6 +159,13 @@ if(QILIN_HOST)
     target_link_libraries(qilin_vktest PRIVATE qilin_host qilin_warnings)
     add_test(NAME qilin_vktest COMMAND qilin_vktest)
     set_tests_properties(qilin_vktest PROPERTIES SKIP_RETURN_CODE 77)
+
+    # A controller reaches the game (SDL's virtual gamepad). Needs a window:
+    # skips where there's no display, as on CI runners.
+    add_executable(qilin_padtest host/tests/padtest.cpp)
+    target_link_libraries(qilin_padtest PRIVATE qilin_host SDL3::SDL3-static qilin_warnings)
+    add_test(NAME qilin_padtest COMMAND qilin_padtest)
+    set_tests_properties(qilin_padtest PROPERTIES SKIP_RETURN_CODE 77)
     # The game's renderer end to end, without the game: GX register writes through
     # the recorder and renderer, the frame read back (skipped without Vulkan 1.3).
     add_executable(punchout_render_test punchout/tests/render_test.cpp punchout/src/recorder.cpp punchout/src/texture.cpp

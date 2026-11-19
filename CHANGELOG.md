@@ -11,6 +11,12 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-19
+### Fixed
+- **Controllers already connected when the game starts are used.** The display opened a pad only when SDL announced one being added; it now opens the first one at start-up too, and another takes over when it's unplugged. Controller input is taken whichever window has the focus (the console the game was started from often keeps it).
+- **The console says what it found:** each controller SDL sees (name, vendor, product, and whether SDL knows its layout), the one being played with, the first button press from it, and disconnections. `PUNCHOUT_INPUT_LOG=1` logs every change of the buttons.
+- `qilin_padtest`: a virtual Xbox controller, connected before the window and another later, must reach the game (skips without a display).
+
 ## [0.18.0] - 2026-11-19
 Enhancement options, with the same settings menu, file and data folder as the other Qilin recomps (BeatTheBeat and APB).
 

@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 
 #include "qilin/host/vulkan.hpp"
@@ -47,6 +49,31 @@ VkShaderModule module(const Gpu& gpu, const uint32_t* words, size_t bytes) {
     VkShaderModule m;
     check(vkCreateShaderModule(gpu.device, &ci, nullptr, &m), "vkCreateShaderModule");
     return m;
+}
+
+// What the console says about controllers, so a player can see what SDL found.
+void say(const char* format, ...) {
+    va_list a;
+    va_start(a, format);
+    std::fputs("punchout: ", stderr);
+    std::vfprintf(stderr, format, a);
+    std::fputc('\n', stderr);
+    va_end(a);
+    std::fflush(stderr);
+}
+
+// Every joystick SDL sees, and whether it knows its layout (a gamepad).
+void list_controllers() {
+    int n = 0;
+    SDL_JoystickID* ids = SDL_GetJoysticks(&n);
+    if (n == 0) say("controllers: none found (keyboard and mouse only). One plugged in later is picked up.");
+    for (int i = 0; i < n; ++i) {
+        const char* name = SDL_GetJoystickNameForID(ids[i]);
+        say("controllers: \"%s\" (vendor %04x, product %04x)%s", name ? name : "?", SDL_GetJoystickVendorForID(ids[i]),
+            SDL_GetJoystickProductForID(ids[i]),
+            SDL_IsGamepad(ids[i]) ? "" : ": SDL doesn't know its button layout, so it can't be used as a pad");
+    }
+    SDL_free(ids);
 }
 
 SDL_DisplayID display_named(const std::string& name) {
@@ -90,6 +117,29 @@ struct Display::Impl {
     uint32_t buttons = 0;
     SDL_Gamepad* pad = nullptr;
     bool rumbling = false;
+    bool pad_pressed = false;  // a button seen since the pad was opened (said once)
+    bool log_input = false;    // PUNCHOUT_INPUT_LOG: every change of the buttons
+    uint32_t logged = 0;
+
+    // Play with this one (the first, or the one just connected if there's none).
+    void open_pad(SDL_JoystickID id) {
+        if (pad) return;
+        pad = SDL_OpenGamepad(id);
+        pad_pressed = false;
+        if (!pad) {
+            say("controllers: can't open \"%s\": %s", SDL_GetGamepadNameForID(id) ? SDL_GetGamepadNameForID(id) : "?", SDL_GetError());
+            return;
+        }
+        const char* name = SDL_GetGamepadName(pad);
+        say("controllers: playing with \"%s\" (press a button to check it)", name ? name : "a controller");
+    }
+    void open_first_pad() {
+        int n = 0;
+        if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
+            for (int i = 0; i < n && !pad; ++i) open_pad(ids[i]);
+            SDL_free(ids);
+        }
+    }
     float stick_x = 0, stick_y = 0;
     bool moved = false;
     float mouse_x = 0, mouse_y = 0;  // window pixels
@@ -360,7 +410,13 @@ Display::Display(const Options& options) : impl_(std::make_unique<Impl>()) {
         d.target = Image::create(d.gpu, options.width, options.height, kFrameFormat,
                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     } else {
+        // Controllers work whichever window has the focus (the game is often
+        // started from a console, which may keep it).
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
         if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) die("SDL can't start: %s", SDL_GetError());
+        d.log_input = std::getenv("PUNCHOUT_INPUT_LOG") != nullptr;
+        list_controllers();
+        d.open_first_pad();  // those already connected (not only the ones SDL announces later)
         const SDL_DisplayID on = display_named(options.monitor);
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, options.title);
@@ -438,15 +494,14 @@ bool Display::poll() {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
         if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) d.need_rebuild = true;
-        if (e.type == SDL_EVENT_GAMEPAD_ADDED && !d.pad) d.pad = SDL_OpenGamepad(e.gdevice.which);
+        if (e.type == SDL_EVENT_JOYSTICK_ADDED && !SDL_IsGamepad(e.jdevice.which)) list_controllers();  // say why it isn't used
+        if (e.type == SDL_EVENT_GAMEPAD_ADDED) d.open_pad(e.gdevice.which);
         if (e.type == SDL_EVENT_GAMEPAD_REMOVED && d.pad && SDL_GetGamepadID(d.pad) == e.gdevice.which) {
+            say("controllers: \"%s\" disconnected", SDL_GetGamepadName(d.pad) ? SDL_GetGamepadName(d.pad) : "the controller");
             SDL_CloseGamepad(d.pad);
             d.pad = nullptr;
-            int n = 0;  // another takes over, if there is one
-            if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
-                if (n > 0) d.pad = SDL_OpenGamepad(ids[0]);
-                SDL_free(ids);
-            }
+            d.rumbling = false;
+            d.open_first_pad();  // another takes over, if there is one
         }
         // Full screen, whatever else is going on.
         if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
@@ -496,7 +551,13 @@ bool Display::poll() {
     } else {
         d.stick_x = d.stick_y = 0;
     }
+    if (d.pad && !d.pad_pressed && (b & ~uint32_t(kPadClick))) {
+        d.pad_pressed = true;
+        say("controllers: \"%s\" works (buttons 0x%x)", SDL_GetGamepadName(d.pad) ? SDL_GetGamepadName(d.pad) : "the controller", b);
+    }
     if (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) b |= kPadClick;
+    if (d.log_input && b != d.logged) say("input: buttons 0x%05x", b);
+    d.logged = b;
     d.buttons = b;
     return true;
 }
