@@ -20,4 +20,11 @@ bool take_xfb(uint64_t* sequence, unsigned timeout_ms, uint32_t& xfb, uint32_t& 
 // `*sequence`; if one came, convert it to RGBA8 and return true.
 bool take_frame(uint64_t* sequence, unsigned timeout_ms, std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height);
 
+// From any thread: the frame buffers the game has handed VI
+// (VISetNextFrameBuffer), one per frame it draws. Scripted input (main.cpp) is
+// timed by it, so it lands at the same point of the game however fast the
+// host draws: the game waits for the GPU, so on a slow one its frames, not
+// the clock, measure its progress.
+uint32_t frame_count();
+
 }  // namespace punchout

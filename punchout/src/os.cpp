@@ -161,11 +161,16 @@ void OSSetCurrentContext(Cpu& c) { rt::poke32(0x800000D4u, c.r[3]); rt::poke32(0
 void OSClearContext(Cpu&) {}
 void OSRegisterShutdownFunction(Cpu&) {}
 
-// The write-gather pipe's address register: the FIFO is drained as written, so
-// its "data not yet sent" bit (0) always reads clear.
+// The write-gather pipe's address register: bursts are sent as they fill, so
+// its "data not yet sent" bit (0) always reads clear. Writing it resets the
+// pipe, as on the hardware (Dolphin: GPFifo::ResetGatherPipe).
 uint32_t g_wpar = 0;
+void (*g_wpar_reset)() = nullptr;
 void PPCMfwpar(Cpu& c) { c.r[3] = g_wpar & ~1u; }
-void PPCMtwpar(Cpu& c) { g_wpar = c.r[3]; }
+void PPCMtwpar(Cpu& c) {
+    g_wpar = c.r[3];
+    if (g_wpar_reset) g_wpar_reset();
+}
 
 // ---- caches: the host's are coherent, so only dcbz's zeroing is left to do.
 void nothing(Cpu&) {}
@@ -363,6 +368,8 @@ uint64_t time_base() {
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline) {
     g_timers.push_back({std::move(poll), std::move(deadline)});
 }
+void on_wpar_write(void (*reset)()) { g_wpar_reset = reset; }
+
 uint64_t next_timer_deadline() {
     uint64_t t = UINT64_MAX;
     for (const auto& timer : g_timers) t = std::min(t, timer.deadline());

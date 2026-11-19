@@ -6,12 +6,15 @@
 // window and the GPU: it handles the window's events, draws the frames the
 // guest records (renderer.cpp) and shows the frame buffer VI names.
 // --headless runs without a window, GPU or sound; --offscreen draws without a
-// window (with PUNCHOUT_DUMP=<folder>, a frame a second is saved there as PPM).
+// window (with PUNCHOUT_DUMP=<folder>, every 60th frame shown is saved there as
+// PPM; PUNCHOUT_DUMP_EVERY=n changes the 60).
 // settings.ini in the per-user folder holds the controls and the EFB's
 // resolution (settings.hpp); PUNCHOUT_SCALE overrides the resolution.
 // PUNCHOUT_INPUT presses buttons on a schedule, for runs without a player:
-// "A@12,Start@20.5" holds each for a fifth of a second at that many seconds;
-// PUNCHOUT_POINTER="x,y" holds the pointer there (-1 to 1, y up).
+// "A@12,Start@20.5" holds each for a fifth of a second at that many seconds
+// of game time (the game's frames over 60, so a slow GPU doesn't shift them);
+// PUNCHOUT_POINTER="x,y" holds the pointer there (-1 to 1, y up);
+// "x,y;x,y@40;x,y@52" moves it there at those many seconds.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -134,10 +137,34 @@ int main(int argc, char** argv) {
             }
 
     const char* dump = offscreen ? std::getenv("PUNCHOUT_DUMP") : nullptr;
+    const char* every_text = std::getenv("PUNCHOUT_DUMP_EVERY");
+    const uint64_t every = every_text ? std::max<uint64_t>(1, std::strtoull(every_text, nullptr, 10)) : 60;
     const std::vector<Press> presses = scripted_input(std::getenv("PUNCHOUT_INPUT"));
     const auto t0 = std::chrono::steady_clock::now();
     float cursor_x = 0, cursor_y = 0;
-    if (const char* p = std::getenv("PUNCHOUT_POINTER")) std::sscanf(p, "%f,%f", &cursor_x, &cursor_y);
+    struct Point {
+        double at;
+        float x, y;
+    };
+    std::vector<Point> points;  // PUNCHOUT_POINTER's schedule, in time order
+    if (const char* p = std::getenv("PUNCHOUT_POINTER")) {
+        for (const char* at = p; *at;) {
+            Point pt{0, 0, 0};
+            int used = 0;
+            if (std::sscanf(at, "%f,%f%n", &pt.x, &pt.y, &used) != 2)
+                rt::fatal(nullptr, "PUNCHOUT_POINTER: expected x,y at \"%s\"", at);
+            at += used;
+            if (*at == '@') {
+                if (std::sscanf(at + 1, "%lf%n", &pt.at, &used) != 1) rt::fatal(nullptr, "PUNCHOUT_POINTER: expected seconds after @");
+                at += 1 + used;
+            }
+            if (!points.empty() && pt.at < points.back().at) rt::fatal(nullptr, "PUNCHOUT_POINTER: times must increase");
+            points.push_back(pt);
+            if (*at == ';') ++at;
+            else if (*at) rt::fatal(nullptr, "PUNCHOUT_POINTER: unexpected \"%s\"", at);
+        }
+        if (!points.empty()) cursor_x = points[0].x, cursor_y = points[0].y;
+    }
     auto last = t0;
     uint64_t sequence = 0, shown = 0;
     std::vector<uint8_t> rgba;
@@ -149,7 +176,7 @@ int main(int argc, char** argv) {
         }
         if (display) {
             uint32_t held = display->buttons();
-            const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            const double now = punchout::frame_count() / 60.0;  // game time: see the top
             for (const Press& p : presses)
                 if (now >= p.at && now < p.at + 0.2) held |= p.button;
             uint32_t controls = 0;
@@ -167,6 +194,8 @@ int main(int argc, char** argv) {
             last = tick;
             float mx, my, sx, sy;
             if (display->mouse_moved(mx, my)) cursor_x = mx, cursor_y = my;
+            for (const Point& p : points)
+                if (now >= p.at && now < p.at + 0.2) cursor_x = p.x, cursor_y = p.y;
             display->right_stick(sx, sy);
             cursor_x = std::clamp(cursor_x + sx * dt * 2.0f, -1.2f, 1.2f);
             cursor_y = std::clamp(cursor_y + sy * dt * 2.0f, -1.2f, 1.2f);
@@ -194,14 +223,15 @@ int main(int argc, char** argv) {
             uint64_t s2 = sequence - 1;
             if (punchout::take_frame(&s2, 0, rgba, w, h)) display->present(w, h, rgba.data(), 16.0f / 9.0f);
         }
-        if (dump && ++shown % 60 == 0) {
+        if (dump && ++shown % every == 0) {
             const std::vector<uint8_t> px = display->read_back();
             char name[512];
-            std::snprintf(name, sizeof name, "%s/frame%05llu.ppm", dump, static_cast<unsigned long long>(shown / 60));
+            std::snprintf(name, sizeof name, "%s/frame%05llu.ppm", dump, static_cast<unsigned long long>(shown / every));
             if (FILE* fp = std::fopen(name, "wb")) {
                 std::fprintf(fp, "P6\n1280 720\n255\n");
                 for (size_t i = 0; i + 3 < px.size(); i += 4) std::fwrite(&px[i], 1, 3, fp);
                 std::fclose(fp);
+                rt::log("dumped %s at %.1f s of game time", name, punchout::frame_count() / 60.0);
             }
         }
     }

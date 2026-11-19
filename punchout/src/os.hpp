@@ -25,6 +25,10 @@ void post_interrupt(std::function<void(qilin::rt::Cpu&)> work);
 // every thread blocked knows how long to sleep.
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline);
 uint64_t next_timer_deadline();
+
+// Called when the guest writes WPAR (PPCMtwpar), which resets the write-gather
+// pipe; the GPU (gpu.cpp) installs it.
+void on_wpar_write(void (*reset)());
 // The guest's time base: 60.75 MHz (a quarter of the bus clock) since boot.
 uint64_t time_base();  // ticks since 1 January 2000, 00:00 local time, as on the console
 // Days since 1970-01-01 of a Gregorian date, and back.

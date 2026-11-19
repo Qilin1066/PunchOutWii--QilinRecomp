@@ -3,9 +3,11 @@
 // GX, and the engine's own mesh drawers, write to the write-gather pipe at
 // 0xCC008000.
 //
-// The command processor here decodes as the stream arrives: there's no FIFO in
-// guest memory to overflow, so the CP reads as idle, its read pointer is always
-// its write pointer, and the CPU never waits on it. Draw-done and token
+// The pipe writes each 32-byte burst to the CPU's FIFO in guest memory, as the
+// hardware does. While the command processor is linked to that FIFO (normal
+// drawing), it decodes the burst at once, so the CP reads as idle, its read
+// pointer is always its write pointer, and the CPU never waits on it. Unlinked
+// (GXBeginDisplayList), the bursts only build the display list in memory. Draw-done and token
 // commands raise the pixel engine's interrupts, as the hardware does when the
 // GPU reaches them. What the commands mean for drawing is the renderer's job
 // (renderer.cpp): the decoder keeps the registers and hands primitives, state
@@ -21,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <bit>
 #include <vector>
 
@@ -167,8 +170,10 @@ void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
 void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_display_list);
 
 void call_display_list(Cpu& c, uint32_t address, uint32_t size) {
-    // Physical addresses: MEM1 from 0, MEM2 from 0x10000000; both cached at +0x80000000.
-    const uint32_t va = (address & ~31u) + 0x80000000u;
+    // Physical addresses: MEM1 from 0, MEM2 from 0x10000000; both cached at
+    // +0x80000000. The GPU ignores the top three bits, so a virtual address
+    // (GXCallDisplayList passes the caller's pointer) reaches the same memory.
+    const uint32_t va = (address & 0x1FFFFFE0u) + 0x80000000u;
     size &= ~31u;
     if (!((va >= 0x80000000u && va + size <= 0x81800000u) || (va >= 0x90000000u && va + size <= 0x94000000u)))
         rt::fatal(&c, "GX display list at %08X (%u bytes) is outside MEM1 and MEM2", address, size);
@@ -177,14 +182,38 @@ void call_display_list(Cpu& c, uint32_t address, uint32_t size) {
     decode(c, rt::guest_ptr(va), size, used, true);
 }
 
+// The last primitive decoded, for bad_command: a wrong vertex size is the
+// usual way the decoder loses its place.
+struct LastPrimitive {
+    uint8_t op = 0;
+    uint32_t count = 0, size = 0, vcd_lo = 0, vcd_hi = 0, vat[3] = {};
+} g_last_primitive;
+// And the last CP register writes, oldest first, for the same report.
+struct CpWrite {
+    uint8_t reg;
+    uint32_t value;
+    bool in_display_list;
+};
+CpWrite g_cp_writes[8] = {};
+unsigned g_cp_write_count = 0;
+
 [[noreturn]] void bad_command(Cpu& c, const uint8_t* base, size_t used, size_t left, bool in_display_list) {
     const uint8_t* at = base + used;
     char before[3 * 48 + 1] = {}, bytes[3 * 16 + 1] = {};
     const size_t back = used < 48 ? used : 48;
     for (size_t i = 0; i < back; ++i) std::snprintf(before + 3 * i, 4, "%02X ", at[i - back]);
     for (size_t i = 0; i < left && i < 16; ++i) std::snprintf(bytes + 3 * i, 4, "%02X ", at[i]);
-    rt::fatal(&c, "GX command stream: unknown command %02X %s(before: %s| from it: %s); the decoder has lost its place",
-              at[0], in_display_list ? "in a display list " : "", before, bytes);
+    const LastPrimitive& l = g_last_primitive;
+    char cp[8 * 24 + 1] = {};
+    for (unsigned i = 0, n = 0; i < 8 && i < g_cp_write_count; ++i) {
+        const CpWrite& w = g_cp_writes[(g_cp_write_count - std::min(g_cp_write_count, 8u) + i) % 8];
+        n += static_cast<unsigned>(std::snprintf(cp + n, sizeof cp - n, "%02X=%08X%s ", w.reg, w.value, w.in_display_list ? "(DL)" : ""));
+    }
+    rt::fatal(&c,
+              "GX command stream: unknown command %02X %s(before: %s| from it: %s); the decoder has lost its place. "
+              "The last primitive: %02X, %u vertices of %u bytes (VCD %08X %08X, VAT %08X %08X %08X); the last CP writes: %s",
+              at[0], in_display_list ? "in a display list " : "", before, bytes, l.op, l.count, l.size, l.vcd_lo, l.vcd_hi,
+              l.vat[0], l.vat[1], l.vat[2], cp);
 }
 
 uint32_t be32(const uint8_t* p) { return uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3]; }
@@ -201,6 +230,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
         } else if (op == 0x08) {  // LOAD_CP_REG: register, value
             if (left < 6) return;
             g_cpmem[p[1]] = be32(p + 2);
+            g_cp_writes[g_cp_write_count++ % 8] = {p[1], be32(p + 2), in_display_list};
             gx::state_changed();
             n = 6;
         } else if (op == 0x10) {  // LOAD_XF_REG: (count - 1) << 16 | address, then the values
@@ -245,6 +275,8 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                         vertex_size(op & 7), g_cpmem[0x50], g_cpmem[0x60], g_cpmem[0x70 + (op & 7)], g_cpmem[0x80 + (op & 7)],
                         g_cpmem[0x90 + (op & 7)]);
             if (left < 3 + bytes) return;
+            g_last_primitive = {op, count, vertex_size(op & 7), g_cpmem[0x50], g_cpmem[0x60],
+                                {g_cpmem[0x70 + (op & 7)], g_cpmem[0x80 + (op & 7)], g_cpmem[0x90 + (op & 7)]}};
             gx::record_primitive(regs(), op, p + 3, count);
             ++g_stats.draws;
             g_stats.vertices += count;
@@ -272,16 +304,35 @@ void pipe_write(Cpu& c, uint32_t value, unsigned size) {
     }
 }
 
+// The PI's FIFO pointers are physical addresses (MEM2 from 0x10000000); bit 26
+// of the write pointer is its wrap flag (GXGetFifoWrap), never an address bit.
+constexpr uint32_t kFifoAddress = 0x1FFFFFE0u & ~0x04000000u, kFifoWrapped = 0x04000000u;
+constexpr unsigned kCpControl = 0x02 / 2, kCpWriteLo = 0x34 / 2, kCpWriteHi = 0x36 / 2;
+
+// CP control bit 4 links the command processor to the CPU's FIFO: then the
+// GPU reads what the pipe writes. GXBeginDisplayList points the CPU's FIFO at
+// the list's buffer and unlinks, so the commands it gathers go to memory only.
+bool linked() { return (g_cp[kCpControl] & 0x10) != 0; }
+
 void send_burst(Cpu& c) {
     g_gathered = 0;
+    // The burst goes to memory at the PI's write pointer, which wraps at the end.
+    const uint32_t base = g_pi[kPiFifoBase] & kFifoAddress, end = g_pi[kPiFifoEnd] & kFifoAddress;
+    if (end > base) {
+        const uint32_t w = g_pi[kPiFifoWrite] & kFifoAddress;
+        if (!((w < 0x01800000u && w + 32 <= 0x01800000u) || (w >= 0x10000000u && w + 32 <= 0x14000000u)))
+            rt::fatal(&c, "the CPU's FIFO writes to %08X, outside MEM1 and MEM2", w);
+        std::memcpy(rt::guest_ptr(0x80000000u | w), g_gather, 32);
+        const uint32_t next = w + 32;
+        g_pi[kPiFifoWrite] = next >= end ? base | kFifoWrapped : next | (g_pi[kPiFifoWrite] & kFifoWrapped);
+    }
+    if (!linked()) return;  // building a display list: the GPU doesn't see it
+    // Linked, the GP FIFO's write pointer follows the CPU's.
+    const uint32_t cp_write = g_pi[kPiFifoWrite] & kFifoAddress;
+    g_cp[kCpWriteLo] = static_cast<uint16_t>(cp_write);
+    g_cp[kCpWriteHi] = static_cast<uint16_t>(cp_write >> 16);
     g_fifo.insert(g_fifo.end(), g_gather, g_gather + 32);
     g_stats.fifo_bytes += 32;
-    // The PI's write pointer moves through the CPU FIFO's ring as on hardware.
-    if (g_pi[kPiFifoEnd] > g_pi[kPiFifoBase]) {
-        uint32_t w = (g_pi[kPiFifoWrite] & 0x03FFFFFFu) + 32;
-        if (w >= (g_pi[kPiFifoEnd] & 0x03FFFFFFu)) w = (g_pi[kPiFifoBase] & 0x03FFFFFFu) + (w - (g_pi[kPiFifoEnd] & 0x03FFFFFFu));
-        g_pi[kPiFifoWrite] = w;
-    }
     decode(c, g_fifo.data(), g_fifo.size(), g_fifo_at, false);
     if (g_fifo_at == g_fifo.size()) {
         g_fifo.clear();
@@ -297,10 +348,9 @@ uint32_t read_reg(Cpu& c, uint32_t a, unsigned size) {
     if (a >= 0xCC000000u && a < 0xCC000080u && size == 2) {  // command processor
         const unsigned i = (off & 0x7F) / 2;
         if (i == 0) return 0x000C;  // status: read and command idle, no overflow
-        if (off >= 0x30 && off <= 0x3A) {  // RW distance 0; read and write pointers where the PI wrote
+        if (off >= 0x30 && off <= 0x3A) {  // RW distance 0; the read pointer is the write pointer
             if (off == 0x30 || off == 0x32) return 0;
-            const uint32_t w = g_pi[kPiFifoWrite] & 0x03FFFFFFu;
-            return (off & 2) ? w >> 16 : w & 0xFFFF;
+            return g_cp[(off & 2) ? kCpWriteHi : kCpWriteLo];
         }
         return g_cp[i];
     }
@@ -342,6 +392,10 @@ void write_reg(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
 }  // namespace
 
 void init_gpu() {
+    // Writing WPAR resets the pipe: bytes not yet sent as a burst are dropped.
+    // GX does it after switching the CPU's FIFO (GXBeginDisplayList), so
+    // GXFlush's padding stays out of the new FIFO.
+    on_wpar_write([] { g_gathered = 0; });
     map_mmio({0xCC000000u, 0xCC000080u, "the command processor", read_reg, write_reg});
     map_mmio({0xCC001000u, 0xCC001080u, "the pixel engine", read_reg, write_reg});
     map_mmio({0xCC003000u, 0xCC003100u, "the processor interface", read_reg, write_reg});

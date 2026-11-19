@@ -4,6 +4,8 @@
 //
 // The rate is 60 Hz: the console's settings report EuRGB60 (sc.cpp), which
 // this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
+#include <atomic>
+
 #include "boot.hpp"
 #include "recorder.hpp"
 #include "audio.hpp"
@@ -27,6 +29,7 @@ uint32_t g_retraces = 0;       // VIGetRetraceCount
 uint64_t g_next_retrace = 0;   // time base of the next retrace
 uint32_t g_next_fb = 0, g_current_fb = 0;
 uint32_t g_frames = 0;  // frame buffers handed over
+std::atomic<uint32_t> g_frames_seen{0};  // the same, for other threads
 bool g_black = true;
 uint32_t g_mode = 0;           // the GXRenderModeObj last configured
 
@@ -122,6 +125,7 @@ void VIFlush(Cpu&) {}
 void VISetNextFrameBuffer(Cpu& c) {
     g_next_fb = c.r[3];
     ++g_frames;
+    g_frames_seen.store(g_frames, std::memory_order_relaxed);
 }
 void VISetBlack(Cpu& c) { g_black = c.r[3] != 0; }
 void VIGetRetraceCount(Cpu& c) { c.r[3] = g_retraces; }
@@ -152,5 +156,7 @@ const rt::Provided kReplacements[] = {
 }  // namespace
 
 std::span<const rt::Provided> vi_replacements() { return kReplacements; }
+
+uint32_t frame_count() { return g_frames_seen.load(std::memory_order_relaxed); }
 
 }  // namespace punchout
