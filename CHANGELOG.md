@@ -11,6 +11,21 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.6] - 2026-11-19
+Every replaced function that lifted code calls directly now has a replacement.
+
+### Added
+- **The five that didn't:**
+  - `OSTicksToCalendarTime`;
+  - the game's four ways out: `OSReturnToMenu`, `OSReturnToDataManager` and `OSShutdownSystem` close the program, and `OSRestart` (Reset) starts it again with the same command line.
+
+  Without them, the game would have stopped the first time the player left through the HOME Button Menu, or when it worked out a date.
+- **`tools/analysis/check_replacements.py`** lists any replaced function the lifted code calls that has no replacement, with its callers. It decides each address by the narrowest plan range, as the lifter does.
+- **Tests** for dates (leap days, weekdays, before 2000, and `OSGetTime` against the PC's clock), and for the power-off exit and the restart. These are two new `ctest` entries: the restarted program must pass the whole thread test.
+
+### Fixed
+- **Dates:** the time base counted from start-up, so every date the game worked out was 1 January 2000. It now starts at the PC's local time counted from 1 January 2000, as the console's does.
+
 ## [0.13.5] - 2026-11-19
 ### Fixed
 - **MinGW builds:** MinGW's standard library already defines `NOMINMAX`, so defining it again before `<windows.h>` (in `runtime/src/memory.cpp` and `punchout/src/threads.cpp`) was a warning, which is an error with `QILIN_WERROR`. Both now define it only if it isn't defined.

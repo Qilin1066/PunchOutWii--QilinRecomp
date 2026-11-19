@@ -29,6 +29,7 @@
 #include "hw.hpp"
 #include "gx.hpp"
 #include "input.hpp"
+#include "os.hpp"
 #include "settings.hpp"
 #include "qilin/host/paths.hpp"
 #include "renderer.hpp"
@@ -67,6 +68,7 @@ std::vector<Press> scripted_input(const char* text) {
 
 int main(int argc, char** argv) {
     namespace rt = qilin::rt;
+    punchout::set_command_line(argc, argv);  // for the game's reset
     bool headless = false, offscreen = false;
     const char* folder = nullptr;
     for (int i = 1; i < argc; ++i) {

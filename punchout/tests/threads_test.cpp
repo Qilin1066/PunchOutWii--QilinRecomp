@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -34,12 +36,13 @@ constexpr uint32_t kCreateThread = 0x802085CCu, kResumeThread = 0x80208C3Cu, kSu
                    kUnlockMutex = 0x802065B8u, kInitCond = 0x802066ECu, kWaitCond = 0x802066F0u,
                    kSignalCond = 0x802067CCu, kInitMessageQueue = 0x80205A98u, kSendMessage = 0x80205AF8u,
                    kReceiveMessage = 0x80205BC0u, kJamMessage = 0x80205C9Cu, kCreateAlarm = 0x801FFCE4u,
-                   kSetAlarm = 0x801FFF44u, kSleepTicks = 0x802092C8u;
+                   kSetAlarm = 0x801FFF44u, kSleepTicks = 0x802092C8u, kGetTime = 0x80209370u,
+                   kTicksToCalendarTime = 0x802095BCu, kShutdownSystem = 0x80206B84u, kRestart = 0x80206CA0u;
 
 // Guest memory the tests use (MEM1, clear of the addresses the OS fixes).
 constexpr uint32_t kThreadA = 0x80100000u, kThreadB = 0x80100400u, kStackA = 0x80110000u, kStackB = 0x80120000u,
                    kStackSize = 0x8000u, kMutex = 0x80130000u, kCond = 0x80130100u, kQueue = 0x80130200u,
-                   kQueueArray = 0x80130300u, kAlarm = 0x80130400u, kOut = 0x80130500u;
+                   kQueueArray = 0x80130300u, kAlarm = 0x80130400u, kOut = 0x80130500u, kCalendar = 0x80130600u;
 
 std::vector<std::string> g_log;
 int g_failures = 0;
@@ -150,6 +153,8 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     STUB(kInitCond),
     STUB(kWaitCond),
     STUB(kSignalCond),
+    STUB(kShutdownSystem),
+    STUB(kRestart),
     STUB(kGetCurrentThread),
     STUB(kYieldThread),
     STUB(kCreateThread),
@@ -158,6 +163,8 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     STUB(kResumeThread),
     STUB(kSuspendThread),
     STUB(kSleepTicks),
+    STUB(kGetTime),
+    STUB(kTicksToCalendarTime),
 };
 #undef STUB
 
@@ -279,9 +286,44 @@ void test_alarm_and_sleep(Cpu& c) {
            {"alarm", "slept", "on time", "disarmed"});
 }
 
+// OSTicksToCalendarTime and OSGetTime: dates from the time base, which
+// counts from 1 January 2000 local time as on the console.
+std::string calendar(Cpu& c, int64_t ticks) {
+    c.r[3] = static_cast<uint32_t>(uint64_t(ticks) >> 32), c.r[4] = static_cast<uint32_t>(ticks), c.r[5] = kCalendar;
+    rt::call(c, kTicksToCalendarTime);
+    char out[96];
+    const auto f = [](unsigned i) { return static_cast<int>(rt::peek32(kCalendar + 4 * i)); };
+    std::snprintf(out, sizeof out, "%04d-%02d-%02d %02d:%02d:%02d.%03d%03d wday %d yday %d", f(5), f(4) + 1, f(3), f(2),
+                  f(1), f(0), f(8), f(9), f(6), f(7));
+    return out;
+}
+
+void test_calendar(Cpu& c) {
+    const int64_t s = int64_t(punchout::kTimerHz), day = s * 86400;
+    note(calendar(c, 0));
+    note(calendar(c, -1 * s));  // a second before: 1999
+    // 2024-02-29 (a leap day) 13:45:30.250128 (128 us is exactly 7776 ticks): 8825 days after 2000-01-01
+    note(calendar(c, 8825 * day + (13 * 3600 + 45 * 60 + 30) * s + s / 4 + s * 128 / 1000000));
+    note(calendar(c, 9819 * day));  // 2026-11-19
+    expect("OSTicksToCalendarTime: dates, weekdays, leap days, before 2000",
+           {"2000-01-01 00:00:00.000000 wday 6 yday 0", "1999-12-31 23:59:59.000000 wday 5 yday 364",
+            "2024-02-29 13:45:30.250128 wday 4 yday 59", "2026-11-19 00:00:00.000000 wday 4 yday 322"});
+
+    // The time base is the PC's local date and time.
+    rt::call(c, kGetTime);
+    const int64_t now = static_cast<int64_t>(uint64_t(c.r[3]) << 32 | c.r[4]);
+    const std::string got = calendar(c, now).substr(0, 16);  // to the minute
+    const std::time_t t = std::time(nullptr);
+    char want[32];
+    std::strftime(want, sizeof want, "%Y-%m-%d %H:%M", std::localtime(&t));
+    note(got == want ? "today" : got + " but it's " + want);
+    expect("OSGetTime is the local date and time", {"today"});
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    punchout::set_command_line(argc, argv);
     // Every OS function the tests call is a replacement in the real build.
     static std::vector<rt::ReplacedEntry> replaced;
     for (auto list : {punchout::thread_replacements(), punchout::os_replacements()})
@@ -297,12 +339,29 @@ int main() {
     punchout::set_interrupts_enabled(true);
 
     Cpu& c = main_cpu;
+    // The game's way out (OSShutdownSystem and the rest) closes the program;
+    // its reset starts it again with the same command line. Each is a ctest of
+    // its own (CMakeLists.txt): the first must exit cleanly, the second must
+    // come back and pass.
+    if (const char* mode = std::getenv("THREADS_TEST_LEAVE")) {
+        if (std::strcmp(mode, "shutdown") == 0) rt::call(c, kShutdownSystem);
+        if (std::strcmp(mode, "restart") == 0) {
+#if defined(_WIN32)
+            _putenv("THREADS_TEST_LEAVE=restarted");
+#else
+            setenv("THREADS_TEST_LEAVE", "restarted", 1);
+#endif
+            rt::call(c, kRestart);
+        }
+        if (std::strcmp(mode, "restarted") == 0) std::printf("ok   OSRestart started the program again\n");
+    }
     test_preemption(c);
     test_message_queue(c);
     test_mutex_and_condition(c);
     test_yield_and_suspend(c);
     test_exit(c);
     test_alarm_and_sleep(c);
+    test_calendar(c);
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
     std::fflush(nullptr);
     std::_Exit(g_failures ? 1 : 0);  // other guest threads are parked on host threads

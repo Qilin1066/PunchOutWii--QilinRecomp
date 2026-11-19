@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <thread>
 #include <cstring>
 #include <deque>
@@ -181,13 +184,59 @@ void LCStore(Cpu& c) {  // (dest, srcLC, bytes) -> DMA transactions issued
     c.r[3] = (n + 127) / 128;
 }
 
-// ---- time: the time base counts at a quarter of the bus clock, from boot.
+// ---- time: the time base counts at a quarter of the bus clock, from 1 January 2000 (time_base).
 void OSGetTime(Cpu& c) {
     const uint64_t t = time_base();
     c.r[3] = static_cast<uint32_t>(t >> 32);
     c.r[4] = static_cast<uint32_t>(t);
 }
 void OSGetTick(Cpu& c) { c.r[3] = static_cast<uint32_t>(time_base()); }
+
+// OSTicksToCalendarTime(ticks (r3:r4), OSCalendarTime* (r5)): the time base
+// (from 1 January 2000) as a date. OSCalendarTime is ten words: sec, min,
+// hour, mday (1-31), mon (0-11), year, wday (0 = Sunday), yday (0-365), msec,
+// usec.
+void OSTicksToCalendarTime(Cpu& c) {
+    const int64_t ticks = static_cast<int64_t>(uint64_t(c.r[3]) << 32 | c.r[4]);
+    const uint32_t td = c.r[5];
+    constexpr int64_t kPerSecond = int64_t(kTimerHz), kPerDay = kPerSecond * 86400;
+    int64_t days = ticks / kPerDay, rest = ticks % kPerDay;
+    if (rest < 0) rest += kPerDay, --days;
+    const int64_t secs = rest / kPerSecond, sub = rest % kPerSecond;
+    const int64_t z = days + days_from_civil(2000, 1, 1);
+    int64_t year;
+    unsigned mon, mday;
+    civil_from_days(z, year, mon, mday);
+    const auto put = [&](unsigned field, int64_t v) { rt::poke32(td + 4 * field, static_cast<uint32_t>(v)); };
+    put(0, secs % 60);
+    put(1, secs / 60 % 60);
+    put(2, secs / 3600);
+    put(3, mday);
+    put(4, mon - 1);
+    put(5, year);
+    put(6, ((z % 7) + 11) % 7);  // 1970-01-01 was a Thursday
+    put(7, z - days_from_civil(year, 1, 1));
+    put(8, sub * 1000 / kPerSecond);
+    put(9, sub * 1000000 / kPerSecond % 1000);
+}
+
+// ---- leaving the game. The game's exit code (800E249C, after the HOME Button
+// Menu or the power and reset buttons) blanks the screen and calls one of these,
+// then spins: on the console they never return. Here the Wii Menu, data
+// management and power off close the program; reset starts it again.
+[[noreturn]] void leave(const char* why) {
+    rt::log("the game chose %s: closing", why);
+    std::fflush(nullptr);
+    std::_Exit(0);  // guest threads are parked on host threads: no static destructors
+}
+void OSReturnToMenu(Cpu&) { leave("the Wii Menu"); }
+void OSReturnToDataManager(Cpu&) { leave("Data Management"); }
+void OSShutdownSystem(Cpu&) { leave("to power off"); }
+void OSRestart(Cpu&) {  // (reset code): the game starts again
+    rt::log("the game chose to reset: starting again");
+    std::fflush(nullptr);
+    restart_program();
+}
 
 const rt::Provided kReplacements[] = {
     {0x801E17F8u, "DBInit", DBInit},
@@ -237,6 +286,11 @@ const rt::Provided kReplacements[] = {
     {0x801E1764u, "PPCMfwpar", PPCMfwpar},
     {0x801E1770u, "PPCMtwpar", PPCMtwpar},
     {0x80209370u, "OSGetTime", OSGetTime},
+    {0x802095BCu, "OSTicksToCalendarTime", OSTicksToCalendarTime},
+    {0x80206FFCu, "OSReturnToMenu", OSReturnToMenu},
+    {0x8020703Cu, "OSReturnToDataManager", OSReturnToDataManager},
+    {0x80206B84u, "OSShutdownSystem", OSShutdownSystem},
+    {0x80206CA0u, "OSRestart", OSRestart},
     {0x80209388u, "OSGetTick", OSGetTick},
 };
 
@@ -264,10 +318,44 @@ uint32_t interrupt_mask() { return g_mask; }
 
 namespace {
 const auto g_boot = std::chrono::steady_clock::now();
+// On the Wii the time base counts from 1 January 2000, 00:00 local time (the
+// OS sets it from the console's clock at boot), so OSGetTime is the date.
+// Here: the PC's local time at start-up, then a steady clock.
+const uint64_t g_epoch = [] {
+    const std::time_t now = std::time(nullptr);
+    const std::tm local = *std::localtime(&now);  // before any other thread
+    const int64_t days = days_from_civil(local.tm_year + 1900, unsigned(local.tm_mon + 1), unsigned(local.tm_mday)) -
+                         days_from_civil(2000, 1, 1);
+    const int64_t seconds = days * 86400 + local.tm_hour * 3600 + local.tm_min * 60 + std::min(local.tm_sec, 59);
+    return static_cast<uint64_t>(std::max<int64_t>(seconds, 0)) * kTimerHz;
+}();
+}  // namespace
+
+// Days since 1970-01-01 of a date in the proleptic Gregorian calendar, and back
+// (Howard Hinnant's algorithms: exact for every date, no tables).
+int64_t days_from_civil(int64_t y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + static_cast<int64_t>(doe) - 719468;
 }
+void civil_from_days(int64_t z, int64_t& y, unsigned& m, unsigned& d) {
+    z += 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp < 10 ? mp + 3 : mp - 9;
+    y = static_cast<int64_t>(yoe) + era * 400 + (m <= 2);
+}
+
 uint64_t time_base() {
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_boot).count();
-    return static_cast<uint64_t>(ns) * 243u / 4000u;  // 60.75 MHz
+    return g_epoch + static_cast<uint64_t>(ns) * 243u / 4000u;  // 60.75 MHz
 }
 
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline) {

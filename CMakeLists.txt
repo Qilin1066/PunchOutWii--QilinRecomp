@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.13.5 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.13.6 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -148,12 +148,18 @@ add_test(NAME qilin_tests COMMAND qilin_tests)
 
 # The thread model (the game's scheduler and interrupt layer) with guest
 # functions written in C++: no game files needed.
-add_executable(punchout_threads_test punchout/tests/threads_test.cpp punchout/src/threads.cpp punchout/src/os.cpp)
+add_executable(punchout_threads_test punchout/tests/threads_test.cpp punchout/src/threads.cpp punchout/src/os.cpp punchout/src/restart.cpp)
 target_include_directories(punchout_threads_test PRIVATE punchout/src)
 target_link_libraries(punchout_threads_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(punchout_threads_test)
 add_test(NAME punchout_threads_test COMMAND punchout_threads_test)
 set_tests_properties(punchout_threads_test PROPERTIES TIMEOUT 30)
+add_test(NAME punchout_threads_test_shutdown COMMAND punchout_threads_test)
+set_tests_properties(punchout_threads_test_shutdown PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=shutdown
+                     PASS_REGULAR_EXPRESSION "the game chose to power off: closing")
+add_test(NAME punchout_threads_test_restart COMMAND punchout_threads_test)
+set_tests_properties(punchout_threads_test_restart PROPERTIES TIMEOUT 30 ENVIRONMENT THREADS_TEST_LEAVE=restart
+                     PASS_REGULAR_EXPRESSION "OSRestart started the program again(.|\n)*all passed")
 
 # The settings file's reader and writer.
 add_executable(punchout_settings_test punchout/tests/settings_test.cpp punchout/src/settings.cpp)
@@ -215,7 +221,7 @@ if(QILIN_GAME_DOL)
                 --files ${QILIN_LIFT_FILES}
         DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
         COMMENT "Lifting the game's main.dol to C++")
-    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp ${gen_sources})
+    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp ${gen_sources})
     target_include_directories(punchout PRIVATE punchout/src ${gen})
     target_link_libraries(punchout PRIVATE qilin_rt qilin_dol qilin_host)
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).

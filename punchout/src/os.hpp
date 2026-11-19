@@ -26,7 +26,15 @@ void post_interrupt(std::function<void(qilin::rt::Cpu&)> work);
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline);
 uint64_t next_timer_deadline();
 // The guest's time base: 60.75 MHz (a quarter of the bus clock) since boot.
-uint64_t time_base();
+uint64_t time_base();  // ticks since 1 January 2000, 00:00 local time, as on the console
+// Days since 1970-01-01 of a Gregorian date, and back.
+int64_t days_from_civil(int64_t y, unsigned m, unsigned d);
+void civil_from_days(int64_t days, int64_t& y, unsigned& m, unsigned& d);
+
+// Start the program again with its original command line (the game's reset).
+// main sets it up; it doesn't return.
+void set_command_line(int argc, char** argv);
+[[noreturn]] void restart_program();
 inline constexpr uint64_t kTimerHz = 60750000;
 // A safe point: run what's queued if interrupts are on, then switch threads
 // if that woke one of higher priority (threads.cpp).

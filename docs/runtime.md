@@ -75,7 +75,13 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **Interrupts:** `OSDisableInterrupts`, `OSEnableInterrupts` and `OSRestoreInterrupts` keep one flag, as MSR[EE] does, and each thread keeps its own across switches. `OSInit` ends with interrupts on, as the real one does; without that, nothing queued for the main thread ever arrives.
 - **Caches:** every flush and invalidate is a no-op, because the host is coherent. `DCZeroRange` zeroes memory.
 - **Locked cache:** its DMA (`LCLoadBlocks`, `LCStoreBlocks`, `LCStore`) is a copy done at once, so `LCQueueWait` has nothing to wait for.
-- **Time:** the time base counts at 60.75 MHz from boot, by the host's steady clock (`OSGetTime`, `OSGetTick`).
+- **Time:** the time base counts at 60.75 MHz, by the host's steady clock (`OSGetTime`, `OSGetTick`).
+  - It starts where the console's would: at the PC's local date and time, counted from 1 January 2000, 00:00. So `OSGetTime` is the date, as on a Wii (v0.13.6; before, it counted from start-up and every date was 1 January 2000).
+  - `OSTicksToCalendarTime` turns it into a date: Gregorian, exact for any date, before 2000 included.
+- **Leaving:** the game's exit code (`800E249C`, behind the HOME Button Menu and the power and reset buttons) blanks the screen, calls one of these, then spins, because on a Wii they never return.
+  - `OSReturnToMenu`, `OSReturnToDataManager` and `OSShutdownSystem` close the program, logging which the game chose.
+  - `OSRestart` (Reset) starts it again with the same command line (`restart.cpp`). On Windows it uses the command line exactly as given, quoting and all; elsewhere it uses `execvp`. Saves are already on disk, as NAND writes are synchronous.
+- **Every replaced function that lifted code calls directly has a replacement** (v0.13.6). `tools/analysis/check_replacements.py` checks this from `qilin cfg --json`, deciding each address by the narrowest plan range as the lifter does. It fails if one is missing, listing it with its callers. Calls through function pointers aren't in the call graph, so a missing one still stops the game, by name, when called.
 - **Memory sizes and buttons:** the memory-size queries, `OSSetResetCallback` and `OSSetPowerCallback`.
 - **Threads** (`threads.cpp`):
   - **How they run:** each guest thread runs on a host thread of its own (16 MB host stack) with its own registers, and exactly one runs at a time.
