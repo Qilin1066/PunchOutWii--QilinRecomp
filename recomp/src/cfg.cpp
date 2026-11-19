@@ -913,7 +913,7 @@ std::vector<Coverage> Cfg::coverage() const {
 
     std::vector<Coverage> out;
     for (const DolSection* s : text_) {
-        Coverage c{s->name(), s->address, s->end(), 0, 0, 0, 0, {}};
+        Coverage c{s->name(), s->address, s->end(), 0, 0, 0, 0, {}, {}};
         for (uint32_t a = s->address; a < s->end();) {
             const size_t i = (a - text_lo_) / 4;
             if (owned[i]) {
@@ -940,6 +940,7 @@ std::vector<Coverage> Cfg::coverage() const {
                                             leftover_words(a) == words);
             if (dead) {
                 c.dead += words;
+                c.dead_spans.emplace_back(a, b);
             } else {
                 c.unknown += words;
                 c.unknown_spans.emplace_back(a, b);

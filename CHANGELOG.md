@@ -11,6 +11,18 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-19
+A whole-disc audit: is every byte of the game's code found? (`docs/code-analysis.md`, "The whole-disc audit".)
+
+### Fixed
+- **`exit` would have stopped at an unanswered call.** MSL's `stdin`/`stdout`/`stderr` hold `__read_console` and `__close_console`, in the dropped debugger stub; `exit`'s `__close_all` calls the latter through a pointer. They, and the four host-file procedures `fopen` stores, are replaced by what they return with no debugger (an I/O error).
+- **Four Balance Board functions were classed as VI's** and not lifted (`80215B90`–`80215FF8`: the weight maths and two WPAD callbacks). Lifted now: 11,672 functions lifted, 1,630 replaced, 185 dropped, 0 stubs.
+
+### Added
+- `check_replacements.py --dol` checks function pointers too: every function whose address lifted code builds, and every one a data word points at. 0 unanswered now.
+- `qilin coverage --list` lists the dead runs (712 words in 360 runs). An independent scan confirms no branch, data word or built address points at any of them.
+- The disc's file table has no other executable (no `.rel`, `.dol`, `.elf`), the DOL has no module linker, and the game never invalidates the instruction cache: `main.dol` is all the code.
+
 ## [0.18.1] - 2026-11-19
 ### Fixed
 - **Controllers already connected when the game starts are used.** The display opened a pad only when SDL announced one being added; it now opens the first one at start-up too, and another takes over when it's unplugged. Controller input is taken whichever window has the focus (the console the game was started from often keeps it).

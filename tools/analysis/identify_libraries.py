@@ -387,6 +387,19 @@ EXCEPTIONS = [
     # MSL's fopen (called by the game) opens files on the debugger's host through MetroTRK;
     # without a debugger that fails (returns 1), so it's replaced by the failure.
     (0x801C9070, 0x801C91EC, "replace", "MetroTRK: the host-file open behind MSL's fopen"),
+    # The rest of that block (v0.19.0's audit of function pointers): MSL's FILE procedures for
+    # the debugger's host. stdin, stdout and stderr hold __read_console (801C9494) and
+    # __close_console (801C9354) in the data section, which fclose and exit's __close_all
+    # call; MSL's fopen stores the host file's position, read, write and close (801C8F10,
+    # 801C91EC, 801C92A0, 801C8FEC) in a FILE. All return 1 (an I/O error) when no debugger
+    # is connected (each tests 801C68E8's answer first), so they're replaced by that.
+    (0x801C8F10, 0x801C9070, "replace", "MetroTRK: the host file's position and close procedures (MSL FILE)"),
+    (0x801C91EC, 0x801C93D8, "replace", "MetroTRK: the host file's write and read, and __close_console (MSL FILE)"),
+    (0x801C9494, 0x801C9550, "replace", "MetroTRK: __read_console (stdin's read procedure)"),
+    # The VI/WBC boundary (the same audit): VI ends with its retrace handler (8021575C). The
+    # four functions after it are the Balance Board's weight maths in doubles and its two
+    # WPAD callbacks, whose addresses the lifted WBC code passes to WPAD: WBC's, lifted.
+    (0x80215B90, 0x80215FF8, "lift", "revolution/wbc: weight calculation and its WPAD callbacks, after VI's last function"),
 ]
 
 

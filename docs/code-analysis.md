@@ -96,3 +96,25 @@ The libraries this game adds:
 **Game and engine** (`80007280`–`801C4294`, 8,325 functions, 57% of the code) is one segment for now. Separating Next Level Games' engine (`nl*`, the script VM, the renderer, networking) from the game itself is a naming job, not a boundary one: all of it is lifted.
 
 **Decided when the runtime reached them** (v0.7.0, `runtime.md`): the OS's heap and arena code, `OSReport` and the EABI's constructor and destructor code are lifted (narrower ranges in `data/R7PP01/plan.tsv`); thread and alarm bookkeeping is replaced with the scheduler; the start-up path is run natively instead of `__start`.
+
+## The whole-disc audit (v0.19.0)
+
+A second pass over everything, done independently of `qilin`'s own discovery (scripts over the raw DOL and the disc's file table), to answer "is every byte of the game's code found?".
+
+**`main.dol`, every word of its two code sections (799,200 words):**
+
+| | Words | What |
+|---|---|---|
+| Code in functions | 794,194 | 13,487 functions: 11,672 lifted, 1,630 replaced, 185 dropped; 0 stubs; 100% of the instructions outside replaced and dropped code lifted |
+| Padding | 4,193 | zero words between functions |
+| Dead | 712 | 360 runs nothing reaches (`qilin coverage --list` now lists them): 200 lone `blr`s and 101 epilogue fragments after a `b` or `bctr`, and 59 runs a `b` jumps straight over (the compiler's leftovers, mostly in Wwise's containers). No branch, data word or built address anywhere points at any of the 712 |
+| Not code | 101 | `__rom_copy_info` and `__bss_init_info` (tables), MetroTRK's name string and two exception entries |
+
+- **Pointers:** every 4-byte word of the data sections that is a text address is a function's start (9,301) or a jump-table case inside one (6,448); 36 others land inside functions and are bitmap and table data that happen to look like addresses (each read). Every address lifted code builds with `lis`+`addi`/`ori` is a function's start (1,627) or a coincidence (31: constants such as `0x80018000`), or one of four known data addresses.
+- **Function pointers into replaced code** were the gap in `check_replacements.py` (it followed direct calls only). With `--dol` it now checks them, and found two things, both fixed:
+  - **MSL's `FILE` procedures on the debugger's host.** `stdin`, `stdout` and `stderr` hold `__read_console` (`801C9494`) and `__close_console` (`801C9354`), which `exit`'s `__close_all` calls; `fopen` stores four more. All were in the dropped debugger stub, so the game's own `exit` would have stopped at an unanswered call. They return 1 (an I/O error) with no debugger, and are now replaced by that.
+  - **The VI/WBC boundary** was 1,128 bytes late: the four functions after VI's retrace handler (`80215B90`–`80215FF8`) are the Balance Board's weight maths and its WPAD callbacks, whose addresses the lifted WBC code takes. They're lifted now. (No Balance Board is ever reported, so they don't run; they're the game's code all the same.)
+- **No code is made or loaded at run time:** `ICInvalidateRange` and `ICFlashInvalidate` are called only by the OS and the debugger stub, never by the game or its engine, and there is no module linker (`OSLink`) in the DOL.
+
+**The rest of the disc (6,215 files, 3.78 GB, from `sys/fst.bin`):** no `.rel`, `.dol`, `.elf` or `.sel`. By type: 2,382 `.wav`, 1,194 each of `.data`/`.debug`/`.dict` (the engine's asset containers), 84 `.thp`, 64 `.txt`, 60 `.bnk`, 10 `.loc`, 10 `.arc`, 9 `.tpl`, and 14 others (fonts, ini, csv, xml, the banner). The 795 non-media files staged in the development session (every type but `.wav` and `.thp`) hold no PowerPC function prologue and no run of `blr`s. So `main.dol` is all the game's code; everything else is data its lifted code reads.
+

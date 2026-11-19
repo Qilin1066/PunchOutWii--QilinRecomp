@@ -50,3 +50,7 @@
 801FE598	801FE770	lift	revolution/mtx: vector functions before the OS's first (__OSFPRInit)
 801C93D8	801C9494	replace	MetroTRK: __TRK_write_console, called by MSL's __write_console
 801C9070	801C91EC	replace	MetroTRK: the host-file open behind MSL's fopen
+801C8F10	801C9070	replace	MetroTRK: the host file's position and close procedures (MSL FILE)
+801C91EC	801C93D8	replace	MetroTRK: the host file's write and read, and __close_console (MSL FILE)
+801C9494	801C9550	replace	MetroTRK: __read_console (stdin's read procedure)
+80215B90	80215FF8	lift	revolution/wbc: weight calculation and its WPAD callbacks, after VI's last function

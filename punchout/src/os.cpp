@@ -256,6 +256,14 @@ const rt::Provided kReplacements[] = {
     {0x801EB428u, "WriteUARTN", WriteUARTN},
     {0x801C93D8u, "__TRK_write_console (no debugger)", returns_zero},
     {0x801C9070u, "MetroTRK's host-file open behind fopen (no debugger: fails)", returns_one},
+    // MSL's FILE procedures on the debugger's host: an I/O error (1) with no debugger, as
+    // each returns on a retail console. exit's __close_all calls __close_console.
+    {0x801C8F10u, "MetroTRK host file: position (no debugger: I/O error)", returns_one},
+    {0x801C8FECu, "MetroTRK host file: close (no debugger: I/O error)", returns_one},
+    {0x801C91ECu, "MetroTRK host file: write (no debugger: I/O error)", returns_one},
+    {0x801C92A0u, "MetroTRK host file: read (no debugger: I/O error)", returns_one},
+    {0x801C9354u, "__close_console (no debugger: I/O error)", returns_one},
+    {0x801C9494u, "__read_console (no debugger: I/O error)", returns_one},
     {0x80201CDCu, "OSPanic", OSPanic},
     {0x80201E08u, "OSSetErrorHandler", OSSetErrorHandler},
     {0x801E16C0u, "PPCSync", PPCSync},

@@ -213,8 +213,10 @@ int cmd_coverage(const Args& a) {
         std::println("{} {:08X}-{:08X}: {} words: code {} ({}), padding {}, dead {}, unknown {} ({}) in {} spans", c.section,
                      c.lo, c.hi, words, c.code, percent(c.code, words, 3), c.padding, c.dead, c.unknown,
                      percent(c.unknown, words, 3), c.unknown_spans.size());
-        if (a.list)
+        if (a.list) {
             for (const auto& [lo, hi] : c.unknown_spans) std::println("  {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
+            for (const auto& [lo, hi] : c.dead_spans) std::println("  dead {:08X}-{:08X} ({} words)", lo, hi, (hi - lo) / 4);
+        }
         unknown += c.unknown;
     }
     return unknown ? 3 : 0;

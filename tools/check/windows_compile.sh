@@ -22,7 +22,10 @@ echo "Windows build of the runtime, thread model and settings: ok ($out)"
 
 deps=${2:-build-game/_deps}
 if [ -d "$deps/sdl3-src" ]; then
-    flags="-std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic -Wshadow -Werror -Wno-missing-field-initializers -DVK_NO_PROTOTYPES"
+    flags="-std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic -Wshadow -Werror -Wno-missing-field-initializers -DVK_NO_PROTOTYPES -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES"
+    # Dear ImGui (the settings menu): CMake's download, or the folder in IMGUI_DIR.
+    imgui=${IMGUI_DIR:-$deps/imgui-src}
+    inc="$inc -isystem $imgui -isystem $imgui/backends"
     for f in host/src/*.cpp punchout/src/*.cpp; do
         x86_64-w64-mingw32-g++-posix $flags $inc -Irecomp/src -I"$deps/sdl3-src/include" \
             -I"$deps/vulkanheaders-src/include" -I"$deps/volk-src" -I"$(dirname "$deps")/generated" "$f"

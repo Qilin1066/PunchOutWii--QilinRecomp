@@ -94,6 +94,7 @@ struct Coverage {
     uint32_t lo = 0, hi = 0;
     uint64_t code = 0, padding = 0, dead = 0, unknown = 0;
     std::vector<std::pair<uint32_t, uint32_t>> unknown_spans;  // [lo, hi)
+    std::vector<std::pair<uint32_t, uint32_t>> dead_spans;     // [lo, hi): code nothing reaches or points at
 };
 
 // part / whole as a percentage with `decimals` places, in integer arithmetic,
