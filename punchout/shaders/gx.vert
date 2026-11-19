@@ -63,6 +63,13 @@ ivec4 lighting(uint index, uint attnfunc, uint diffusefunc, vec3 pos, vec3 norma
     }
 }
 
+// The same vertex must land at exactly the same depth in every pipeline: GX
+// games draw a surface again with the depth test EQUAL (multipass lighting,
+// shadows, decals), and a driver may otherwise compile the position's maths
+// differently per pipeline (fusing a multiply-add in one and not another),
+// so the second pass fails in bands and triangles.
+invariant gl_Position;
+
 void main() {
     vec4 rawpos = vec4(a_pos, 1.0);
     uint posidx = mtx_index(0u);

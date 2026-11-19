@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version is set once, in `project(... VERSION ...)` in `CMakeLists.txt`, and `qilin --version` prints it.
 
 ## [Unreleased]
+### Fixed
+- **EFB copies apply the copy filter** (BP 0x53/0x54), as the hardware does for every copy, to textures and to the frame buffer: the line above, the line and the line below, weighted in 8-bit integers over 64 (Dolphin's maths), colour only; the lines are the console's own at any internal resolution, and stop at the copy's rectangle when its command's clamp bits say so. `punchout_render_test` checks an edge blended with deflicker weights (255 191 63 0, exact; a planted bug fails it). This alone doesn't remove the stripes on the main menu's floor (the game's weights there leave lines alone): still being traced.
+- **A copy's alpha is 255 unless the EFB's pixel format keeps alpha** (RGBA6_Z24), as on the hardware; it passed on stale alpha. A suspect for the Mii faces drawn transparent (being checked).
+- **The vertex position is `invariant`**, so a surface drawn again with the depth test EQUAL lands at exactly the same depth in every pipeline.
 
 ## [0.20.0] - 2026-11-19
 A Windows download that needs nothing installed, as the APB recomp has.

@@ -10,8 +10,10 @@ layout(push_constant) uniform Push {
     vec4 color;
     float depth;
     uint format;
-    uint flags;  // 1 half scale (box filter), 2 copy depth
+    uint flags;  // 1 half scale (box filter), 2 copy depth, 4 the EFB's format has alpha
     float gamma;
+    uvec3 weights;  // the copy filter's weights: the line above, the line, the line below (64: unchanged)
+    float clamp_top, clamp_bottom, line;  // the lines the filter may read; one EFB line (in 0..1)
 } pc;
 
 vec4 q(vec4 c, float levels) { return floor(c * levels + 0.5) / levels; }
@@ -27,15 +29,32 @@ vec4 efb_pixel(vec2 at) {
     return vec4(float((z >> 16) & 255u), float((z >> 8) & 255u), float(z & 255u), 255.0) / 255.0;
 }
 
+// One line's pixel as the copy reads it: half scale averages a 2x2 box (over
+// the bytes, for depth too).
+vec4 row(vec2 at) {
+    if ((pc.flags & 1u) == 0u) return efb_pixel(at);
+    vec2 t = 1.0 / vec2(textureSize(efb, 0));
+    return 0.25 * (efb_pixel(at + vec2(-0.5, -0.5) * t) + efb_pixel(at + vec2(0.5, -0.5) * t) +
+                   efb_pixel(at + vec2(-0.5, 0.5) * t) + efb_pixel(at + vec2(0.5, 0.5) * t));
+}
+
 void main() {
-    vec4 c;
-    if ((pc.flags & 1u) != 0u) {  // half scale: a 2x2 box (over the bytes, for depth too)
-        vec2 t = 1.0 / vec2(textureSize(efb, 0));
-        c = 0.25 * (efb_pixel(uv + vec2(-0.5, -0.5) * t) + efb_pixel(uv + vec2(0.5, -0.5) * t) +
-                    efb_pixel(uv + vec2(-0.5, 0.5) * t) + efb_pixel(uv + vec2(0.5, 0.5) * t));
-    } else {
-        c = efb_pixel(uv);
+    // The copy filter, as the hardware's (and Dolphin's): the line above, the
+    // line and the line below, in 8-bit integers, weighted, over 64; colour
+    // only, alpha as it is. Lines are the console's (at any internal
+    // resolution), clamped to the copy's rectangle if its command says so.
+    vec4 mid = row(uv);
+    uvec3 sum = uvec3(mid.rgb * 255.0) * pc.weights.y;
+    if (pc.weights.x != 0u || pc.weights.z != 0u) {
+        vec2 above = vec2(uv.x, clamp(uv.y - pc.line, pc.clamp_top, pc.clamp_bottom));
+        vec2 below = vec2(uv.x, clamp(uv.y + pc.line, pc.clamp_top, pc.clamp_bottom));
+        sum += uvec3(row(above).rgb * 255.0) * pc.weights.x + uvec3(row(below).rgb * 255.0) * pc.weights.z;
     }
+    uvec3 rgb = sum >> 6u;
+    if (pc.weights.x + pc.weights.y + pc.weights.z >= 128u) rgb &= 0x1FFu;  // past 511 the hardware wraps
+    // Alpha only from a format that keeps it (RGBA6_Z24); else whatever the
+    // EFB image holds from before is not the hardware's: it reads 255.
+    vec4 c = vec4(vec3(min(rgb, uvec3(255u))) / 255.0, (pc.flags & 4u) != 0u ? mid.a : 1.0);
     if (pc.gamma != 1.0) c.rgb = pow(c.rgb, vec3(1.0 / pc.gamma));
     if (pc.format == 0xFFFFu) {  // to the frame buffer
         ocol0 = vec4(c.rgb, 1.0);

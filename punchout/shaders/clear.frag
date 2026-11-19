@@ -8,5 +8,7 @@ layout(push_constant) uniform Push {
     uint format;
     uint flags;
     float gamma;
+    uvec3 weights;      // copies: the copy filter's weights (above, the line, below)
+    float clamp_top, clamp_bottom, line;
 } pc;
 void main() { ocol0 = pc.color; }

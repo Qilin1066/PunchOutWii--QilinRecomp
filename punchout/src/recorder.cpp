@@ -824,8 +824,21 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
     c.half_scale = (command >> 9) & 1;
     c.clear = (command >> 11) & 1;
     c.from_depth = (r.bp[0x43] & 7) == 3;  // Z24: the EFB copy reads depth
+    c.efb_alpha = (r.bp[0x43] & 7) == 1;   // RGBA6_Z24: the only format that keeps alpha
     static constexpr float kGamma[4] = {1.0f, 1.7f, 2.2f, 2.2f};
     c.gamma = kGamma[(command >> 7) & 3];
+    // The copy filter, which every EFB copy (to a texture or the frame buffer)
+    // applies: GX's vertical filter, used for deflicker and to blend
+    // alternate-line patterns. Weights w0-w3 in BP 0x53, w4-w6 in BP 0x54.
+    {
+        const uint64_t w = uint64_t(r.bp[0x53] & 0xFFFFFF) | (uint64_t(r.bp[0x54] & 0xFFFFFF) << 24);
+        const auto tap = [&](unsigned i) { return unsigned((w >> (6 * i)) & 63); };
+        c.filter[0] = uint8_t(tap(0) + tap(1));
+        c.filter[1] = uint8_t(tap(2) + tap(3) + tap(4));
+        c.filter[2] = uint8_t(tap(5) + tap(6));
+    }
+    c.clamp_top = command & 1;
+    c.clamp_bottom = (command >> 1) & 1;
     const uint32_t blend = r.bp[0x41];
     const bool alpha_target = (r.bp[0x43] & 7) == 1;
     c.clear_color = (blend >> 3) & 1;

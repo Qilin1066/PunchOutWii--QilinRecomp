@@ -148,11 +148,18 @@ struct Copy {
     uint32_t dest_width, dest_height;
     uint32_t format;       // the copy's texture format (texture copies), see renderer.cpp
     bool to_xfb, half_scale, from_depth;
+    bool efb_alpha;        // the EFB's pixel format has alpha (RGBA6_Z24); else a copy's alpha is 255
     int32_t texture;       // the id the copy becomes (texture copies)
     bool clear, clear_color, clear_alpha, clear_depth;
     uint8_t clear_rgba[4];
     uint32_t clear_z;      // 24-bit
     float gamma;
+    // The copy filter (BP 0x53, 0x54): 6-bit weights for the line above, the
+    // line itself and the line below (seven taps, summed into three as the
+    // hardware's 2-3-2), 64 = unchanged; and whether the lines above and below
+    // stop at the copy's own rectangle (else they come from the EFB around it).
+    uint8_t filter[3];
+    bool clamp_top, clamp_bottom;
 };
 
 // A texture decoded from guest memory, mip levels one after another.

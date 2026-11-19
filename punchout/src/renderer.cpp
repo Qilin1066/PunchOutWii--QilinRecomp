@@ -96,6 +96,9 @@ struct FullscreenPush {
     float depth;
     uint32_t format, flags;
     float gamma;
+    uint32_t filter[3];   // copies: the copy filter's weights for the line above, the line, the line below
+    float clamp_top, clamp_bottom;  // copies: the lines the filter may read, in the EFB's 0..1
+    float line;           // copies: one line of the console's EFB, in the EFB's 0..1
 };
 
 // An image no longer in use, kept to be used again rather than destroyed:
@@ -782,8 +785,13 @@ struct Renderer::Impl {
         p.src[2] = float(c.src[2]) / kEfbWidth;
         p.src[3] = float(c.src[3]) / kEfbHeight;
         p.format = c.to_xfb ? 0xFFFFu : c.format;
-        p.flags = (c.half_scale ? 1u : 0u) | (c.from_depth && !c.to_xfb ? 2u : 0u);
+        p.flags = (c.half_scale ? 1u : 0u) | (c.from_depth && !c.to_xfb ? 2u : 0u) | (c.efb_alpha ? 4u : 0u);
         p.gamma = c.gamma;
+        for (int i = 0; i < 3; ++i) p.filter[i] = c.filter[i];
+        // Without the clamp bits the hardware reads past the rectangle, into the EFB around it.
+        p.line = 1.0f / float(kEfbHeight);
+        p.clamp_top = (float(c.clamp_top ? c.src[1] : 0) + 0.5f) / float(kEfbHeight);
+        p.clamp_bottom = (float(c.clamp_bottom ? c.src[1] + c.src[3] : int(kEfbHeight)) - 0.5f) / float(kEfbHeight);
         vkCmdPushConstants(cmd, copy_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p);
         vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);

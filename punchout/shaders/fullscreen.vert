@@ -8,6 +8,8 @@ layout(push_constant) uniform Push {
     uint format;   // copy: the texture format (with 0x100 for intensity), or 0xFFFF: frame buffer
     uint flags;    // copy: 1 half scale (box filter)
     float gamma;
+    uvec3 weights;      // copies: the copy filter's weights (above, the line, below)
+    float clamp_top, clamp_bottom, line;
 } pc;
 void main() {
     vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);

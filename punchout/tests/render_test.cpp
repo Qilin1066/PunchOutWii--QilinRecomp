@@ -48,6 +48,9 @@ struct Gx {
     // renderer in the same run uses its own address (a texture one renderer
     // made, the other never did).
     uint32_t scratch = kScratch;
+    // What GXInit leaves: the copy filter's default weights, 21/22/21 on the
+    // line itself (64: unchanged), none on the lines above and below.
+    Gx() { bp[0x53] = 0x595000, bp[0x54] = 0x15; }
     gx::Registers regs() const { return {cp, xf, bp}; }
     void BP(uint32_t reg, uint32_t v) {
         bp[reg] = v;
@@ -252,6 +255,22 @@ void sanity(Target& t, Gx& g) {
     check(near(at(px, 320, 264), 200, 40, 90), "a quad's colour reaches the frame buffer (" + rgb(at(px, 320, 264)) + ")");
 }
 
+// The copy filter: deflicker weights 16/32/16 (above, the line, below)
+// blend the line where white meets black, as the hardware's integer maths:
+// the last white line (16*255 + 32*255) / 64 = 191, the first black one
+// 16*255 / 64 = 63; lines further away are unchanged.
+void copy_filter(Target& t, Gx& g) {
+    quad(g, 0, 0, 640, 264, -0.5f, 255, 255, 255);
+    g.BP(0x53, 8u | (8u << 6) | (10u << 12) | (12u << 18));
+    g.BP(0x54, 10u | (8u << 6) | (8u << 12));
+    const auto px = t.finish(g);
+    g.BP(0x53, 0x595000), g.BP(0x54, 0x15);  // GXInit's again
+    const int a = at(px, 320, 262)[1], b = at(px, 320, 263)[1], c = at(px, 320, 264)[1], d = at(px, 320, 265)[1];
+    check(a == 255 && std::abs(b - 191) <= 1 && std::abs(c - 63) <= 1 && d == 0,
+          "the copy filter blends the lines around an edge: " + std::to_string(a) + " " + std::to_string(b) + " " +
+              std::to_string(c) + " " + std::to_string(d) + " (255 191 63 0)");
+}
+
 // dst (255,0,255) op src (255,255,0), per channel on 0/255.
 uint8_t logic(unsigned op, uint8_t s, uint8_t d) {
     const unsigned S = s ? 1 : 0, D = d ? 1 : 0;
@@ -385,6 +404,7 @@ int main() {
         Gx g;
         g.setup();
         sanity(t, g);
+        copy_filter(t, g);
         if (gpu.logic_op) logic_ops(t, g, false, "the GPU's");
         lines_and_points(t, g, gpu.wide_lines && gpu.large_points, "the GPU's");
         z_textures(t, g);
