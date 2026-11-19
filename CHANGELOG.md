@@ -11,6 +11,10 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-11-19
+### Fixed
+- **The game didn't compile with MSVC:** `threads.cpp` included `<windows.h>` without `NOMINMAX`, so its `min` and `max` macros broke the file's `std::min` calls. CI now builds that file on Windows (for the thread test), which would have caught it.
+
 ## [0.13.3] - 2026-11-19
 The renderer stops leaking GPU memory, and does less work a frame.
 

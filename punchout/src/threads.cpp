@@ -27,6 +27,7 @@
 #include <vector>
 
 #if defined(_WIN32)
+#define NOMINMAX  // windows.h's min and max macros would break std::min
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
