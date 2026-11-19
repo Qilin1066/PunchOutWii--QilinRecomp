@@ -16,7 +16,7 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 - **MinGW builds:** MinGW's standard library already defines `NOMINMAX`, so defining it again before `<windows.h>` (in `runtime/src/memory.cpp` and `punchout/src/threads.cpp`) was a warning, which is an error with `QILIN_WERROR`. Both now define it only if it isn't defined.
 
 ### Added
-- **`tools/check/windows_compile.sh`** compiles the Windows-only code (memory reservation, host threads) and the tests that use it for Windows with MinGW-w64, on Linux. It runs the tests under Wine where Wine works. This is how the two `<windows.h>` problems above and in v0.13.4 were found without a Windows machine.
+- **`tools/check/windows_compile.sh`** compiles the Windows-only code (memory reservation, host threads) and the tests that use it for Windows with MinGW-w64, on Linux. It runs the tests under Wine where Wine works. With a game build's fetched headers, it also checks that every hand-written game and host source compiles for Windows (they all do). This is how the two `<windows.h>` problems above and in v0.13.4 were found without a Windows machine.
 
 ## [0.13.4] - 2026-11-19
 ### Fixed

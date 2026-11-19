@@ -6,6 +6,10 @@
 # apt install mingw-w64). MinGW's GCC may be older than the GCC 14 the tools
 # need, so this compiles the runtime and game code directly, not through CMake.
 # The executables run under Wine where Wine works (they print "all passed").
+#
+# With a game build's fetched headers (SDL3, Vulkan, volk under
+# build-game/_deps; or pass the folder as the second argument), it also
+# checks that every hand-written game and host file compiles for Windows.
 set -eu
 cd "$(dirname "$0")/../.."
 out=${1:-build-windows-check}
@@ -15,3 +19,15 @@ inc="-Iruntime/include -Ihost/include -Ipunchout/src"
 $cxx $inc -o "$out/threads_test.exe" punchout/tests/threads_test.cpp punchout/src/threads.cpp punchout/src/os.cpp runtime/src/*.cpp
 $cxx $inc -o "$out/settings_test.exe" punchout/tests/settings_test.cpp punchout/src/settings.cpp runtime/src/*.cpp
 echo "Windows build of the runtime, thread model and settings: ok ($out)"
+
+deps=${2:-build-game/_deps}
+if [ -d "$deps/sdl3-src" ]; then
+    flags="-std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic -Wshadow -Werror -Wno-missing-field-initializers -DVK_NO_PROTOTYPES"
+    for f in host/src/*.cpp punchout/src/*.cpp; do
+        x86_64-w64-mingw32-g++-posix $flags $inc -Irecomp/src -I"$deps/sdl3-src/include" \
+            -I"$deps/vulkanheaders-src/include" -I"$deps/volk-src" -I"$(dirname "$deps")/generated" "$f"
+    done
+    echo "Every game and host source compiles for Windows: ok"
+else
+    echo "(no $deps: skipped the game and host sources)"
+fi
