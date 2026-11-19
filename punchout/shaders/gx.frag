@@ -277,6 +277,24 @@ void main() {
 
     int zCoord = clamp(int(gl_FragCoord.z * 16777216.0), 0, 0xFFFFFF);
 
+    // Z textures (BP 0xF5: type bits 0-1, operation bits 2-3): the last texture
+    // sampled, unswizzled, weighted by its format, plus the bias in BP 0xF4,
+    // added to or replacing the depth (Dolphin's PixelShaderGen). Fog uses the
+    // result either way; it reaches the depth buffer only with the Z test
+    // after texturing, in the variant that writes depth.
+    uint ztex = bp(0xF5u);
+    uint zop = bits(ztex, 2u, 2u);
+    if (zop != 0u) {
+        uint ztype = bits(ztex, 0u, 2u);
+        ivec4 weight = ztype == 0u ? ivec4(0, 0, 0, 1) : ztype == 1u ? ivec4(1, 0, 0, 256) : ivec4(65536, 256, 1, 0);
+        int zt = weight.x * RawTexColor.r + weight.y * RawTexColor.g + weight.z * RawTexColor.b + weight.w * RawTexColor.a +
+                 int(bits(bp(0xF4u), 0u, 24u));
+        zCoord = (zop == 1u ? zCoord + zt : zt) & 0xFFFFFF;
+    }
+#ifdef ZTEX_DEPTH
+    gl_FragDepth = float(zCoord) / 16777216.0;
+#endif
+
     // Alpha test.
     uint at = bp(0xF3u);
     bool comp0 = alpha_compare(TevResult.a, int(bits(at, 0u, 8u)), bits(at, 16u, 3u));
@@ -325,4 +343,11 @@ void main() {
     uint dstalpha = bp(0x42u);
     if ((dstalpha & 0x100u) != 0u && (pc.flags & 1u) == 0u) ocol0.a = float(bits(dstalpha, 0u, 8u) >> 2) / 63.0;
     else ocol0.a = rgba6 ? float(TevResult.a >> 2) / 63.0 : float(TevResult.a) / 255.0;
+
+    // A logic op on a GPU without them, as blending: some need the output
+    // forced or inverted (Dolphin's ApproximateLogicOpWithBlending).
+    uint logic_help = bits(pc.flags, 4u, 2u);
+    if (logic_help == 1u) ocol0 = vec4(0.0);
+    else if (logic_help == 2u) ocol0 = vec4(1.0);
+    else if (logic_help == 3u) ocol0 = vec4(1.0) - ocol0;
 }

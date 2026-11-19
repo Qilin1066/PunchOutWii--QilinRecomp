@@ -178,4 +178,5 @@ void main() {
     colors_1 = o_colors_1;
     tex = o_tex;
     gl_Position = vec4(o_pos.x, -o_pos.y, o_pos.z, o_pos.w);
+    gl_PointSize = pc.point_size;  // used only when drawing points
 }

@@ -72,6 +72,7 @@ struct PipelineKey {
     uint8_t op = 0, op_alpha = 0;                            // Vulkan blend ops
     uint8_t write_mask = 0xF;  // RGBA
     uint8_t logic = 0;        // logic op + 1, or 0 (approximated where the GPU has none)
+    uint8_t depth_out = 0;    // the shader writes depth: Z textures with the Z test after texturing
     bool operator==(const PipelineKey&) const = default;
 };
 
@@ -92,6 +93,7 @@ struct Draw {
     uint8_t depth_test, depth_write, depth_func;  // Vulkan compare op
     float viewport[6];     // x, y, width, height, min, max depth (EFB pixels)
     int32_t scissor[4];    // x, y, width, height (EFB pixels)
+    uint8_t line_width = 6, point_size = 6;  // lines and points: in sixths of an EFB pixel (BP 0x22)
     int32_t textures[8];   // texture ids (-1: none)
     Sampler samplers[8];
 };

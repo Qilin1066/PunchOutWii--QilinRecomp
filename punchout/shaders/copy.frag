@@ -10,20 +10,31 @@ layout(push_constant) uniform Push {
     vec4 color;
     float depth;
     uint format;
-    uint flags;
+    uint flags;  // 1 half scale (box filter), 2 copy depth
     float gamma;
 } pc;
 
 vec4 q(vec4 c, float levels) { return floor(c * levels + 0.5) / levels; }
 
+// One EFB pixel as a copy reads it. A depth copy (flags bit 1) reads the
+// 24-bit depth as bytes, (z >> 16, z >> 8, z, 255) like a colour, and the
+// formats below pick from those as they would from colour: Z8 is the high
+// byte, Z8M the middle, Z8L the low (Dolphin's EFB copy conversion). The
+// depth image is sampled with a nearest sampler.
+vec4 efb_pixel(vec2 at) {
+    if ((pc.flags & 2u) == 0u) return texture(efb, at);
+    uint z = min(uint(clamp(texture(efb, at).r, 0.0, 1.0) * 16777216.0), 0xFFFFFFu);
+    return vec4(float((z >> 16) & 255u), float((z >> 8) & 255u), float(z & 255u), 255.0) / 255.0;
+}
+
 void main() {
     vec4 c;
-    if ((pc.flags & 1u) != 0u) {  // half scale: a 2x2 box
+    if ((pc.flags & 1u) != 0u) {  // half scale: a 2x2 box (over the bytes, for depth too)
         vec2 t = 1.0 / vec2(textureSize(efb, 0));
-        c = 0.25 * (texture(efb, uv + vec2(-0.5, -0.5) * t) + texture(efb, uv + vec2(0.5, -0.5) * t) +
-                    texture(efb, uv + vec2(-0.5, 0.5) * t) + texture(efb, uv + vec2(0.5, 0.5) * t));
+        c = 0.25 * (efb_pixel(uv + vec2(-0.5, -0.5) * t) + efb_pixel(uv + vec2(0.5, -0.5) * t) +
+                    efb_pixel(uv + vec2(-0.5, 0.5) * t) + efb_pixel(uv + vec2(0.5, 0.5) * t));
     } else {
-        c = texture(efb, uv);
+        c = efb_pixel(uv);
     }
     if (pc.gamma != 1.0) c.rgb = pow(c.rgb, vec3(1.0 / pc.gamma));
     if (pc.format == 0xFFFFu) {  // to the frame buffer
@@ -47,8 +58,8 @@ void main() {
     case 7u: ocol0 = vec4(c.a); break;                                               // A8
     case 9u: ocol0 = vec4(c.g); break;                                               // G8
     case 10u: ocol0 = vec4(c.b); break;                                              // B8
-    case 11u: ocol0 = vec4(c.g, c.g, c.g, c.r); break;                               // RG8 (as IA8)
-    case 12u: ocol0 = vec4(c.b, c.b, c.b, c.g); break;                               // GB8 (as IA8)
+    case 11u: ocol0 = vec4(c.r, c.r, c.r, c.g); break;                               // RG8 (as IA8): intensity R, alpha G
+    case 12u: ocol0 = vec4(c.g, c.g, c.g, c.b); break;                               // GB8 (as IA8): intensity G, alpha B
     default: ocol0 = c; break;                                                       // RGBA8
     }
 }

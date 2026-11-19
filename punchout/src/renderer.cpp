@@ -42,7 +42,44 @@ constexpr VkFormat kColor = VK_FORMAT_R8G8B8A8_UNORM;
 struct Push {
     uint32_t state, has, flags;
     float scale;
+    float point_size;
 };
+
+// GX's logic ops as blending, for GPUs without logic ops (Dolphin's
+// ApproximateLogicOpWithBlending): blend on or off, reverse-subtract, the
+// Vulkan factors (alpha as colour), and what the shader must do to its output
+// (1 output 0, 2 output 1, 3 invert). Exact for clear, copy, no-op, invert,
+// copy-inverted and set; close for the rest.
+struct LogicBlend {
+    bool blend, subtract;
+    VkBlendFactor src, dst;
+    uint32_t help;
+};
+constexpr LogicBlend kLogicBlend[16] = {
+    {false, false, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, 1},                                    // clear
+    {true, false, VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ZERO, 0},                               // and
+    {true, true, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, 0},                       // and reverse
+    {false, false, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, 0},                                    // copy
+    {true, true, VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ONE, 0},                                 // and inverted
+    {true, false, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, 0},                                     // no-op
+    {true, false, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, 0},      // xor
+    {true, false, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_ONE, 0},                      // or
+    {true, false, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, 0},      // nor
+    {true, false, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_ZERO, 0},                     // equivalent
+    {true, false, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_ZERO, 2},                     // invert
+    {true, false, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, 0},                      // or reverse
+    {false, false, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, 3},                                    // copy inverted
+    {true, false, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_ONE, 0},                      // or inverted
+    {true, false, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, 0},      // nand
+    {false, false, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, 2},                                    // set
+};
+
+// Once per run: something drawn differently from the console on this GPU.
+void approximated(bool& said, const char* what) {
+    if (said) return;
+    said = true;
+    rt::log("render: %s", what);
+}
 struct FullscreenPush {
     float src[4];
     float color[4];
@@ -103,14 +140,14 @@ struct Renderer::Impl {
     unsigned slot = 0;
     uint64_t frames = 0;
 
-    VkShaderModule gx_vert, gx_frag, fs_vert, clear_frag, copy_frag;
+    VkShaderModule gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag;
     VkDescriptorSetLayout states_layout, textures_layout, copy_set_layout;
     VkPipelineLayout gx_layout, clear_layout, copy_layout;
     std::map<PipelineKey, VkPipeline> pipelines;
     std::map<unsigned, VkPipeline> clear_pipelines;  // colour mask | depth write << 4
     VkPipeline copy_pipeline = VK_NULL_HANDLE;
     std::map<SamplerKey, VkSampler> samplers;
-    VkSampler efb_sampler = VK_NULL_HANDLE;
+    VkSampler efb_sampler = VK_NULL_HANDLE, efb_depth_sampler = VK_NULL_HANDLE;  // linear for colour, nearest for depth
 
     std::unordered_map<int32_t, Spare> textures;  // by id, with the usage they were made for
     std::vector<Spare> spares;
@@ -187,6 +224,7 @@ struct Renderer::Impl {
         }
         gx_vert = module(gpu.device, kGxVert, sizeof kGxVert);
         gx_frag = module(gpu.device, kGxFrag, sizeof kGxFrag);
+        gx_frag_depth = module(gpu.device, kGxFragDepth, sizeof kGxFragDepth);
         fs_vert = module(gpu.device, kFullscreenVert, sizeof kFullscreenVert);
         clear_frag = module(gpu.device, kClearFrag, sizeof kClearFrag);
         copy_frag = module(gpu.device, kCopyFrag, sizeof kCopyFrag);
@@ -221,6 +259,8 @@ struct Renderer::Impl {
         sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
         sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         check(vkCreateSampler(gpu.device, &sci, nullptr, &efb_sampler), "vkCreateSampler");
+        sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;  // depth: many GPUs can't filter D32
+        check(vkCreateSampler(gpu.device, &sci, nullptr, &efb_depth_sampler), "vkCreateSampler");
         // First use: the EFB in GENERAL, cleared; the white texture filled.
         one_time([&](VkCommandBuffer cmd) {
             host::transition(cmd, efb.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
@@ -260,7 +300,8 @@ struct Renderer::Impl {
     }
 
     VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, bool vertices, VkPrimitiveTopology topology,
-                             const VkPipelineColorBlendAttachmentState& blend, bool depth, bool depth_dynamic) {
+                             const VkPipelineColorBlendAttachmentState& blend, bool depth, bool depth_dynamic, int logic_op = -1,
+                             bool line_width_dynamic = false) {
         const VkPipelineShaderStageCreateInfo stages[2] = {
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr},
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr}};
@@ -300,7 +341,12 @@ struct Renderer::Impl {
         VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
         cb.attachmentCount = 1;
         cb.pAttachments = &blend;
+        if (logic_op >= 0) {
+            cb.logicOpEnable = VK_TRUE;
+            cb.logicOp = VkLogicOp(logic_op);  // GX numbers its logic ops as Vulkan does
+        }
         std::vector<VkDynamicState> dyn = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        if (line_width_dynamic) dyn.push_back(VK_DYNAMIC_STATE_LINE_WIDTH);
         if (depth_dynamic) {
             dyn.insert(dyn.end(), {VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
                                    VK_DYNAMIC_STATE_DEPTH_COMPARE_OP});
@@ -341,9 +387,26 @@ struct Renderer::Impl {
         b.dstAlphaBlendFactor = VkBlendFactor(k.dst_alpha);
         b.alphaBlendOp = VkBlendOp(k.op_alpha);
         b.colorWriteMask = k.write_mask;
+        int logic = -1;
+        if (k.logic) {
+            const unsigned op = k.logic - 1u;
+            if (gpu.logic_op) {
+                logic = int(op);
+                b.blendEnable = VK_FALSE;
+            } else {
+                static bool said = false;
+                approximated(said, "logic ops are approximated with blending: this GPU has none");
+                const LogicBlend& l = kLogicBlend[op];
+                b.blendEnable = l.blend;
+                b.srcColorBlendFactor = b.srcAlphaBlendFactor = l.src;
+                b.dstColorBlendFactor = b.dstAlphaBlendFactor = l.dst;
+                b.colorBlendOp = b.alphaBlendOp = l.subtract ? VK_BLEND_OP_REVERSE_SUBTRACT : VK_BLEND_OP_ADD;
+            }
+        }
         static constexpr VkPrimitiveTopology kTopology[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
                                                               VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
-        p = make_pipeline(gx_vert, gx_frag, gx_layout, true, kTopology[k.topology], b, true, true);
+        p = make_pipeline(gx_vert, k.depth_out ? gx_frag_depth : gx_frag, gx_layout, true, kTopology[k.topology], b, true, true, logic,
+                          k.topology == 1 && gpu.wide_lines);
         return p;
     }
     VkPipeline clear_pipeline(unsigned mask, bool depth) {
@@ -486,7 +549,8 @@ struct Renderer::Impl {
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, copy_pipeline);
         VkDescriptorSet set = allocate(s, copy_set_layout);
-        VkDescriptorImageInfo ii{efb_sampler, efb.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo ii = c.from_depth && !c.to_xfb ? VkDescriptorImageInfo{efb_depth_sampler, efb_depth.view, VK_IMAGE_LAYOUT_GENERAL}
+                                                             : VkDescriptorImageInfo{efb_sampler, efb.view, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         wr.dstSet = set;
         wr.descriptorCount = 1;
@@ -504,7 +568,7 @@ struct Renderer::Impl {
         p.src[2] = float(c.src[2]) / kEfbWidth;
         p.src[3] = float(c.src[3]) / kEfbHeight;
         p.format = c.to_xfb ? 0xFFFFu : c.format;
-        p.flags = c.half_scale ? 1u : 0u;
+        p.flags = (c.half_scale ? 1u : 0u) | (c.from_depth && !c.to_xfb ? 2u : 0u);
         p.gamma = c.gamma;
         vkCmdPushConstants(cmd, copy_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p);
         vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -638,9 +702,27 @@ struct Renderer::Impl {
             vkCmdSetDepthTestEnable(cmd, d.depth_test);
             vkCmdSetDepthWriteEnable(cmd, d.depth_write);
             vkCmdSetDepthCompareOp(cmd, VkCompareOp(d.depth_func));
-            Push push{d.state, d.has, 0u, sc};
+            // Lines and points: GX's widths are in sixths of an EFB pixel.
+            float point = 1.0f;
+            if (d.pipeline.topology == 1) {
+                const float width = float(d.line_width) / 6.0f * sc;
+                if (gpu.wide_lines) {
+                    vkCmdSetLineWidth(cmd, std::clamp(width, 1.0f, gpu.max_line_width));
+                } else if (d.line_width != 6) {
+                    static bool said = false;
+                    approximated(said, "lines are one pixel wide: this GPU has no wide lines");
+                }
+            } else if (d.pipeline.topology == 2) {
+                point = std::clamp(float(d.point_size) / 6.0f * sc, 1.0f, gpu.max_point_size);
+                if (!gpu.large_points && d.point_size != 6) {
+                    static bool said = false;
+                    approximated(said, "points are one pixel: this GPU has no large points");
+                }
+            }
+            Push push{d.state, d.has, 0u, sc, point};
             const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
             if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
+            if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
             vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
             vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
         }
@@ -674,6 +756,7 @@ struct Renderer::Impl {
             vkDestroyCommandPool(gpu.device, s.pool, nullptr);
         }
         for (auto& [k, t] : textures) t.image.destroy(gpu);
+        if (efb_depth_sampler) vkDestroySampler(gpu.device, efb_depth_sampler, nullptr);
         for (Spare& sp : spares) sp.image.destroy(gpu);
         for (auto& [k, x] : xfbs) x.destroy(gpu);
         for (auto& [k, p] : pipelines) vkDestroyPipeline(gpu.device, p, nullptr);
@@ -683,7 +766,7 @@ struct Renderer::Impl {
         vkDestroySampler(gpu.device, efb_sampler, nullptr);
         for (VkPipelineLayout l : {gx_layout, clear_layout, copy_layout}) vkDestroyPipelineLayout(gpu.device, l, nullptr);
         for (VkDescriptorSetLayout l : {states_layout, textures_layout, copy_set_layout}) vkDestroyDescriptorSetLayout(gpu.device, l, nullptr);
-        for (VkShaderModule m : {gx_vert, gx_frag, fs_vert, clear_frag, copy_frag}) vkDestroyShaderModule(gpu.device, m, nullptr);
+        for (VkShaderModule m : {gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag}) vkDestroyShaderModule(gpu.device, m, nullptr);
         efb.destroy(gpu);
         efb_depth.destroy(gpu);
         white.destroy(gpu);

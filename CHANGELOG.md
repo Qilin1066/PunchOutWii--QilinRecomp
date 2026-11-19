@@ -11,6 +11,26 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.9] - 2026-11-19
+The renderer's gaps: logic ops, line and point sizes, Z textures and depth copies.
+
+### Added
+- **Logic ops:** the GPU's own (GX and Vulkan number them alike), or Dolphin's blending approximation where the GPU has none.
+- **Line widths and point sizes** from BP 0x22, scaled with the EFB. One pixel where the GPU can't, logged once.
+- **Z textures:** the last texture weighted by type, plus a bias, replacing or adding to depth; fog uses it. Depth is written from a second build of the TEV shader, used only by draws with the Z test after texturing, so every other draw keeps the GPU's early depth test.
+- **EFB copies of depth:** Z8, Z8M, Z8L and the rest, the depth's bytes through the copy formats.
+- **The optional Vulkan features** `logicOp`, `wideLines` and `largePoints` are enabled where the device has them. Their absence is approximated, not fatal.
+- **`punchout_render_test`:** the recorder and renderer end to end from GX register writes, with the frame read back. It has 34 checks covering the above on the GPU's own features and on the fallbacks. Planted bugs fail it.
+
+### Fixed
+- **RG8 and GB8 EFB copies** had intensity and alpha swapped (now as Dolphin's hardware-checked conversion has them).
+- **Z textures were silently ignored.** Unlike the other gaps, they weren't even logged.
+
+### Changed
+- The recorder no longer logs these as "not drawn as the console draws it". The renderer logs only what it has to approximate on the GPU it runs on.
+- `tools/build_shaders.py` builds shader variants with defines (`kGxFragDepth`), and the source hash covers the variant list.
+- `docs/recompiler-core.md`: the differential test's figures brought up to date (193 instructions, 5,061 cases, FPRs compared).
+
 ## [0.13.8] - 2026-11-19
 ### Added
 - **`qilin_fp_check`:** the runtime's floating-point helpers against exact rational arithmetic (`recomp/tests/fp/`). It covers every double and single arithmetic instruction, `round25`, `frsp`, `fctiw`/`fctiwz`, `lfs`/`stfs`, paired-single quantisation, and `fres`/`frsqrte` (with Dolphin's hardware-measured `frsqrte` results). That's 40,000 cases a run, including constructed double-rounding traps, on every CI platform's own FPU. The differential test already checked the floating-point wiring; this checks the arithmetic under it.

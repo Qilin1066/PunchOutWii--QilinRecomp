@@ -29,6 +29,11 @@ struct Gpu {
     VkPhysicalDeviceProperties properties{};
     VkPhysicalDeviceMemoryProperties memory{};
     std::string name;
+    // Optional features, enabled where the device has them (the renderer
+    // approximates without them, and says so once): GX's logic ops, its line
+    // widths and its point sizes.
+    bool logic_op = false, wide_lines = false, large_points = false;
+    float max_line_width = 1.0f, max_point_size = 1.0f;
 
     // `instance_extensions`: what the window system needs (none when headless).
     // `surface`: if given, the queue must be able to present to it.

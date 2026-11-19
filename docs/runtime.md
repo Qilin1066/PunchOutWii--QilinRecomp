@@ -157,12 +157,22 @@ Two threads share the work. The game's thread records what the command stream as
   - They're compiled to SPIR-V when the shaders change, not at build time, into `punchout/src/shaders.inc`, which is committed. `--check` fails if the header is stale.
 - **GPU images are reused:** a texture or copy target that's done with becomes spare once its frame's fence has passed. The next image of the same size and use takes it, and spares unused for two seconds are freed. On the boot screens, no image is created after start-up. A frame's releases are handled after it's drawn: one frame can make and release the same texture (two copies to one address), and handling them first leaked it.
 - **Copies:** a copy to a texture stays a GPU image, found again by its address. A copy to the XFB becomes the image VI presents (`Display::present_image`). When there isn't one, VI converts the XFB in guest memory on the CPU, as before v0.13.0.
-- **Not done yet:** each of these is logged once if the game uses it.
-  - line and point widths;
-  - logic ops other than copy;
-  - EFB depth copies;
-  - Z textures;
-  - constant alpha together with source-alpha blending (dual-source blending isn't in the Pi 4's driver).
+- **Logic ops** (v0.13.9) use Vulkan's where the GPU has them, since GX numbers its sixteen as Vulkan does. Where it doesn't (Apple's GPUs through MoltenVK), they're approximated with blending, following Dolphin's table, with the shader forcing or inverting its output for four of them. That's exact for clear, copy, no-op, invert, copy-inverted and set, and for and, or and xor on 0/255 values; close for the rest. It's logged once when it happens.
+- **Line widths and point sizes** (BP 0x22, in sixths of a pixel) use dynamic line width and `gl_PointSize`, scaled with the EFB, within the device's range. Without `wideLines` or `largePoints` they're one pixel, logged once. The texture-coordinate offsets GX applies across lines and points aren't done.
+- **Z textures** (BP 0xF4/0xF5): the last texture sampled, unswizzled, weighted by its type (u8, u16, u24), plus the bias, replacing or adding to the depth, as Dolphin computes it.
+  - Fog uses the result whenever it's on.
+  - It reaches the depth buffer when Z is compared after texturing (BP 0x43 bit 6 clear). Those draws use a second build of the TEV shader that writes depth, because writing depth turns off the GPU's early depth test and every other draw keeps it.
+- **EFB copies of depth** (pixel format Z24 at the copy): the 24-bit depth is split into bytes, (z >> 16, z >> 8, z, 255), and these go through the colour copy's format conversion. So Z8 is the high byte, Z8M the middle and Z8L the low, as in Dolphin. The depth image is read with a nearest sampler, and the half-scale filter averages the bytes.
+- **Copy formats RG8 and GB8** sample (as IA8) with intensity from red and from green respectively. Before v0.13.9 the two channels were the wrong way round.
+- **Still approximate:** constant alpha together with blending that reads source alpha needs dual-source blending, which the Pi 4's driver doesn't have. There, the constant isn't written.
+- **Tested without the game** (`punchout_render_test`, in `ctest`, skipped without a Vulkan 1.3 device). GX register writes go through the real recorder and renderer, and the frame copied to the XFB is read back and checked. It covers:
+  - all sixteen logic ops, with the GPU's own and approximated;
+  - line and point sizes, and their fallbacks;
+  - Z textures with late and early Z;
+  - Z8 and Z8M depth copies;
+  - RG8 and GB8.
+
+  Planted bugs fail it: the old RG8 order, Z textures not writing depth, and depth copies reading colour.
 - **The stats line** (every five seconds) adds, per frame:
   - the game's thread recording, of which checking and decoding textures;
   - its waits for the main thread;

@@ -148,12 +148,24 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
     qci.pQueuePriorities = &priority;
     VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     for (const auto& r : kRequired13) f13.*r.f13 = VK_TRUE;
+    // Optional features: on where the device has them.
+    VkPhysicalDeviceFeatures have{};
+    vkGetPhysicalDeviceFeatures(g.physical, &have);
+    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f13};
+    f2.features.logicOp = have.logicOp;
+    f2.features.wideLines = have.wideLines;
+    f2.features.largePoints = have.largePoints;
+    g.logic_op = have.logicOp;
+    g.wide_lines = have.wideLines;
+    g.large_points = have.largePoints;
+    if (g.wide_lines) g.max_line_width = g.properties.limits.lineWidthRange[1];
+    if (g.large_points) g.max_point_size = g.properties.limits.pointSizeRange[1];
     std::vector<const char*> dext;
     if (want_swapchain) dext.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 #if defined(__APPLE__)
     if (has_extension(g.physical, "VK_KHR_portability_subset")) dext.push_back("VK_KHR_portability_subset");
 #endif
-    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f13};
+    VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f2};
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = static_cast<uint32_t>(dext.size());

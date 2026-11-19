@@ -38,12 +38,6 @@ uint32_t g_state = 0;
 int32_t g_tev_regs[4][4] = {}, g_konst[4][4] = {};
 float g_last_normal[3] = {0, 0, 1}, g_last_tangent[3] = {}, g_last_binormal[3] = {};
 
-void warn_once(bool& said, const char* what) {
-    if (said) return;
-    said = true;
-    rt::log("render: %s: not drawn as the console draws it yet", what);
-}
-
 // ---- vertices
 
 float as_float(uint32_t v) { return std::bit_cast<float>(v); }
@@ -376,11 +370,7 @@ PipelineKey pipeline_key(const uint32_t* bp, bool& alpha_target) {
         }
     } else if ((blend >> 1) & 1) {
         const unsigned op = (blend >> 12) & 15;
-        if (op != 3) {  // anything but copy
-            k.logic = uint8_t(op + 1);
-            static bool said = false;
-            warn_once(said, "logic ops other than copy");
-        }
+        if (op != 3) k.logic = uint8_t(op + 1);  // anything but copy (the renderer says if it has to approximate)
     }
     k.src = src, k.dst = dst, k.src_alpha = src_a, k.dst_alpha = dst_a;
     k.write_mask = uint8_t((color_update ? 7 : 0) | (alpha_update ? 8 : 0));
@@ -569,10 +559,8 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     d.pipeline = pipeline_key(r.bp, alpha_target);
     f.alpha_target = alpha_target;
     d.pipeline.topology = type <= 4 ? 0 : type <= 6 ? 1 : 2;
-    if (d.pipeline.topology) {
-        static bool said = false;
-        warn_once(said, "line and point widths");
-    }
+    d.line_width = uint8_t(r.bp[0x22] & 255);         // in sixths of a pixel
+    d.point_size = uint8_t((r.bp[0x22] >> 8) & 255);
     static constexpr uint8_t kCull[4] = {0, 2, 1, 3};  // none, back, front, all as Vulkan's
     d.cull = d.pipeline.topology == 0 ? kCull[(r.bp[0x00] >> 14) & 3] : 0;
     const uint32_t z = r.bp[0x40];
@@ -580,6 +568,9 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     d.depth_func = uint8_t((z >> 1) & 7);  // GX's and Vulkan's compare ops number alike
     d.depth_write = (z >> 4) & 1;
     if ((r.bp[0x43] & 7) >= 3) d.depth_test = 0, d.depth_write = 0;  // no Z in this pixel format
+    // Z textures change the depth written only when Z is compared after texturing
+    // (BP 0x43 bit 6 clear); then the shader writes depth.
+    if (((r.bp[0xF5] >> 2) & 3) != 0 && d.depth_test && !((r.bp[0x43] >> 6) & 1)) d.pipeline.depth_out = 1;
     viewport_and_scissor(r, d);
     bind_textures(r, d);
     f.packets.push_back({Packet::kDraw, uint32_t(f.draws.size())});
@@ -641,10 +632,6 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         c.format = ((command >> 3) & 15) / 2 + (((command >> 3) & 1) * 8) + (((command >> 15) & 1) ? 0x100 : 0);  // + intensity flag
         c.dest_width = uint32_t(c.half_scale ? c.src[2] / 2 : c.src[2]);
         c.dest_height = uint32_t(c.half_scale ? c.src[3] / 2 : c.src[3]);
-        if (c.from_depth) {
-            static bool said = false;
-            warn_once(said, "EFB copies of depth");
-        }
         c.texture = texture_from_copy(c.dest, c.dest_width, c.dest_height, f);
     }
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});

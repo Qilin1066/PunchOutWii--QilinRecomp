@@ -26,8 +26,10 @@ layout(std430, set = 0, binding = 0) readonly buffer States {
 layout(push_constant) uniform Push {
     uint state;
     uint has;    // gx::Has
-    uint flags;  // 1: constant alpha can't be written (the blend reads source alpha)
+    uint flags;  // 1: constant alpha can't be written (the blend reads source alpha);
+                 // bits 4-5: a logic op's help (1 output 0, 2 output 1, 3 invert the output)
     float scale; // EFB pixels to target pixels
+    float point_size;  // points: in target pixels
 } pc;
 
 #define S st[pc.state]

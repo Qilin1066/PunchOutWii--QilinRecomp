@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.13.8 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.13.9 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -138,6 +138,18 @@ if(QILIN_HOST)
     target_link_libraries(qilin_vktest PRIVATE qilin_host qilin_warnings)
     add_test(NAME qilin_vktest COMMAND qilin_vktest)
     set_tests_properties(qilin_vktest PROPERTIES SKIP_RETURN_CODE 77)
+    # The game's renderer end to end, without the game: GX register writes through
+    # the recorder and renderer, the frame read back (skipped without Vulkan 1.3).
+    add_executable(punchout_render_test punchout/tests/render_test.cpp punchout/src/recorder.cpp punchout/src/texture.cpp
+                   punchout/src/renderer.cpp)
+    target_include_directories(punchout_render_test PRIVATE punchout/src)
+    target_link_libraries(punchout_render_test PRIVATE qilin_host qilin_rt qilin_warnings)
+    qilin_tool(punchout_render_test)
+    if(NOT MSVC)  # Vulkan structures written {sType}, as in the host layer
+        set_source_files_properties(punchout/tests/render_test.cpp punchout/src/renderer.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+    endif()
+    add_test(NAME punchout_render_test COMMAND punchout_render_test)
+    set_tests_properties(punchout_render_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
 endif()
 
 # ---- Tests (no game files needed) ----
