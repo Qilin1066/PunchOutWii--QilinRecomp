@@ -11,6 +11,14 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-11-19
+### Fixed
+- **`fopen` reached dropped code:** MSL's `fopen`, which the game calls from four places, opens files through MetroTRK's host-file open, which was dropped with the rest of the debugger stub. That function is now replaced (a new override in `identify_libraries.py`, so `plan.tsv` gains a line) by what it does without a debugger: it fails, so `fopen` returns NULL as on a retail Wii.
+
+### Changed
+- `check_replacements.py` also reports lifted code that calls dropped code. That's how this was found; there's none left.
+- The one suspect in `qilin suspects` (`0x801C95E8`, MetroTRK's exception entry reaching the `lmw r0,0(r3)` invalid form) is confirmed harmless: it's dropped, and only `__start` (replaced) calls it.
+
 ## [0.13.6] - 2026-11-19
 Every replaced function that lifted code calls directly now has a replacement.
 

@@ -49,3 +49,4 @@
 8025E6C0	8025E840	lift	revolution/cx: CXGetUncompressedSize, CXUncompressLZ (pure code after NAND)
 801FE598	801FE770	lift	revolution/mtx: vector functions before the OS's first (__OSFPRInit)
 801C93D8	801C9494	replace	MetroTRK: __TRK_write_console, called by MSL's __write_console
+801C9070	801C91EC	replace	MetroTRK: the host-file open behind MSL's fopen

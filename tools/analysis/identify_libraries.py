@@ -384,6 +384,9 @@ EXCEPTIONS = [
     # MSL's __write_console sends console output to the debugger too, after the UART: that
     # one MetroTRK function is reached in normal running, so it's replaced (by nothing).
     (0x801C93D8, 0x801C9494, "replace", "MetroTRK: __TRK_write_console, called by MSL's __write_console"),
+    # MSL's fopen (called by the game) opens files on the debugger's host through MetroTRK;
+    # without a debugger that fails (returns 1), so it's replaced by the failure.
+    (0x801C9070, 0x801C91EC, "replace", "MetroTRK: the host-file open behind MSL's fopen"),
 ]
 
 

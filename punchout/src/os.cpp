@@ -42,6 +42,7 @@ void OSInit(Cpu&) {  // once: the game's constructors call it again
 }
 
 void returns_zero(Cpu& c) { c.r[3] = 0; }
+void returns_one(Cpu& c) { c.r[3] = 1; }  // what MetroTRK returns with no debugger attached: failure
 void OSGetConsoleType(Cpu& c) { c.r[3] = rt::peek32(0x8000002Cu); }  // retail Wii
 
 // The debug serial port (EXI's UART), where the C library's console output
@@ -246,6 +247,7 @@ const rt::Provided kReplacements[] = {
     {0x801EB3E0u, "InitializeUART", InitializeUART},
     {0x801EB428u, "WriteUARTN", WriteUARTN},
     {0x801C93D8u, "__TRK_write_console (no debugger)", returns_zero},
+    {0x801C9070u, "MetroTRK's host-file open behind fopen (no debugger: fails)", returns_one},
     {0x80201CDCu, "OSPanic", OSPanic},
     {0x80201E08u, "OSSetErrorHandler", OSSetErrorHandler},
     {0x801E16C0u, "PPCSync", PPCSync},

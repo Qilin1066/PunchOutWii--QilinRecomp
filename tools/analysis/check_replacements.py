@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Find replaced functions the lifted code calls that have no replacement.
+"""Find calls from lifted code that would stop the game: into replaced
+functions with no replacement, and into dropped code.
 
 A function in a "replace" range of the library plan runs only if punchout/src
 provides it (a {0x8xxxxxxx, "name", fn} entry); otherwise the call stops the
 game with an error naming it. This lists every such function that lifted code
 calls directly, with its callers, so they can be written before the game gets
 there. Calls through function pointers aren't in the call graph and aren't
-checked.
+checked. Lifted code calling dropped code (which isn't translated at all) is
+reported too: such a function needs a replace range in the plan
+(identify_libraries.py's overrides) and a replacement.
 
   qilin cfg <main.dol> --json cfg.json
   tools/analysis/check_replacements.py cfg.json [--plan data/R7PP01/plan.tsv]
@@ -55,10 +58,10 @@ def main() -> int:
             continue
         for callee in (int(c, 16) for c in f.get("calls", [])):
             kind, library = decide(callee)
-            if kind == "replace" and callee not in provided:
-                missing.setdefault(callee, (library, set()))[1].add(caller)
+            if (kind == "replace" and callee not in provided) or kind == "drop":
+                missing.setdefault(callee, (f"{kind}: {library}", set()))[1].add(caller)
 
-    print(f"{len(provided)} replacements provided; {len(missing)} replaced functions called by lifted code have none")
+    print(f"{len(provided)} replacements provided; {len(missing)} functions called by lifted code are dropped or have none")
     for callee, (library, callers) in sorted(missing.items()):
         print(f"  {callee:08X}  {library}: called from {' '.join(f'{c:08X}' for c in sorted(callers))}")
     return 1 if missing else 0

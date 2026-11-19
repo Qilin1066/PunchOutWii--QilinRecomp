@@ -82,7 +82,7 @@ The share of functions reached only through data (36%, against 26% in Beat the B
 
 Four switch shapes this game has and Beat the Beat didn't needed new CFG rules (`recompiler-core.md`). Without them, a 416-case switch (`0x8000E44C`, the script interpreter's opcode dispatch, by its shape) broke into 286 false functions, and four other switches went unproven.
 
-**One suspect:** the debugger stub's second exception entry (`0x801C95E8`, called directly) reaches the `lmw` invalid form. **Three starts rejected** by validation: `__init_data`'s two tables and the debugger stub's first exception entry.
+**One suspect:** the debugger stub's second exception entry (`0x801C95E8`, called directly) reaches the `lmw` invalid form. That's `lmw r0,0(r3)`, MetroTRK restoring every register from its save area at `0x803ACCA8`, which loads r3 while addressing through it. It's harmless here (checked in v0.13.7): MetroTRK is dropped, and the entry's only caller is `__start`, which the runtime replaces. **Three starts rejected** by validation: `__init_data`'s two tables and the debugger stub's first exception entry.
 
 `qilin coverage`, by word:
 
