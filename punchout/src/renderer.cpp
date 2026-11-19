@@ -108,7 +108,7 @@ struct Spare {
 };
 constexpr VkImageUsageFlags kUploaded = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 constexpr VkImageUsageFlags kCopied = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-constexpr VkImageUsageFlags kXfb = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+constexpr VkImageUsageFlags kXfb = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;  // sampled: the window draws it through a look
 constexpr uint64_t kSpareFrames = 120;  // spares unused for two seconds are destroyed
 constexpr size_t kMaxSpares = 64;
 
@@ -144,6 +144,7 @@ VkShaderModule module(VkDevice dev, const uint32_t* code, size_t bytes) {
 struct Renderer::Impl {
     host::Gpu& gpu;
     unsigned scale;
+    float anisotropy = 1.0f;  // for filtered textures (set_anisotropy)
     VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
     Image efb, efb_depth, white;
     Slot slots[2];
@@ -232,6 +233,15 @@ struct Renderer::Impl {
     }
 
     explicit Impl(host::Gpu& g, unsigned s) : gpu(g), scale(s) {}
+
+    void set_anisotropy(unsigned level) {
+        const float a = std::clamp(float(level), 1.0f, gpu.max_anisotropy);
+        if (a == anisotropy) return;
+        vkDeviceWaitIdle(gpu.device);  // the samplers may be in use
+        for (auto& [k, v] : samplers) vkDestroySampler(gpu.device, v, nullptr);
+        samplers.clear();
+        anisotropy = a;
+    }
 
     // ---- setup
 
@@ -632,6 +642,10 @@ struct Renderer::Impl {
         sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         sci.minLod = s.mip ? float(s.min_lod) / 16.0f : 0.0f;
         sci.maxLod = s.mip ? float(s.max_lod) / 16.0f : 0.0f;
+        if (anisotropy > 1.0f && s.min_linear) {  // an enhancement: the console filters with none
+            sci.anisotropyEnable = VK_TRUE;
+            sci.maxAnisotropy = anisotropy;
+        }
         check(vkCreateSampler(gpu.device, &sci, nullptr, &v), "vkCreateSampler");
         return v;
     }
@@ -989,7 +1003,11 @@ struct Renderer::Impl {
 };
 
 void Renderer::set_specialization(bool on) { impl_->specialize_on = on; }
-Renderer::Renderer(host::Gpu& gpu, unsigned scale) : impl_(std::make_unique<Impl>(gpu, scale)) { impl_->create(); }
+Renderer::Renderer(host::Gpu& gpu, unsigned scale, unsigned anisotropy) : impl_(std::make_unique<Impl>(gpu, scale)) {
+    impl_->create();
+    impl_->set_anisotropy(anisotropy);
+}
+void Renderer::set_anisotropy(unsigned level) { impl_->set_anisotropy(level); }
 Renderer::~Renderer() { impl_->destroy(); }
 void Renderer::render(gx::Frame& frame) {
     const uint64_t t0 = gx::now_ns();
@@ -998,13 +1016,9 @@ void Renderer::render(gx::Frame& frame) {
     st.render_ns.fetch_add(gx::now_ns() - t0, std::memory_order_relaxed);
     st.rendered.fetch_add(1, std::memory_order_relaxed);
 }
-bool Renderer::xfb(uint32_t address, VkImage& image, uint32_t& width, uint32_t& height) const {
+const host::Image* Renderer::xfb(uint32_t address) const {
     const auto it = impl_->xfbs.find(address & 0x1FFFFFFFu);
-    if (it == impl_->xfbs.end()) return false;
-    image = it->second.image;
-    width = it->second.width;
-    height = it->second.height;
-    return true;
+    return it == impl_->xfbs.end() ? nullptr : &it->second;
 }
 
 }  // namespace punchout

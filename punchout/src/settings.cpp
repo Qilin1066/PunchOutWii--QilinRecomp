@@ -3,6 +3,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <system_error>
 
 #include "qilin/host/pad.hpp"
 #include "qilin/rt/system.hpp"
@@ -14,15 +15,23 @@ namespace {
 
 constexpr const char* kControlNames[kControlCount] = {"up", "down", "left", "right", "one",
                                                       "two", "a", "plus", "minus", "home"};
+constexpr const char* kControlLabels[kControlCount] = {
+    "Up (block)", "Down (duck)", "Left (dodge)", "Right (dodge)", "1 (left punch)",
+    "2 (right punch)", "A (Star Punch, OK)", "+ (pause)", "- (back)", "Home"};
 struct PadName {
-    const char* name;
+    const char* name;   // in the file
+    const char* label;  // in the menu
     uint32_t bit;
 };
 constexpr PadName kPadNames[] = {
-    {"Up", host::kPadUp}, {"Down", host::kPadDown}, {"Left", host::kPadLeft}, {"Right", host::kPadRight},
-    {"A", host::kPadA},   {"B", host::kPadB},       {"X", host::kPadX},       {"Y", host::kPadY},
-    {"Start", host::kPadStart}, {"Back", host::kPadBack}, {"Guide", host::kPadGuide},
+    {"Up", "Pad Up", host::kPadUp},       {"Down", "Pad Down", host::kPadDown},  {"Left", "Pad Left", host::kPadLeft},
+    {"Right", "Pad Right", host::kPadRight}, {"A", "Pad A", host::kPadA},           {"B", "Pad B", host::kPadB},
+    {"X", "Pad X", host::kPadX},          {"Y", "Pad Y", host::kPadY},           {"Start", "Pad Start", host::kPadStart},
+    {"Back", "Pad Back", host::kPadBack}, {"Guide", "Pad Guide", host::kPadGuide},
+    {"LB", "Pad LB", host::kPadLB},       {"RB", "Pad RB", host::kPadRB},        {"LT", "Pad LT", host::kPadLT},
+    {"RT", "Pad RT", host::kPadRT},       {"L3", "Pad L3", host::kPadL3},        {"R3", "Pad R3", host::kPadR3},
 };
+constexpr const char* kPresets[] = {"original", "low-end", "desktop"};
 
 std::string trim(const std::string& s) {
     size_t a = 0, b = s.size();
@@ -54,12 +63,16 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
                 b = {Binding::kPad, p.bit, {}};
                 return true;
             }
-        why = "'" + name + "' isn't a pad button (Up Down Left Right A B X Y Start Back Guide)";
+        why = "'" + name + "' isn't a pad button (Up Down Left Right A B X Y Start Back Guide LB RB LT RT L3 R3)";
         return false;
     }
     if (kind == "key") {
         if (name.empty()) {
             why = "key: needs a key's name";
+            return false;
+        }
+        if (key_reserved(name)) {
+            why = "key:" + name + " is kept for the program (Escape and F1 open the settings menu, F11 is full screen)";
             return false;
         }
         b = {Binding::kKey, 0, name};
@@ -69,23 +82,54 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
     return false;
 }
 
+Binding pad(uint32_t bit) { return {Binding::kPad, bit, {}}; }
+Binding key(const char* name) { return {Binding::kKey, 0, name}; }
+
+const char* scaling_name(host::Scaling s) {
+    switch (s) {
+        case host::Scaling::integer: return "integer";
+        case host::Scaling::stretch: return "stretch";
+        case host::Scaling::fit: break;
+    }
+    return "fit";
+}
+
+}  // namespace
+
+const char* control_name(Control c) { return kControlNames[c]; }
+const char* control_label(Control c) { return kControlLabels[c]; }
+
+const char* pad_button_name(uint32_t bit) {
+    for (const PadName& p : kPadNames)
+        if (p.bit == bit) return p.name;
+    return nullptr;
+}
+
+bool key_reserved(const std::string& name) {
+    const std::string l = lower(trim(name));
+    return l == "escape" || l == "f1" || l == "f11";
+}
+
 std::string binding_text(const Binding& b) {
     switch (b.kind) {
         case Binding::kMouse: return "mouse";
         case Binding::kKey: return "key:" + b.key;
         case Binding::kPad:
-            for (const PadName& p : kPadNames)
-                if (p.bit == b.pad) return std::string("pad:") + p.name;
+            if (const char* n = pad_button_name(b.pad)) return std::string("pad:") + n;
     }
     return "?";
 }
 
-Binding pad(uint32_t bit) { return {Binding::kPad, bit, {}}; }
-Binding key(const char* name) { return {Binding::kKey, 0, name}; }
-
-}  // namespace
-
-const char* control_name(Control c) { return kControlNames[c]; }
+std::string binding_label(const Binding& b) {
+    switch (b.kind) {
+        case Binding::kMouse: return "Mouse";
+        case Binding::kKey: return b.key;
+        case Binding::kPad:
+            for (const PadName& p : kPadNames)
+                if (p.bit == b.pad) return p.label;
+    }
+    return "?";
+}
 
 Settings default_settings() {
     Settings s;
@@ -98,11 +142,34 @@ Settings default_settings() {
     s.controls[kCtlA] = {pad(host::kPadX), pad(host::kPadY), {Binding::kMouse, 0, {}}, key("C"), key("Space")};
     s.controls[kCtlPlus] = {pad(host::kPadStart), key("Return")};
     s.controls[kCtlMinus] = {pad(host::kPadBack), key("Backspace")};
-    s.controls[kCtlHome] = {pad(host::kPadGuide), key("Escape")};
+    s.controls[kCtlHome] = {pad(host::kPadGuide), key("H")};
     return s;
 }
 
-bool parse_settings(const std::string& text, Settings& out, std::string& error) {
+bool apply_preset(Settings& s, const std::string& name) {
+    if (name == "original" || name == "low-end") {  // the console's picture: 1x, its filtering (a Pi 4 does exactly this)
+        s.scale = 1, s.anisotropy = 1, s.vsync = true;
+    } else if (name == "desktop") {  // a desktop GPU: 3x (1920x1584 frame buffer), 16x anisotropic
+        s.scale = 3, s.anisotropy = 16, s.vsync = true;
+    } else {
+        return false;
+    }
+    s.preset = name;
+    return true;
+}
+
+host::Picture picture_of(const Settings& s) {
+    host::Picture p;
+    p.scaling = s.scaling;
+    p.smooth = s.smooth;
+    p.look = s.look;
+    p.scanlines = float(s.scanlines) / 100.0f;
+    p.mask = float(s.mask) / 100.0f;
+    p.vsync = s.vsync;
+    return p;
+}
+
+bool parse_settings(const std::string& text, Settings& out, std::string& error, bool legacy) {
     Settings s = default_settings();
     std::istringstream in(text);
     std::string line, section;
@@ -118,28 +185,102 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
         if (line.front() == '[') {
             if (line.back() != ']') return fail("a section is written [name]");
             section = lower(trim(line.substr(1, line.size() - 2)));
-            if (section != "video" && section != "controls") return fail("there's no section [" + section + "] (video, controls)");
+            if (section != "display" && section != "controls" && section != "console" && !(legacy && section == "video"))
+                return fail("there's no section [" + section + "] (display, controls, console)");
             continue;
         }
         const size_t eq = line.find('=');
         if (eq == std::string::npos) return fail("expected name = value");
         const std::string name = lower(trim(line.substr(0, eq))), value = trim(line.substr(eq + 1));
         if (section.empty()) return fail("'" + name + "' comes before any [section]");
-        if (section == "video") {
+        const std::string v = lower(value);
+        bool ok = true;
+        const auto boolean = [&](bool& to) {
+            if (v == "true") to = true;
+            else if (v == "false") to = false;
+            else ok = false;
+            return ok ? true : fail(name + " is true or false");
+        };
+        const auto number = [&](unsigned& to, unsigned lo, unsigned hi) {
+            unsigned x = 0;
+            ok = !v.empty() && v.size() <= 4;
+            for (char ch : v) ok = ok && std::isdigit(static_cast<unsigned char>(ch)), x = x * 10 + unsigned(ch - '0');
+            if (!ok || x < lo || x > hi) return fail(name + " is a whole number from " + std::to_string(lo) + " to " + std::to_string(hi));
+            to = x;
+            return true;
+        };
+        if (section == "video") {  // v0.17.0's
             if (name != "scale") return fail("[video] has no '" + name + "' (scale)");
-            if (value.size() != 1 || value[0] < '1' || value[0] > '8') return fail("scale is a whole number from 1 to 8");
-            s.scale = static_cast<unsigned>(value[0] - '0');
+            if (!number(s.scale, 1, 8)) return false;
+            continue;
+        }
+        if (section == "display") {
+            if (name == "preset") {
+                if (!apply_preset(s, v)) return fail("the presets are original, low-end and desktop");
+            } else if (name == "fullscreen") {
+                if (!boolean(s.fullscreen)) return false;
+            } else if (name == "monitor") {
+                s.monitor = value;
+            } else if (name == "scaling") {
+                if (v == "integer") s.scaling = host::Scaling::integer;
+                else if (v == "fit") s.scaling = host::Scaling::fit;
+                else if (v == "stretch") s.scaling = host::Scaling::stretch;
+                else return fail("scaling is integer, fit or stretch");
+            } else if (name == "smooth") {
+                if (!boolean(s.smooth)) return false;
+            } else if (name == "look") {
+                if (v == "plain") s.look = host::Look::plain;
+                else if (v == "crt") s.look = host::Look::crt;
+                else return fail("look is plain or crt");
+            } else if (name == "scanlines") {
+                if (!number(s.scanlines, 0, 100)) return false;
+            } else if (name == "mask") {
+                if (!number(s.mask, 0, 100)) return false;
+            } else if (name == "internal_scale") {
+                if (!number(s.scale, 1, 8)) return false;
+            } else if (name == "anisotropy") {
+                if (!number(s.anisotropy, 1, 16)) return false;
+                if (s.anisotropy & (s.anisotropy - 1)) return fail("anisotropy is 1, 2, 4, 8 or 16");
+            } else if (name == "vsync") {
+                if (!boolean(s.vsync)) return false;
+            } else if (name == "gpu") {
+                s.gpu = value;
+            } else {
+                return fail("[display] has no '" + name +
+                            "' (preset fullscreen monitor scaling smooth look scanlines mask internal_scale anisotropy vsync gpu)");
+            }
+            continue;
+        }
+        if (section == "console") {
+            if (name == "language") {
+                if (!number(s.language, 1, 5)) return fail("language is 1 (English), 2 (German), 3 (French), 4 (Spanish) or 5 (Italian)");
+            } else if (name == "widescreen") {
+                if (!boolean(s.widescreen)) return false;
+            } else if (name == "sound") {
+                if (v == "mono") s.sound = 0;
+                else if (v == "stereo") s.sound = 1;
+                else return fail("sound is mono or stereo");
+            } else {
+                return fail("[console] has no '" + name + "' (language widescreen sound)");
+            }
+            continue;
+        }
+        // [controls]
+        if (name == "rumble") {
+            if (!boolean(s.rumble)) return false;
             continue;
         }
         unsigned c = 0;
         while (c < kControlCount && name != kControlNames[c]) ++c;
-        if (c == kControlCount) return fail("'" + name + "' isn't a Wii Remote button (up down left right one two a plus minus home)");
+        if (c == kControlCount)
+            return fail("'" + name + "' isn't a Wii Remote button (up down left right one two a plus minus home) or rumble");
         if (seen[c]) return fail("'" + name + "' is set twice");
         seen[c] = true;
         s.controls[c].clear();
         std::istringstream items(value);
         for (std::string item; std::getline(items, item, ',');) {
             if (trim(item).empty()) continue;
+            if (legacy && lower(trim(item)) == "key:escape") item = "key:H";  // Escape opens the menu now
             Binding b;
             std::string why;
             if (!parse_binding(item, b, why)) return fail(why);
@@ -151,22 +292,47 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error) 
 }
 
 std::string settings_text(const Settings& s) {
+    const auto b = [](bool v) { return v ? "true" : "false"; };
     std::string t =
-        "# Punch-Out!! QilinComp settings. Edit with any text editor; delete the file to get the defaults back.\n"
+        "# Punch-Out!! QilinComp settings. The settings menu (F1 or Esc in the game) changes these and saves\n"
+        "# them here; any text editor works too. Delete the file to get the defaults back.\n"
         "# Each line is name = value; # starts a comment.\n"
         "\n"
-        "[video]\n"
-        "# The picture's resolution, as a multiple of the Wii's 640x528: 1 to 8. Higher is sharper and needs\n"
-        "# a faster GPU; 1 suits a Raspberry Pi 4. PUNCHOUT_SCALE in the environment overrides it.\n"
-        "scale = " + std::to_string(s.scale) + "\n"
+        "[display]\n"
+        "# A preset sets the enhancements below it: original (the console's picture), low-end (a Raspberry Pi\n"
+        "# 4-class board), desktop (3x resolution, 16x anisotropic filtering). Keys after it override it.\n"
+        "preset = " + s.preset + "\n"
+        "# Borderless full screen (F11 or Alt+Enter switch it), and on which display (its name; empty: the main one).\n"
+        "fullscreen = " + b(s.fullscreen) + "\n"
+        "monitor = " + s.monitor + "\n"
+        "# The picture's size: integer (whole multiples of the console's, the sharpest), fit (the largest that\n"
+        "# keeps its shape) or stretch (the whole window). smooth: filtered; false: nearest pixel.\n"
+        "scaling = " + scaling_name(s.scaling) + "\n"
+        "smooth = " + b(s.smooth) + "\n"
+        "# Its look: plain, or crt (a CRT television: raster lines and phosphor stripes). For crt, how dark the\n"
+        "# gaps between lines are and how strong the stripes, 0 to 100.\n"
+        "look = " + (s.look == host::Look::crt ? "crt" : "plain") + "\n"
+        "scanlines = " + std::to_string(s.scanlines) + "\n"
+        "mask = " + std::to_string(s.mask) + "\n"
+        "# The game's resolution, as a multiple of the Wii's 640x528: 1 to 8. Higher is sharper and needs a\n"
+        "# faster GPU. PUNCHOUT_SCALE in the environment overrides it.\n"
+        "internal_scale = " + std::to_string(s.scale) + "\n"
+        "# Texture filtering at an angle: 1 (the console's), 2, 4, 8 or 16.\n"
+        "anisotropy = " + std::to_string(s.anisotropy) + "\n"
+        "# vsync: true, no tearing; false, the lowest latency.\n"
+        "vsync = " + b(s.vsync) + "\n"
+        "# The graphics device, by name (empty: the best one).\n"
+        "gpu = " + s.gpu + "\n"
         "\n"
         "[controls]\n"
+        "# The Wii Remote's rumble, on the controller.\n"
+        "rumble = " + b(s.rumble) + "\n"
         "# The Wii Remote held sideways, buttons only. Each of its buttons takes a list of inputs, separated by\n"
-        "# commas; an empty list leaves it unused.\n"
+        "# commas; an empty list leaves it unused. The settings menu's Controls page sets them by pressing them.\n"
         "#   pad:<button>  a gamepad's button by an Xbox pad's names: Up Down Left Right A B X Y Start Back Guide\n"
-        "#                 (the left stick counts as Up/Down/Left/Right past half way)\n"
+        "#                 LB RB LT RT L3 R3 (the left stick counts as Up/Down/Left/Right past half way)\n"
         "#   key:<name>    a key, as SDL names it: A-Z, 0-9, Up, Down, Left, Right, Space, Return, Backspace,\n"
-        "#                 Escape, Tab, Left Shift, Right Ctrl, F1 ...\n"
+        "#                 Tab, Left Shift, Right Ctrl, F2 ... (not Escape, F1 or F11: they're the program's)\n"
         "#   mouse         the mouse's left button\n"
         "# up/down/left/right are the player's directions (dodge, duck, block). one and two punch left and right;\n"
         "# a is the Star Punch, and the menus' OK. The pointer follows the mouse and the right stick.\n";
@@ -176,28 +342,67 @@ std::string settings_text(const Settings& s) {
         for (size_t i = 0; i < s.controls[c].size(); ++i) t += (i ? ", " : " ") + binding_text(s.controls[c][i]);
         t += "\n";
     }
+    t += "\n"
+         "[console]\n"
+         "# What the game reads as the Wii's own settings, from the next start.\n"
+         "# language: 1 English, 2 German, 3 French, 4 Spanish, 5 Italian.\n"
+         "language = " + std::to_string(s.language) + "\n"
+         "# widescreen: 16:9; false, 4:3.\n"
+         "widescreen = " + b(s.widescreen) + "\n"
+         "# sound: mono or stereo.\n"
+         "sound = " + (s.sound == 0 ? "mono" : "stereo") + "\n";
     return t;
 }
 
+std::filesystem::path settings_file(const std::filesystem::path& folder) { return folder / "punchout.ini"; }
+
+bool save_settings(const std::filesystem::path& folder, const Settings& s) {
+    const std::filesystem::path file = settings_file(folder), tmp = file.string() + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out << settings_text(s);
+        if (!out.flush()) return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, file, ec);
+    return !ec;
+}
+
 Settings load_settings(const std::filesystem::path& folder) {
-    const std::filesystem::path file = folder / "settings.ini";
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
-        Settings s = default_settings();
-        std::ofstream outf(file, std::ios::binary);
-        outf << settings_text(s);
-        if (!outf) qilin::rt::fatal(nullptr, "cannot write %s", file.string().c_str());
-        qilin::rt::log("settings: wrote the defaults to %s", file.string().c_str());
+    const std::filesystem::path file = settings_file(folder), old = folder / "settings.ini";
+    const auto read = [](const std::filesystem::path& f, std::string& text) {
+        std::ifstream in(f, std::ios::binary);
+        if (!in) return false;
+        std::stringstream buf;
+        buf << in.rdbuf();
+        text = buf.str();
+        return true;
+    };
+    std::string text;
+    if (read(file, text)) {
+        Settings s;
+        std::string error;
+        if (!parse_settings(text, s, error))
+            qilin::rt::fatal(nullptr, "%s, %s (fix it, or delete the file to get the defaults back)", file.string().c_str(),
+                             error.c_str());
+        qilin::rt::log("settings: read %s", file.string().c_str());
         return s;
     }
-    std::stringstream buf;
-    buf << in.rdbuf();
-    Settings s;
-    std::string error;
-    if (!parse_settings(buf.str(), s, error))
-        qilin::rt::fatal(nullptr, "%s, %s (fix it, or delete the file to get the defaults back)", file.string().c_str(),
-                         error.c_str());
-    qilin::rt::log("settings: read %s", file.string().c_str());
+    Settings s = default_settings();
+    if (read(old, text)) {  // v0.17.0's: its controls and scale carry over
+        std::string error;
+        if (!parse_settings(text, s, error, true))
+            qilin::rt::fatal(nullptr, "%s, %s (fix it, or delete the file to get the defaults back)", old.string().c_str(),
+                             error.c_str());
+    }
+    if (!save_settings(folder, s)) qilin::rt::fatal(nullptr, "cannot write %s", file.string().c_str());
+    if (!text.empty()) {
+        std::error_code ec;
+        std::filesystem::rename(old, folder / "settings.ini.old", ec);
+        qilin::rt::log("settings: moved %s into %s (the old file is settings.ini.old)", old.string().c_str(), file.string().c_str());
+    } else {
+        qilin::rt::log("settings: wrote the defaults to %s", file.string().c_str());
+    }
     return s;
 }
 

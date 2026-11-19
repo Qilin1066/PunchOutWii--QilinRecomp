@@ -34,6 +34,10 @@ struct Gpu {
     // widths and its point sizes.
     bool logic_op = false, wide_lines = false, large_points = false;
     float max_line_width = 1.0f, max_point_size = 1.0f;
+    // Anisotropic texture filtering: the most the device allows, or 1 without it.
+    float max_anisotropy = 1.0f;
+    // Every device here that could draw (the settings menu offers them).
+    std::vector<std::string> usable;
 
     // `instance_extensions`: what the window system needs (none when headless).
     // `surface`: if given, the queue must be able to present to it.
@@ -41,6 +45,10 @@ struct Gpu {
                       VkSurfaceKHR (*make_surface)(VkInstance, void*) = nullptr, void* surface_arg = nullptr,
                       VkSurfaceKHR* surface_out = nullptr);
     void destroy();
+
+    // The device to use when it's there (by its name; empty: the best one).
+    // Set before create.
+    static void prefer(const std::string& name);
 
     uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want) const;
 };

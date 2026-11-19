@@ -5,6 +5,7 @@
 #include "audio.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -362,9 +363,42 @@ void civil_from_days(int64_t z, int64_t& y, unsigned& m, unsigned& d) {
     y = static_cast<int64_t>(yoe) + era * 400 + (m <= 2);
 }
 
+namespace {
+std::atomic<int64_t> g_paused_ns{0};  // time spent parked, left out of the time base
+std::atomic<bool> g_pause_asked{false};
+std::mutex g_pause_lock;
+std::condition_variable g_pause_cv;
+bool g_parked = false;  // under g_pause_lock
+}  // namespace
+
 uint64_t time_base() {
-    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_boot).count();
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_boot).count() -
+                    g_paused_ns.load(std::memory_order_relaxed);
     return g_epoch + static_cast<uint64_t>(ns) * 243u / 4000u;  // 60.75 MHz
+}
+
+void request_pause(bool on) {
+    {
+        std::lock_guard l(g_pause_lock);
+        g_pause_asked.store(on, std::memory_order_relaxed);
+    }
+    g_pause_cv.notify_all();
+}
+
+bool game_parked() {
+    std::lock_guard l(g_pause_lock);
+    return g_parked;
+}
+
+void park_if_requested() {
+    if (!g_pause_asked.load(std::memory_order_relaxed)) return;
+    std::unique_lock l(g_pause_lock);
+    const auto t0 = std::chrono::steady_clock::now();
+    g_parked = true;
+    g_pause_cv.wait(l, [] { return !g_pause_asked.load(std::memory_order_relaxed); });
+    g_parked = false;
+    g_paused_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count(),
+                          std::memory_order_relaxed);
 }
 
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline) {

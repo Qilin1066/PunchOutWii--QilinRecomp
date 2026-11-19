@@ -72,10 +72,16 @@ The first build lifts the whole game to C++ and compiles it, which takes several
 | 1 (left punch) | B | Z |
 | 2 (right punch) | A | X |
 | A (Star Punch, menus' OK) | X or Y | C or Space |
-| + / − / HOME | Start / Back / Guide | Enter / Backspace / Escape |
+| + / − / HOME | Start / Back / Guide | Enter / Backspace / H |
 | Pointer (menus) | Right stick | Mouse (left button is A) |
 
-All of these can be changed in `settings.ini`, which the first run writes to your user folder (Windows: `%APPDATA%\Qilin\PunchOut-QilinComp`, next to the saves). The file's comments explain it. The same file sets the picture's resolution (`scale`, 1 to 8 times the Wii's).
+**The settings menu:** F1 or Esc (a controller: Back and Start together) opens it over the game, which pauses; closing it saves. It's the same menu as the other Qilin recomps (Dear ImGui), with three pages:
+
+- **Controls:** each Wii Remote button's inputs. Press *Add* on a row, then the key, the pad's button (shoulders and triggers too) or a click; an input already on another button moves over. Click an input to remove it. Rumble on or off.
+- **Display:** full screen (also F11 or Alt+Enter) and which display; the picture's size (whole multiples, the sharpest; fit; or fill the window), smooth or sharp, and its look: plain, or a **CRT television** (raster lines on the console's own 480 lines, with phosphor stripes; both adjustable). *Look at the picture* hides the menu to see it. Vsync. The enhancement preset (original, low-end, desktop), the internal resolution (1-8x, from the next start) and anisotropic filtering (at once). The graphics device (from the next start).
+- **Game:** the Wii's own settings the game reads: language (English, German, French, Spanish, Italian), widescreen or 4:3, mono or stereo (from the next start). Quit.
+
+Everything is kept in `punchout.ini` in the game's data folder, `qilin/punchout` in your per-user application data (Windows: `%LOCALAPPDATA%\qilin\punchout`), with the saves (`nand/`) and the pipeline cache, as the other Qilin recomps keep theirs. The file has `[display]`, `[controls]` and `[console]` sections and comments, and can be edited by hand. Up to v0.17.0 the folder was `%APPDATA%\Qilin\PunchOut-QilinComp` and the file `settings.ini`: the first run of v0.18.0 moves the folder and carries the file's controls and scale over (Escape, now the menu's, becomes H for HOME).
 
 ## Using it
 

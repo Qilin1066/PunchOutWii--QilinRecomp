@@ -13,7 +13,7 @@ namespace punchout {
 class Renderer {
 public:
     // `scale`: the EFB's resolution as a multiple of the console's 640x528.
-    Renderer(qilin::host::Gpu& gpu, unsigned scale);
+    Renderer(qilin::host::Gpu& gpu, unsigned scale, unsigned anisotropy = 1);
     ~Renderer();
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
@@ -21,8 +21,11 @@ public:
     // Draw a frame's work (submitted to the GPU on return).
     void render(gx::Frame& frame);
     // The latest external frame buffer copied to `address` (in
-    // TRANSFER_SRC_OPTIMAL layout), if there is one.
-    bool xfb(uint32_t address, VkImage& image, uint32_t& width, uint32_t& height) const;
+    // TRANSFER_SRC_OPTIMAL layout, sampled usage), or null if there's none.
+    const qilin::host::Image* xfb(uint32_t address) const;
+    // Anisotropic filtering for the game's textures: 1 (the console's), 2, 4,
+    // 8 or 16, up to what the GPU allows. Waits for the GPU.
+    void set_anisotropy(unsigned level);
     // Whether draws may use pipelines specialised to their shape (on unless
     // PUNCHOUT_UBERSHADER is set); off, everything draws with the ubershader.
     void set_specialization(bool on);

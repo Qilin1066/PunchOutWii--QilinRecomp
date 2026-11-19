@@ -19,6 +19,8 @@ void load_game(const std::filesystem::path& folder);
 std::span<const qilin::rt::Provided> os_replacements();
 std::span<const qilin::rt::Provided> dvd_replacements();
 std::span<const qilin::rt::Provided> vi_replacements();
+// The console settings the game reads (sc.cpp), from the settings file; before the game starts.
+void set_console(unsigned language, bool widescreen, unsigned sound);
 std::span<const qilin::rt::Provided> sc_replacements();
 std::span<const qilin::rt::Provided> wpad_replacements();
 std::span<const qilin::rt::Provided> nand_replacements();

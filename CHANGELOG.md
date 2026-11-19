@@ -11,6 +11,25 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-19
+Enhancement options, with the same settings menu, file and data folder as the other Qilin recomps (BeatTheBeat and APB).
+
+### Added
+- **The settings menu** (Dear ImGui, pinned to the commit BeatTheBeat uses): F1 or Esc, or a controller's Back and Start together. It pauses the game (the guest parks at the next retrace and its clock stops) and saves on closing. A hint says how to open it for the first 8 seconds. Pages:
+  - **Controls:** set each Wii Remote button by pressing: *Add*, then a key, a pad button or a click. An input on another button moves over (and says so); click one to remove it; *Back to the defaults*. Rumble on or off.
+  - **Display:** full screen and which display; the picture's size (whole multiples, fit, fill); smooth or sharp; vsync; the enhancement preset, internal resolution (from the next start) and anisotropic filtering (at once); the graphics device (from the next start). *Look at the picture* hides the menu until a key.
+  - **Game:** language, widescreen or 4:3, mono or stereo, as the game reads them from the Wii's settings; about; quit.
+- **Picture looks:** plain, or a CRT television (raster lines on the console's lines, adjustable scanlines and phosphor stripes; after APB's shader). The window now draws the picture with a shader pass instead of a copy, so the menu draws over it.
+- **Anisotropic filtering** (1-16x, where the GPU has it) for the game's filtered textures.
+- **Pad buttons** LB, RB, LT, RT, L3 and R3 can be bound.
+- **F11 or Alt+Enter** switch borderless full screen.
+
+### Changed
+- **The settings file is `punchout.ini`** with `[display]`, `[controls]` and `[console]` sections and presets (original, low-end, desktop), as BeatTheBeat's. v0.17.0's `settings.ini` is carried over once and kept as `settings.ini.old`.
+- **The data folder is `qilin/punchout`** in the per-user application data (Windows: `%LOCALAPPDATA%\qilin\punchout`), as the other recomps'. The old `%APPDATA%\Qilin\PunchOut-QilinComp` (saves, pipeline cache) is moved there on the first run.
+- **HOME's key is H**; Escape opens the menu. Escape, F1 and F11 can't be bound.
+- The window's vsync can be turned off (mailbox, or immediate where there's no mailbox).
+
 ## [0.17.0] - 2026-11-19
 The GPU's command stream is decoded and recorded on a thread of its own.
 

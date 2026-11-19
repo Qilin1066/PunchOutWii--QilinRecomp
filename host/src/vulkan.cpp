@@ -48,6 +48,11 @@ constexpr Requirement kRequired13[] = {
 
 }  // namespace
 
+namespace {
+std::string g_preferred;
+}  // namespace
+void Gpu::prefer(const std::string& name) { g_preferred = name; }
+
 Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swapchain,
                 VkSurfaceKHR (*make_surface)(VkInstance, void*), void* surface_arg, VkSurfaceKHR* surface_out) {
     if (volkInitialize() != VK_SUCCESS)
@@ -125,7 +130,9 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
             reject("no queue that draws and presents");
             continue;
         }
-        const int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3
+        g.usable.push_back(p.deviceName);
+        const int score = !g_preferred.empty() && g_preferred == p.deviceName           ? 10
+                          : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU   ? 3
                           : p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2
                                                                                    : 1;
         if (score > best_score) {
@@ -139,6 +146,8 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
         die("no GPU here has what the renderer needs (Vulkan 1.3 with dynamic rendering and synchronization2)%s",
             rejected.empty() ? ": no Vulkan devices at all" : rejected.c_str());
     g.name = g.properties.deviceName;
+    if (!g_preferred.empty() && g.name != g_preferred)
+        std::fprintf(stderr, "the settings' graphics device \"%s\" isn't here: using %s\n", g_preferred.c_str(), g.name.c_str());
     vkGetPhysicalDeviceMemoryProperties(g.physical, &g.memory);
 
     const float priority = 1.0f;
@@ -155,6 +164,8 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
     f2.features.logicOp = have.logicOp;
     f2.features.wideLines = have.wideLines;
     f2.features.largePoints = have.largePoints;
+    f2.features.samplerAnisotropy = have.samplerAnisotropy;
+    if (have.samplerAnisotropy) g.max_anisotropy = g.properties.limits.maxSamplerAnisotropy;
     g.logic_op = have.logicOp;
     g.wide_lines = have.wideLines;
     g.large_points = have.largePoints;

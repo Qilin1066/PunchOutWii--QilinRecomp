@@ -2,15 +2,21 @@
 // Vulkan to present. Headless, it draws into an image of its own instead, for
 // tests and for machines without a display.
 //
+// The picture is drawn into the window through a look (plain, or a CRT
+// television), at a size the settings choose, and anything drawn over it
+// (the settings menu) after. F11 or Alt+Enter switch borderless full screen.
+//
 // Runtime code: no std::format (macOS 10.15).
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "qilin/host/pad.hpp"
+#include "qilin/host/picture.hpp"
 #include "qilin/host/vulkan.hpp"
 
 namespace qilin::host {
@@ -21,6 +27,9 @@ public:
         const char* title = "Punch-Out!!";
         uint32_t width = 1280, height = 720;  // the window's, or the headless target's, size
         bool headless = false;
+        bool fullscreen = false;              // borderless, at the desktop's mode
+        std::string monitor;                  // the display's name; empty or missing: the main one
+        Picture picture;
     };
     explicit Display(const Options& options);
     ~Display();
@@ -44,16 +53,41 @@ public:
     bool mouse_moved(float& x, float& y) const;
     // Rumble on the first pad, on or off.
     void rumble(bool on);
-    // Show a frame of RGBA8 pixels, scaled to fit the window at `aspect`
-    // (displayed width / height), with black bars around it.
-    void present(uint32_t width, uint32_t height, const uint8_t* rgba, float aspect);
-    // Show an image drawn on this display's GPU (in TRANSFER_SRC_OPTIMAL layout,
-    // its work submitted to the same queue before this call), the same way.
-    void present_image(VkImage image, uint32_t width, uint32_t height, float aspect);
+    // Show a frame of RGBA8 pixels, at `aspect` (displayed width / height);
+    // `lines`: the console picture's height in its own pixels (whole
+    // multiples and the CRT's raster go by it). Black around it.
+    void present(uint32_t width, uint32_t height, const uint8_t* rgba, float aspect, uint32_t lines);
+    // Show an image drawn on this display's GPU (in TRANSFER_SRC_OPTIMAL
+    // layout, with sampled usage and a colour view, its work submitted to the
+    // same queue before this call), the same way. It's left as it was given.
+    void present_image(VkImage image, VkImageView view, uint32_t width, uint32_t height, float aspect, uint32_t lines);
+    // Show the last picture again (for a menu over a paused game).
+    void present_again();
     Gpu& gpu();
     // Headless: the last frame presented, as RGBA8 at the target's size.
     std::vector<uint8_t> read_back();
     const std::string& device_name() const;
+
+    // The picture's settings, from the next present.
+    void set_picture(const Picture& p);
+    const Picture& picture() const;
+    bool fullscreen() const;
+    void set_fullscreen(bool on);
+    // The displays connected, by name, and moving the window to one (empty: the main one).
+    std::vector<std::string> monitors() const;
+    void move_to(const std::string& monitor);
+
+    // For a UI drawn over the picture: the SDL window (SDL_Window*), the
+    // window images' format and count. Null and 0 when headless.
+    void* sdl_window() const;
+    VkFormat swap_format() const;
+    uint32_t swap_image_count() const;
+    // Called with every SDL event (an SDL_Event*) before the display's own
+    // handling; true: taken, the display ignores it.
+    void set_event_hook(std::function<bool(const void* sdl_event)> hook);
+    // Called inside each present's drawing (dynamic rendering into the window
+    // image, after the picture), to draw over it.
+    void set_overlay(std::function<void(VkCommandBuffer)> overlay);
 
 private:
     struct Impl;

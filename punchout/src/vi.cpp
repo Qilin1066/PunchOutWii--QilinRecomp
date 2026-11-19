@@ -83,6 +83,7 @@ void poll_retrace() {
     while (now >= g_next_retrace) {
         g_next_retrace += kRetraceTicks;
         post_interrupt([](Cpu& c) {
+            park_if_requested();  // the settings menu's pause: here, between frames
             ++g_retraces;
             if (g_retraces % 300 == 0) report();
             if (g_pre_cb) guest_callback(c, g_pre_cb, g_retraces, 0);

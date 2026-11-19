@@ -8,8 +8,9 @@
 // --headless runs without a window, GPU or sound; --offscreen draws without a
 // window (with PUNCHOUT_DUMP=<folder>, every 60th frame shown is saved there as
 // PPM; PUNCHOUT_DUMP_EVERY=n changes the 60).
-// settings.ini in the per-user folder holds the controls and the EFB's
-// resolution (settings.hpp); PUNCHOUT_SCALE overrides the resolution.
+// punchout.ini in the game's data folder holds the settings (settings.hpp),
+// which the settings menu (F1 or Esc, menu.hpp) changes; PUNCHOUT_SCALE
+// overrides the internal resolution.
 // PUNCHOUT_INPUT presses buttons on a schedule, for runs without a player:
 // "A@12,Start@20.5" holds each for a fifth of a second at that many seconds
 // of game time (the game's frames over 60, so a slow GPU doesn't shift them);
@@ -21,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -32,6 +34,7 @@
 #include "hw.hpp"
 #include "gx.hpp"
 #include "input.hpp"
+#include "menu.hpp"
 #include "os.hpp"
 #include "profile.hpp"
 #include "settings.hpp"
@@ -39,6 +42,7 @@
 #include "renderer.hpp"
 #include "qilin/host/audio.hpp"
 #include "qilin/host/display.hpp"
+#include <SDL3/SDL_timer.h>
 #include "threads.hpp"
 #include "video.hpp"
 
@@ -98,19 +102,31 @@ int main(int argc, char** argv) {
     punchout::init_hardware();
     punchout::load_game(folder);
 
-    const punchout::Settings settings = punchout::load_settings(qilin::host::user_folder());
+    const std::filesystem::path data = qilin::host::user_folder();
+    punchout::Settings settings = punchout::load_settings(data);
+    punchout::set_console(settings.language, settings.widescreen, settings.sound);
+    const float aspect = settings.widescreen ? 16.0f / 9.0f : 4.0f / 3.0f;  // as the console tells the game (sc.cpp)
     std::unique_ptr<qilin::host::Display> display;
     std::unique_ptr<punchout::Renderer> renderer;
+    std::unique_ptr<punchout::Menu> menu;
     if (!headless) {
+        qilin::host::Gpu::prefer(settings.gpu);
         qilin::host::Display::Options o;
         o.title = "Punch-Out!!";
         o.headless = offscreen;
+        o.fullscreen = settings.fullscreen;
+        o.monitor = settings.monitor;
+        o.picture = punchout::picture_of(settings);
         display = std::make_unique<qilin::host::Display>(o);
         unsigned scale = settings.scale;
         if (const char* e = std::getenv("PUNCHOUT_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
-        renderer = std::make_unique<punchout::Renderer>(display->gpu(), scale);
+        renderer = std::make_unique<punchout::Renderer>(display->gpu(), scale, settings.anisotropy);
         punchout::gx::set_rendering(true);
         rt::log("drawing with %s, the EFB at %ux", display->device_name().c_str(), scale);
+        if (!offscreen) {
+            menu = std::make_unique<punchout::Menu>(*display, settings, data);
+            menu->set_running_scale(scale);
+        }
     }
     std::unique_ptr<qilin::host::AudioOut> audio;
     if (!headless && !offscreen) {
@@ -121,22 +137,26 @@ int main(int argc, char** argv) {
     }
     punchout::run_on_host_thread([](void*) { punchout::start_game(); }, nullptr);
 
-    // The controls, with each key's name looked up once.
+    // The controls, with each key's name looked up once (again when the menu changes them).
     struct Input {
         punchout::Binding::Kind kind;
         uint32_t pad;
         int key;
     };
     std::vector<Input> bindings[punchout::kControlCount];
-    if (display)
-        for (unsigned c = 0; c < punchout::kControlCount; ++c)
+    const auto look_up_controls = [&] {
+        for (unsigned c = 0; c < punchout::kControlCount; ++c) {
+            bindings[c].clear();
             for (const punchout::Binding& b : settings.controls[c]) {
                 int key = -1;
                 if (b.kind == punchout::Binding::kKey && (key = display->key_code(b.key.c_str())) < 0)
-                    rt::fatal(nullptr, "settings.ini: %s = key:%s, but there's no key called '%s'",
+                    rt::fatal(nullptr, "punchout.ini: %s = key:%s, but there's no key called '%s'",
                               punchout::control_name(static_cast<punchout::Control>(c)), b.key.c_str(), b.key.c_str());
                 bindings[c].push_back({b.kind, b.pad, key});
             }
+        }
+    };
+    if (display) look_up_controls();
 
     const char* dump = offscreen ? std::getenv("PUNCHOUT_DUMP") : nullptr;
     const char* every_text = std::getenv("PUNCHOUT_DUMP_EVERY");
@@ -176,6 +196,24 @@ int main(int argc, char** argv) {
             std::fflush(nullptr);
             std::_Exit(0);  // guest threads are parked on host threads: no static destructors
         }
+        if (menu) {
+            menu->tick();
+            if (menu->quit_requested()) {
+                rt::log("quit from the settings menu");
+                std::fflush(nullptr);
+                std::_Exit(0);
+            }
+            if (menu->take_controls_changed()) look_up_controls();
+            if (menu->is_open()) {  // the game is parked: the last picture, with the menu over it
+                punchout::g_controls.store(0, std::memory_order_relaxed);
+                display->rumble(false);
+                display->present_again();
+                if (!settings.vsync) SDL_Delay(8);  // without vsync the menu needn't spin
+                last = std::chrono::steady_clock::now();
+                continue;
+            }
+        }
+        if (renderer) renderer->set_anisotropy(settings.anisotropy);  // the menu's, once it's closed (unchanged: nothing to do)
         if (display) {
             uint32_t held = display->buttons();
             const double now = punchout::frame_count() / 60.0;  // game time: see the top
@@ -204,7 +242,7 @@ int main(int argc, char** argv) {
             punchout::g_pointer_x.store(int32_t(cursor_x * 1000), std::memory_order_relaxed);
             punchout::g_pointer_y.store(int32_t(cursor_y * 1000), std::memory_order_relaxed);
             punchout::g_pointer_on.store(std::fabs(cursor_x) <= 1.1f && std::fabs(cursor_y) <= 1.1f, std::memory_order_relaxed);
-            display->rumble(punchout::g_rumble.load(std::memory_order_relaxed));
+            display->rumble(settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed));
         }
         if (!renderer) {
             uint32_t w, h;
@@ -227,13 +265,11 @@ int main(int argc, char** argv) {
             else break;
         uint32_t xfb, w, h;
         if (!punchout::take_xfb(&sequence, 0, xfb, w, h)) continue;
-        VkImage image;
-        uint32_t iw, ih;
-        if (xfb && renderer->xfb(xfb, image, iw, ih)) {
-            display->present_image(image, iw, ih, 16.0f / 9.0f);  // the console says 16:9 (sc.cpp)
+        if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
+            display->present_image(x->image, x->view, x->width, x->height, aspect, h);
         } else {
             uint64_t s2 = sequence - 1;
-            if (punchout::take_frame(&s2, 0, rgba, w, h)) display->present(w, h, rgba.data(), 16.0f / 9.0f);
+            if (punchout::take_frame(&s2, 0, rgba, w, h)) display->present(w, h, rgba.data(), aspect, h);
         }
         if (dump && ++shown % every == 0) {
             const std::vector<uint8_t> px = display->read_back();

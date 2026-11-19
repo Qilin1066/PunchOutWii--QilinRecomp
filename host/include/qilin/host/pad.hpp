@@ -13,6 +13,9 @@ enum PadButton : uint32_t {
     kPadA = 1u << 4, kPadB = 1u << 5, kPadX = 1u << 6, kPadY = 1u << 7,
     kPadStart = 1u << 8, kPadBack = 1u << 9, kPadGuide = 1u << 10,
     kPadClick = 1u << 11,  // the mouse's left button
+    kPadLB = 1u << 12, kPadRB = 1u << 13,  // the shoulder buttons
+    kPadLT = 1u << 14, kPadRT = 1u << 15,  // the triggers, past half way
+    kPadL3 = 1u << 16, kPadR3 = 1u << 17,  // the sticks, pressed in
 };
 
 }  // namespace qilin::host

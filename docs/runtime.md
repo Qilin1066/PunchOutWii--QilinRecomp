@@ -46,7 +46,7 @@ With the plan, the lifter turns every replaced or dropped function into a thunk,
 
 - **Threads:** the main thread owns the window: it handles its events and shows the newest frame the guest has handed over. The guest runs on threads of its own; its main thread starts on a host thread with a 16 MB stack, like every other guest thread. Closing the window ends the program (it will become the console's power button).
 - **Window:** an SDL3 window, resizable and high-DPI.
-- **Input:** the first SDL gamepad (any, by an Xbox pad's button names) and the keyboard. Arrows are the D-pad, X and Z are A and B, C or Space is Y, Enter is Start, Backspace is View, Escape is Guide. The left stick counts as the D-pad past half way. Rumble goes to the pad.
+- **Input:** the first SDL gamepad (any, by an Xbox pad's button names) and the keyboard. Arrows are the D-pad, X and Z are A and B, C or Space is Y, Enter is Start, Backspace is View, H is Guide (Escape and F1 open the settings menu). The left stick counts as the D-pad past half way. Rumble goes to the pad.
 - **Vulkan:** `Gpu` makes a Vulkan 1.3 device, preferring a discrete GPU. It requires dynamic rendering and synchronization2 (both in v3dv's set) and names whatever a device lacks. `Display` presents through a FIFO swapchain, rebuilt when the window changes. Headless, it draws into an image of its own, which `qilin_vktest` reads back to check the letterboxing (skipped where there's no Vulkan 1.3 device; it passes on Mesa's llvmpipe).
 - **Frames:** at each retrace VI hands over the frame buffer the game set (`video.cpp`), and the main thread shows it at 16:9, letterboxed. For now that's the XFB in guest memory, YUV 4:2:2, converted on the CPU. The renderer's EFB copies will take its place.
 
@@ -118,7 +118,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
   - **The retrace:** a timed interrupt at 60 Hz (EuRGB60) from the host clock. It runs the pre- and post-retrace callbacks and wakes the threads in `VIWaitForRetrace`.
   - **Frame buffers:** `VISetNextFrameBuffer` is recorded for the renderer.
 - **Console output:** `OSGetConsoleType` reports a retail Wii. The C library's console writes go to the debug serial port (`InitializeUART`, `WriteUARTN`), which a retail console doesn't have; here it becomes the game's own log, as `game: ...` lines.
-- **NAND** (`nand.cpp`, v0.11.0): the Wii's flash file system as a folder, `<user folder>/nand/...`. The user folder is the platform's per-user folder from SDL (Windows: `%APPDATA%\Qilin\PunchOut-QilinComp`), or `PUNCHOUT_SAVE_DIR`.
+- **NAND** (`nand.cpp`, v0.11.0): the Wii's flash file system as a folder, `<user folder>/nand/...`. The user folder is the game's data folder, `qilin/punchout` in the platform's per-user application data (Windows: `%LOCALAPPDATA%\qilin\punchout`; until v0.18.0 SDL's `%APPDATA%\Qilin\PunchOut-QilinComp`, moved on the first run), or `PUNCHOUT_SAVE_DIR`.
   - **Paths:** absolute or relative to the current directory (the game's home, `/title/00010000/52375050/data`, to start with).
   - **Coverage:** create, delete, open, read, write, seek, length, move, type, change directory, the free-space check, and the asynchronous forms, whose callbacks run as interrupts. Errors are NAND's codes.
   - **Not yet:** the "safe" open and close open the file itself, so a write cut short isn't rolled back.
@@ -206,25 +206,32 @@ WPAD is replaced, and KPAD is lifted on top of it. The remote is held sideways a
 - Back: −;
 - Guide: HOME.
 
-The keyboard's defaults are the arrows, Z and X for 1 and 2, C or Space for A, Enter for +, Backspace for − and Escape for HOME. The pointer is real input, since the menus need it. The runtime places the sensor bar's two lights where the remote's camera would see them, after Dolphin's camera geometry. KPAD then works out the pointer from them as on hardware. The mouse over the picture moves the pointer, and its left button is A. The right stick also moves it, a screen's width a second. The angles are calibrated so the pointer lands where the mouse is, with the bar below the TV, the console's default setting.
+The keyboard's defaults are the arrows, Z and X for 1 and 2, C or Space for A, Enter for +, Backspace for − and H for HOME. The pointer is real input, since the menus need it. The runtime places the sensor bar's two lights where the remote's camera would see them, after Dolphin's camera geometry. KPAD then works out the pointer from them as on hardware. The mouse over the picture moves the pointer, and its left button is A. The right stick also moves it, a screen's width a second. The angles are calibrated so the pointer lands where the mouse is, with the bar below the TV, the console's default setting.
 
-## Settings (`settings.cpp`, v0.13.2)
+## Settings (`settings.cpp`, v0.13.2; rebuilt in v0.18.0)
 
-`settings.ini` sits in the per-user folder, next to the saves (Windows: `%APPDATA%\Qilin\PunchOut-QilinComp`). The first run writes it with the defaults and comments explaining each line.
-- `[video] scale`: the EFB's resolution, 1 to 8 times 640×528. The default is 1, which suits the Pi 4. `PUNCHOUT_SCALE` overrides it.
-- `[controls]`: each of the remote's buttons, in the player's terms (`up down left right one two a plus minus home`), takes a comma-separated list of inputs:
-  - `pad:<Xbox name>`;
-  - `key:<SDL key name>`;
+`punchout.ini` sits in the game's data folder, next to the saves. The first run writes it with every key and comments; the settings menu (`menu.cpp`) changes it and saves it back through a temporary file. Its layout follows the other Qilin recomps (BeatTheBeat's `beatthebeat.ini`):
+- `[display]`: `preset` (original, low-end, desktop: sets `internal_scale`, `anisotropy` and `vsync`; keys after it override it), `fullscreen`, `monitor`, `scaling` (integer, fit, stretch), `smooth`, `look` (plain, crt), `scanlines` and `mask` (0-100), `internal_scale` (1-8; `PUNCHOUT_SCALE` overrides it), `anisotropy` (1, 2, 4, 8, 16), `vsync`, `gpu`.
+- `[controls]`: `rumble`, and each of the remote's buttons, in the player's terms (`up down left right one two a plus minus home`), with a comma-separated list of inputs:
+  - `pad:<Xbox name>` (Up Down Left Right A B X Y Start Back Guide LB RB LT RT L3 R3);
+  - `key:<SDL key name>` (not Escape, F1 or F11, which are the program's);
   - `mouse`, its left button.
 
   An empty list leaves the button unused. Controls the file doesn't mention keep their defaults.
+- `[console]`: what `SCGetLanguage`, `SCGetAspectRatio` and `SCGetSoundMode` answer (`sc.cpp`): `language` (1-5, the PAL disc's), `widescreen`, `sound` (mono, stereo). The window's picture follows the aspect ratio.
 
-The main thread turns the pad, the keys and the mouse into the remote's buttons after each poll; WPAD turns those into its own bits. Mistakes stop the program at start-up, naming the line or the key, rather than leaving a button dead without saying why:
-- an unknown name, section, button or key;
-- a scale out of range;
-- a control set twice.
+v0.17.0's `settings.ini` (`[video] scale` and `[controls]`) is read once, written out as `punchout.ini` and renamed `settings.ini.old`; a `key:Escape` in it becomes `key:H`.
 
-`punchout_settings_test` checks that the defaults read back as written, that edits are read, and that mistakes are reported.
+The main thread turns the pad, the keys and the mouse into the remote's buttons after each poll; WPAD turns those into its own bits. Mistakes stop the program at start-up, naming the line or the key, rather than leaving a button dead without saying why: an unknown name, section, button, key, preset or look; a number out of range; a control set twice; a reserved key.
+
+`punchout_settings_test` checks that every setting reads back as written, that edits and presets are read, that the old file carries over, and that mistakes are reported.
+
+## The settings menu and the window's picture (`menu.cpp`, `host/src/display.cpp`, v0.18.0)
+
+- **Pause:** opening the menu asks for a pause (`request_pause`); the guest's running thread parks at the start of the next retrace interrupt (`park_if_requested` in `vi.cpp`). Only one guest thread runs at a time, so the game stands still. The time base leaves out the time parked, so OSGetTime, alarms, the retrace and the audio go on from where they were. The main thread shows the last picture again (`present_again`) with the menu over it.
+- **Drawing:** each present draws into the window image with dynamic rendering: black, the picture through its look in the rectangle the scaling gives, then the overlay (Dear ImGui's Vulkan backend). Whole multiples are of the console's picture, 853×480 at 16:9. The looks are `host/shaders/plain.frag` (the sampler is bilinear or nearest) and `crt.frag` (after the APB recomp's: Gaussian beams on the console's raster lines, wider when brighter, so average brightness is kept; gaps that fade where a line gets under two window pixels; an aperture grille in window pixels). `qilin_vktest` checks fill, whole multiples, and the CRT's beams against values worked out by hand.
+- **Input while open:** the display's event hook gives every SDL event to the menu first; while it's up the game gets none (and no buttons). F11 and Alt+Enter are the display's, open or not.
+- **Binding by pressing:** *Add* takes the next key (by its SDL scancode name, as `key_code` reads it), or the next pad button or click not already held when it began (read from the display's buttons). Meanwhile ImGui's mouse and gamepad navigation are off, until the press is let go.
 
 ## Hardware registers (`hw.cpp`, v0.12.0)
 

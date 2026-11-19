@@ -34,8 +34,18 @@ void wake_idle();
 // Called when the guest writes WPAR (PPCMtwpar), which resets the write-gather
 // pipe; the GPU (gpu.cpp) installs it.
 void on_wpar_write(void (*reset)());
-// The guest's time base: 60.75 MHz (a quarter of the bus clock) since boot.
-uint64_t time_base();  // ticks since 1 January 2000, 00:00 local time, as on the console
+// The guest's time base: 60.75 MHz (a quarter of the bus clock) since boot,
+// less the time the game spent paused.
+uint64_t time_base();
+
+// Pausing the game for the settings menu. The main thread asks; the guest's
+// running thread parks at the next retrace (vi.cpp), and since only one
+// guest thread runs at a time the whole game stands still. The time base
+// stops while it's parked, so its clock, alarms and audio go on from where
+// they were.
+void request_pause(bool on);
+bool game_parked();
+void park_if_requested();  // the guest's thread, at each retrace  // ticks since 1 January 2000, 00:00 local time, as on the console
 // Days since 1970-01-01 of a Gregorian date, and back.
 int64_t days_from_civil(int64_t y, unsigned m, unsigned d);
 void civil_from_days(int64_t days, int64_t& y, unsigned& m, unsigned& d);

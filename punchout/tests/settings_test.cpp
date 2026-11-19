@@ -1,6 +1,8 @@
 // The settings file (punchout/src/settings.cpp): what it writes reads back
 // the same, edits are read, and mistakes are reported with their line.
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "settings.hpp"
@@ -16,7 +18,11 @@ void check(bool ok, const char* what) {
 }
 
 bool same(const punchout::Settings& a, const punchout::Settings& b) {
-    if (a.scale != b.scale) return false;
+    if (a.scale != b.scale || a.preset != b.preset || a.fullscreen != b.fullscreen || a.monitor != b.monitor ||
+        a.scaling != b.scaling || a.smooth != b.smooth || a.look != b.look || a.scanlines != b.scanlines || a.mask != b.mask ||
+        a.anisotropy != b.anisotropy || a.vsync != b.vsync || a.gpu != b.gpu || a.rumble != b.rumble ||
+        a.language != b.language || a.widescreen != b.widescreen || a.sound != b.sound)
+        return false;
     for (unsigned c = 0; c < punchout::kControlCount; ++c) {
         if (a.controls[c].size() != b.controls[c].size()) return false;
         for (size_t i = 0; i < a.controls[c].size(); ++i) {
@@ -28,10 +34,10 @@ bool same(const punchout::Settings& a, const punchout::Settings& b) {
 }
 
 // The error a text gives, or "" if it reads.
-std::string error_of(const std::string& text) {
+std::string error_of(const std::string& text, bool legacy = false) {
     punchout::Settings s;
     std::string e;
-    return punchout::parse_settings(text, s, e) ? "" : e;
+    return punchout::parse_settings(text, s, e, legacy) ? "" : e;
 }
 
 }  // namespace
@@ -55,14 +61,14 @@ int main() {
         punchout::Settings s;
         std::string e;
         const bool ok = punchout::parse_settings(
-            "[Video]\n"
-            "scale = 3   # sharper\n"
+            "[Display]\n"
+            "internal_scale = 3   # sharper\n"
             "\n"
             "[controls]\n"
             "  TWO = pad:Y , KEY:Right Shift,mouse\n"
             "home =\n",
             s, e);
-        check(ok && s.scale == 3, "scale is read, sections and names in any case");
+        check(ok && s.scale == 3, "internal_scale is read, sections and names in any case");
         check(ok && s.controls[punchout::kCtlTwo].size() == 3 && s.controls[punchout::kCtlTwo][0].pad == host::kPadY &&
                   s.controls[punchout::kCtlTwo][1].kind == Binding::kKey &&
                   s.controls[punchout::kCtlTwo][1].key == "Right Shift" &&
@@ -79,9 +85,63 @@ int main() {
           "an unknown control is reported with its line");
     check(error_of("[controls]\none = pad:Z\n").rfind("line 2: 'Z' isn't a pad button", 0) == 0, "an unknown pad button");
     check(error_of("[controls]\none = Z\n").rfind("line 2: 'Z' isn't an input", 0) == 0, "an input without its kind");
-    check(error_of("[video]\nscale = 9\n").rfind("line 2: scale is a whole number from 1 to 8", 0) == 0, "a scale out of range");
+    check(error_of("[display]\ninternal_scale = 9\n").rfind("line 2: internal_scale is a whole number from 1 to 8", 0) == 0,
+          "a scale out of range");
+    check(error_of("[video]\nscale = 2\n").rfind("line 1: there's no section [video]", 0) == 0, "v0.17.0's [video] only in the old file");
+    {
+        punchout::Settings s;
+        std::string e;
+        const bool ok = punchout::parse_settings("[video]\nscale = 4\n[controls]\nhome = pad:Guide, key:Escape\n", s, e, true);
+        check(ok && s.scale == 4, "the old file's scale carries over");
+        check(ok && s.controls[punchout::kCtlHome].size() == 2 && s.controls[punchout::kCtlHome][1].key == "H",
+              "the old file's Escape (now the menu's) becomes H");
+    }
+    check(error_of("[controls]\nplus = key:F1\n").find("kept for the program") != std::string::npos, "F1 can't be bound");
+    check(error_of("[controls]\nplus = key:escape\n").find("kept for the program") != std::string::npos, "nor Escape");
+    {
+        punchout::Settings s;
+        std::string e;
+        const bool ok = punchout::parse_settings("[display]\npreset = desktop\nanisotropy = 4\n", s, e);
+        check(ok && s.scale == 3 && s.anisotropy == 4 && s.preset == "desktop", "a preset, then a key that overrides it");
+        check(!punchout::parse_settings("[display]\npreset = huge\n", s, e) && e.find("presets are") != std::string::npos,
+              "an unknown preset");
+        check(error_of("[display]\nanisotropy = 3\n").find("1, 2, 4, 8 or 16") != std::string::npos, "anisotropy is a power of two");
+    }
+    {
+        punchout::Settings s = d;
+        s.preset = "desktop", s.fullscreen = true, s.monitor = "DELL U2720Q", s.scaling = qilin::host::Scaling::integer;
+        s.smooth = false, s.look = qilin::host::Look::crt, s.scanlines = 80, s.mask = 0, s.scale = 5, s.anisotropy = 8;
+        s.vsync = false, s.gpu = "AMD Radeon RX 6600", s.rumble = false, s.language = 3, s.widescreen = false, s.sound = 0;
+        s.controls[punchout::kCtlOne] = {{Binding::kPad, host::kPadLT, {}}, {Binding::kKey, 0, "Left Shift"}};
+        punchout::Settings back;
+        std::string e;
+        check(punchout::parse_settings(punchout::settings_text(s), back, e) && same(back, s), "every setting reads back as written");
+    }
+    check(error_of("[display]\nlook = vhs\n").find("look is plain or crt") != std::string::npos, "an unknown look");
+    check(error_of("[display]\nscanlines = 101\n").find("from 0 to 100") != std::string::npos, "scanlines out of range");
+    check(error_of("[console]\nlanguage = 0\n").find("language is 1 (English)") != std::string::npos, "a language not on the disc");
+    check(error_of("[controls]\nrumble = maybe\n").find("rumble is true or false") != std::string::npos, "a boolean that isn't");
     check(error_of("scale = 2\n").rfind("line 1: 'scale' comes before any [section]", 0) == 0, "a setting outside a section");
     check(error_of("[audio]\n").rfind("line 1: there's no section [audio]", 0) == 0, "an unknown section");
+    {
+        // The data folder's file: written with the defaults, from v0.17.0's when that's there.
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "punchout_settings_test";
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        {
+            std::ofstream old(dir / "settings.ini");
+            old << "[video]\nscale = 2\n[controls]\nhome = key:Escape\n";
+        }
+        const punchout::Settings s = punchout::load_settings(dir);
+        check(s.scale == 2 && std::filesystem::exists(dir / "punchout.ini") && std::filesystem::exists(dir / "settings.ini.old") &&
+                  !std::filesystem::exists(dir / "settings.ini"),
+              "v0.17.0's settings.ini becomes punchout.ini");
+        punchout::Settings changed = s;
+        changed.look = qilin::host::Look::crt;
+        check(punchout::save_settings(dir, changed) && punchout::load_settings(dir).look == qilin::host::Look::crt,
+              "saving, then loading, keeps a change");
+        std::filesystem::remove_all(dir);
+    }
     check(error_of("[controls]\na = pad:A\na = pad:B\n").rfind("line 3: 'a' is set twice", 0) == 0, "a control set twice");
     check(error_of("[controls]\r\na = pad:A\r\n").empty(), "Windows line endings");
 

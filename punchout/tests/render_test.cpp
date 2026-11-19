@@ -169,9 +169,10 @@ struct Target {
             gx::recycle_frame(std::move(f));
         }
         vkDeviceWaitIdle(gpu.device);
-        VkImage image;
-        uint32_t w, h;
-        if (!renderer.xfb(kXfb, image, w, h)) rt::fatal(nullptr, "render_test: no XFB image");
+        const host::Image* x = renderer.xfb(kXfb);
+        if (!x) rt::fatal(nullptr, "render_test: no XFB image");
+        const VkImage image = x->image;
+        const uint32_t w = x->width, h = x->height;
         host::Buffer buf = host::Buffer::host_visible(gpu, VkDeviceSize(w) * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.queueFamilyIndex = gpu.family;
