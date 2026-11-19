@@ -5,6 +5,7 @@
 // The rate is 60 Hz: the console's settings report EuRGB60 (sc.cpp), which
 // this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
 #include "boot.hpp"
+#include "recorder.hpp"
 #include "audio.hpp"
 #include "gpu.hpp"
 #include "video.hpp"
@@ -48,6 +49,28 @@ void report() {
             static_cast<unsigned long long>(a.voices - a_last.voices), static_cast<unsigned long long>(a.mails_in - a_last.mails_in),
             static_cast<unsigned long long>(a.mails_out - a_last.mails_out));
     a_last = a;
+    // Drawing: per frame, the guest thread's recording and the main thread's drawing.
+    struct Drawing {
+        uint64_t frames, record, wait, lookups, hash, decoded, bytes, decode, rendered, render, gpu, made;
+    };
+    const gx::RecorderStats& g = gx::recorder_stats();
+    const auto rd = [](const std::atomic<uint64_t>& v) { return v.load(std::memory_order_relaxed); };
+    const Drawing now{rd(g.frames),   rd(g.record_ns), rd(g.wait_ns), rd(g.texture_lookups), rd(g.hash_ns),
+                      rd(g.textures_decoded), rd(g.texture_bytes), rd(g.decode_ns), rd(g.rendered), rd(g.render_ns), rd(g.gpu_wait_ns), rd(g.images_made)};
+    static Drawing d_last{};
+    if (now.frames != d_last.frames) {
+        const double frames = double(now.frames - d_last.frames), rendered = double(std::max<uint64_t>(1, now.rendered - d_last.rendered));
+        const auto ms = [&](uint64_t later, uint64_t earlier, double n) { return double(later - earlier) / 1e6 / n; };
+        rt::log("  drawing, per frame: recording %.2f ms (checking %.0f textures %.2f ms, decoding %.1f %.2f ms), "
+                "waiting for the main thread %.2f ms; the main thread drawing %.2f ms, of which waiting for the GPU %.2f ms; "
+                "%llu KB of textures decoded; %llu textures on the GPU, %llu spare, %llu images made",
+                ms(now.record, d_last.record, frames), double(now.lookups - d_last.lookups) / frames, ms(now.hash, d_last.hash, frames),
+                double(now.decoded - d_last.decoded) / frames, ms(now.decode, d_last.decode, frames), ms(now.wait, d_last.wait, frames),
+                ms(now.render, d_last.render, rendered), ms(now.gpu, d_last.gpu, rendered), static_cast<unsigned long long>((now.bytes - d_last.bytes) / 1024),
+                static_cast<unsigned long long>(rd(g.gpu_textures)), static_cast<unsigned long long>(rd(g.gpu_spares)),
+                static_cast<unsigned long long>(now.made - d_last.made));
+    }
+    d_last = now;
 }
 
 // Post a retrace for each one the host clock has passed.

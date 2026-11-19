@@ -15,6 +15,7 @@
 //
 // Runtime code: no std::format (macOS 10.15).
 #include "renderer.hpp"
+#include "recorder.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -50,13 +51,27 @@ struct FullscreenPush {
     float gamma;
 };
 
+// An image no longer in use, kept to be used again rather than destroyed:
+// creating and destroying images every frame (EFB copies, textures that
+// change) costs more than drawing them.
+struct Spare {
+    Image image;
+    VkImageUsageFlags usage = 0;
+    uint64_t since = 0;  // the frame it became spare
+};
+constexpr VkImageUsageFlags kUploaded = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+constexpr VkImageUsageFlags kCopied = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+constexpr VkImageUsageFlags kXfb = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+constexpr uint64_t kSpareFrames = 120;  // spares unused for two seconds are destroyed
+constexpr size_t kMaxSpares = 64;
+
 struct Slot {
     VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     Buffer vertices, indices, states, staging;
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
-    std::vector<Image> garbage;
+    std::vector<Spare> garbage;  // images this frame stopped using: spare once its fence has passed
 };
 
 struct SamplerKey {
@@ -97,8 +112,43 @@ struct Renderer::Impl {
     std::map<SamplerKey, VkSampler> samplers;
     VkSampler efb_sampler = VK_NULL_HANDLE;
 
-    std::unordered_map<int32_t, Image> textures;
+    std::unordered_map<int32_t, Spare> textures;  // by id, with the usage they were made for
+    std::vector<Spare> spares;
     std::map<uint32_t, Image> xfbs;  // by guest address
+
+    // An image of this size and use: a spare one if there is one.
+    Image obtain(uint32_t w, uint32_t h, uint32_t levels, VkImageUsageFlags usage) {
+        for (size_t i = 0; i < spares.size(); ++i) {
+            const Image& im = spares[i].image;
+            if (spares[i].usage == usage && im.width == w && im.height == h && im.levels == levels) {
+                Image found = im;
+                spares[i] = spares.back();
+                spares.pop_back();
+                return found;
+            }
+        }
+        gx::recorder_stats().images_made.fetch_add(1, std::memory_order_relaxed);
+        return Image::create(gpu, w, h, kColor, usage, levels);
+    }
+    // A frame's garbage, its fence passed: spare now. Old spares go.
+    void recycle(Slot& s) {
+        for (Spare& g : s.garbage) {
+            g.since = frames;
+            spares.push_back(g);
+        }
+        s.garbage.clear();
+        std::erase_if(spares, [this](Spare& sp) {
+            if (frames - sp.since <= kSpareFrames) return false;
+            sp.image.destroy(gpu);
+            return true;
+        });
+        while (spares.size() > kMaxSpares) {  // the oldest first
+            auto oldest = std::min_element(spares.begin(), spares.end(), [](const Spare& a, const Spare& b) { return a.since < b.since; });
+            oldest->image.destroy(gpu);
+            *oldest = spares.back();
+            spares.pop_back();
+        }
+    }
 
     explicit Impl(host::Gpu& g, unsigned s) : gpu(g), scale(s) {}
 
@@ -368,7 +418,7 @@ struct Renderer::Impl {
         VkDeviceSize at = 0;
         for (auto& t : list) {
             std::memcpy(static_cast<uint8_t*>(s.staging.mapped) + at, t.rgba.data(), t.rgba.size());
-            Image im = Image::create(gpu, t.width, t.height, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, t.levels);
+            Image im = obtain(t.width, t.height, t.levels, kUploaded);
             host::transition(cmd, im.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             std::vector<VkBufferImageCopy> regions;
             VkDeviceSize off = at;
@@ -385,7 +435,7 @@ struct Renderer::Impl {
             at += t.rgba.size();
             auto old = textures.find(t.id);
             if (old != textures.end()) s.garbage.push_back(old->second);
-            textures[t.id] = im;
+            textures[t.id] = {im, kUploaded, 0};
         }
     }
 
@@ -407,15 +457,15 @@ struct Renderer::Impl {
         if (c.to_xfb) {
             Image& x = xfbs[c.dest & 0x1FFFFFFFu];
             if (x.width != w || x.height != h) {
-                if (x.image) s.garbage.push_back(x);
-                x = Image::create(gpu, w, h, kColor, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+                if (x.image) s.garbage.push_back({x, kXfb, 0});
+                x = obtain(w, h, 1, kXfb);
             }
             target = &x;
         } else {
             auto old = textures.find(c.texture);
             if (old != textures.end()) s.garbage.push_back(old->second);
-            textures[c.texture] = Image::create(gpu, w, h, kColor, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-            target = &textures[c.texture];
+            textures[c.texture] = {obtain(w, h, 1, kCopied), kCopied, 0};
+            target = &textures[c.texture].image;
         }
         host::transition(cmd, target->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -494,16 +544,11 @@ struct Renderer::Impl {
     void render(gx::Frame& f) {
         slot = (slot + 1) % 2;
         Slot& s = slots[slot];
+        const uint64_t w0 = gx::now_ns();  // the GPU finishing the frame before last
         check(vkWaitForFences(gpu.device, 1, &s.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-        for (Image& im : s.garbage) im.destroy(gpu);
-        s.garbage.clear();
+        gx::recorder_stats().gpu_wait_ns.fetch_add(gx::now_ns() - w0, std::memory_order_relaxed);
+        recycle(s);
         check(vkResetDescriptorPool(gpu.device, s.descriptors, 0), "vkResetDescriptorPool");
-        for (int32_t id : f.released) {
-            auto it = textures.find(id);
-            if (it == textures.end()) continue;
-            s.garbage.push_back(it->second);
-            textures.erase(it);
-        }
         ensure(s.vertices, std::max<size_t>(1, f.vertices.size()) * sizeof(gx::Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         ensure(s.indices, std::max<size_t>(1, f.indices.size()) * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
         ensure(s.states, std::max<size_t>(1, f.states.size()) * sizeof(gx::State), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -561,7 +606,7 @@ struct Renderer::Impl {
             VkDescriptorImageInfo infos[8];
             for (int m = 0; m < 8; ++m) {
                 auto it = d.textures[m] >= 0 ? textures.find(d.textures[m]) : textures.end();
-                const VkImageView view = it != textures.end() ? it->second.view : white.view;
+                const VkImageView view = it != textures.end() ? it->second.image.view : white.view;
                 const VkSampler smp = sampler(d.samplers[m]);
                 infos[m] = {smp, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
                 key.push_back(reinterpret_cast<uint64_t>(view));
@@ -602,13 +647,24 @@ struct Renderer::Impl {
         vkCmdEndRendering(cmd);
         check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
         submit(s);
+        // What the frame released, after drawing it: a texture can be made and
+        // released in the same frame (two copies to one address), and draws
+        // before the release still use it. Spare once this frame's fence passes.
+        for (int32_t id : f.released) {
+            auto it = textures.find(id);
+            if (it == textures.end()) rt::fatal(nullptr, "render: texture %d released but never made", id);
+            s.garbage.push_back(it->second);
+            textures.erase(it);
+        }
+        gx::recorder_stats().gpu_textures.store(textures.size(), std::memory_order_relaxed);
+        gx::recorder_stats().gpu_spares.store(spares.size(), std::memory_order_relaxed);
         ++frames;
     }
 
     void destroy() {
         vkDeviceWaitIdle(gpu.device);
         for (Slot& s : slots) {
-            for (Image& im : s.garbage) im.destroy(gpu);
+            for (Spare& g : s.garbage) g.image.destroy(gpu);
             s.vertices.destroy(gpu);
             s.indices.destroy(gpu);
             s.states.destroy(gpu);
@@ -617,7 +673,8 @@ struct Renderer::Impl {
             vkDestroyFence(gpu.device, s.fence, nullptr);
             vkDestroyCommandPool(gpu.device, s.pool, nullptr);
         }
-        for (auto& [k, t] : textures) t.destroy(gpu);
+        for (auto& [k, t] : textures) t.image.destroy(gpu);
+        for (Spare& sp : spares) sp.image.destroy(gpu);
         for (auto& [k, x] : xfbs) x.destroy(gpu);
         for (auto& [k, p] : pipelines) vkDestroyPipeline(gpu.device, p, nullptr);
         for (auto& [k, p] : clear_pipelines) vkDestroyPipeline(gpu.device, p, nullptr);
@@ -635,7 +692,13 @@ struct Renderer::Impl {
 
 Renderer::Renderer(host::Gpu& gpu, unsigned scale) : impl_(std::make_unique<Impl>(gpu, scale)) { impl_->create(); }
 Renderer::~Renderer() { impl_->destroy(); }
-void Renderer::render(gx::Frame& frame) { impl_->render(frame); }
+void Renderer::render(gx::Frame& frame) {
+    const uint64_t t0 = gx::now_ns();
+    impl_->render(frame);
+    gx::RecorderStats& st = gx::recorder_stats();
+    st.render_ns.fetch_add(gx::now_ns() - t0, std::memory_order_relaxed);
+    st.rendered.fetch_add(1, std::memory_order_relaxed);
+}
 bool Renderer::xfb(uint32_t address, VkImage& image, uint32_t& width, uint32_t& height) const {
     const auto it = impl_->xfbs.find(address & 0x1FFFFFFFu);
     if (it == impl_->xfbs.end()) return false;

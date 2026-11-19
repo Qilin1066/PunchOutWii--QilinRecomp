@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -482,7 +483,9 @@ void submit(std::unique_ptr<Frame> frame) {
     std::unique_lock l(g_queue_lock);
     if (!g_rendering) return;
     // Two frames ahead at most: the CPU waits, as it does on a full FIFO.
+    const uint64_t t0 = now_ns();
     g_queue_cv.wait(l, [] { return g_queue.size() < 2 || !g_rendering; });
+    g_stats.wait_ns.fetch_add(now_ns() - t0, std::memory_order_relaxed);
     g_queue.push_back(std::move(frame));
     g_queue_cv.notify_all();
 }
@@ -498,7 +501,22 @@ std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
 
 void state_changed() { g_dirty = true; }
 
+static void record_primitive_timed(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count);
+static void record_copy_timed(const Registers& r, uint32_t command);
+
+// Time spent recording, less any wait for the main thread inside.
 void record_primitive(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count) {
+    const uint64_t t0 = now_ns(), w0 = g_stats.wait_ns.load(std::memory_order_relaxed);
+    record_primitive_timed(r, opcode, data, count);
+    g_stats.record_ns.fetch_add(now_ns() - t0 - (g_stats.wait_ns.load(std::memory_order_relaxed) - w0), std::memory_order_relaxed);
+}
+void record_copy(const Registers& r, uint32_t command) {
+    const uint64_t t0 = now_ns(), w0 = g_stats.wait_ns.load(std::memory_order_relaxed);
+    record_copy_timed(r, command);
+    g_stats.record_ns.fetch_add(now_ns() - t0 - (g_stats.wait_ns.load(std::memory_order_relaxed) - w0), std::memory_order_relaxed);
+}
+
+static void record_primitive_timed(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count) {
     if (count == 0) return;
     Frame& f = *g_frame;
     const Format fmt = format_of(r, opcode & 7);
@@ -569,6 +587,7 @@ void record_primitive(const Registers& r, uint8_t opcode, const uint8_t* data, u
 }
 
 void bp_written(uint32_t reg, uint32_t value) {
+    if (reg == 0x66) textures_invalidated();
     if (reg >= 0xE0 && reg <= 0xE7) {  // TEV colour registers and konstants: 11-bit signed, the type bit says which
         const unsigned i = (reg - 0xE0) / 2;
         const bool konst = (value >> 23) & 1;
@@ -586,7 +605,7 @@ void record_tlut_load(const Registers& r, uint32_t command) {
     load_tlut(source, tmem, bytes);
 }
 
-void record_copy(const Registers& r, uint32_t command) {
+static void record_copy_timed(const Registers& r, uint32_t command) {
     Frame& f = *g_frame;
     Copy c{};
     const uint32_t src = r.bp[0x49], size = r.bp[0x4A];
@@ -632,13 +651,16 @@ void record_copy(const Registers& r, uint32_t command) {
     f.copies.push_back(c);
     if (c.to_xfb) {
         textures_end_frame(f);
-        ++g_stats.frames;
+        g_stats.frames.fetch_add(1, std::memory_order_relaxed);
         submit(std::move(g_frame));
         g_frame = std::make_unique<Frame>();
         g_dirty = true;
     }
 }
 
-const RecorderStats& recorder_stats() { return g_stats; }
+RecorderStats& recorder_stats() { return g_stats; }
+uint64_t now_ns() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 }  // namespace punchout::gx

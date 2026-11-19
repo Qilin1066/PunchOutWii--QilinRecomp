@@ -140,6 +140,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 Two threads share the work. The game's thread records what the command stream asks for; the main thread owns Vulkan and draws it.
 - **Recording** (`recorder.cpp`): each primitive's vertices are decoded by the current vertex format into one canonical vertex (position, normal, binormal and tangent, two colours, eight texture coordinates, matrix indices, and bits saying which are present). Quads, strips and fans become index lists. The XF, BP and TEV state the shaders read is mirrored in a `gx::State` (std430). A new one is snapshotted only when a register it depends on changes. Viewport and scissor follow the hardware's rules as Dolphin documents them.
 - **Textures** (`texture.cpp`): TMEM is modelled for palettes and preloads. Every format (I4, I8, IA4, IA8, RGB565, RGB5A3, RGBA8, C4, C8, C14X2, CMPR) is decoded on the CPU, with mip levels, into a cache keyed by address, format, size, levels and palette, and checked by a hash of the data. A texture that an EFB copy wrote is used straight from the GPU while guest memory still holds what the copy left there. Entries unused for 600 frames go.
+  - Checking for changes hashes a texture's data (four independent lanes, about 11 GB/s on a desktop core). It does so once between invalidations of the GPU's texture cache (BP `0x66`) and frame ends, however many draws use the texture. On the Wii, the GPU keeps what it fetched until the game invalidates, so until then the data it would use is the data hashed.
 - **Frames:** a copy to the XFB ends a frame. The main thread takes it, at most two frames behind (otherwise the game waits).
 - **Drawing** (`renderer.cpp`): the EFB is RGBA8 plus a 32-bit depth buffer at a whole-number scale of 640×528 (`PUNCHOUT_SCALE`). Draws use dynamic rendering. Pipelines are keyed by blending and primitive type; cull mode and depth test are dynamic state. GX's reversed depth range goes into the viewport's min and max depth.
 - **Shaders** (`punchout/shaders/`, built by `tools/build_shaders.py`):
@@ -147,6 +148,7 @@ Two threads share the work. The game's thread records what the command stream as
   - One fragment ubershader reads the TEV configuration from the state and does all 16 stages: indirect textures, the colour and alpha combiners with the hardware's 8-bit rounding and compares, konst and swap tables, the alpha test, dither and fog.
   - A copy shader handles the EFB copy formats, halving and gamma.
   - They're compiled to SPIR-V when the shaders change, not at build time, into `punchout/src/shaders.inc`, which is committed. `--check` fails if the header is stale.
+- **GPU images are reused:** a texture or copy target that's done with becomes spare once its frame's fence has passed. The next image of the same size and use takes it, and spares unused for two seconds are freed. On the boot screens, no image is created after start-up. A frame's releases are handled after it's drawn: one frame can make and release the same texture (two copies to one address), and handling them first leaked it.
 - **Copies:** a copy to a texture stays a GPU image, found again by its address. A copy to the XFB becomes the image VI presents (`Display::present_image`). When there isn't one, VI converts the XFB in guest memory on the CPU, as before v0.13.0.
 - **Not done yet:** each of these is logged once if the game uses it.
   - line and point widths;
@@ -154,6 +156,13 @@ Two threads share the work. The game's thread records what the command stream as
   - EFB depth copies;
   - Z textures;
   - constant alpha together with source-alpha blending (dual-source blending isn't in the Pi 4's driver).
+- **The stats line** (every five seconds) adds, per frame:
+  - the game's thread recording, of which checking and decoding textures;
+  - its waits for the main thread;
+  - the main thread's drawing, of which waiting for the GPU;
+  - the textures held on the GPU, the spares, and the images made.
+
+  It shows which side holds the game back on a given machine.
 - **Testing without a screen:**
   - `--offscreen` draws with no window, for example on llvmpipe.
   - `PUNCHOUT_DUMP=dir` writes every 60th frame shown as a PPM at 1280×720.

@@ -6,10 +6,12 @@
 // and 14-bit indices into a palette in TMEM; CMPR as 2x2 DXT1-like blocks
 // with the console's own blends.
 #include "texture.hpp"
+#include "recorder.hpp"
 
 #include <bit>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <tuple>
 
 #include "qilin/rt/system.hpp"
@@ -149,16 +151,44 @@ void decode_texture(unsigned format, const uint8_t* src, uint32_t w, uint32_t h,
 
 namespace {
 
+// Whether texture data changed: four independent lanes of 8 bytes, so the
+// multiplies overlap (about 3x a single chain); every single-bit change
+// changes the result.
 uint64_t hash_bytes(const uint8_t* p, size_t n) {
-    uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+    constexpr uint64_t k = 0x9E3779B97F4A7C15ull, m = 0xFF51AFD7ED558CCDull;
+    uint64_t a = k ^ n, b = ~k, c = k * 3, d = n;
     size_t i = 0;
-    for (; i + 8 <= n; i += 8) {
-        uint64_t v;
-        std::memcpy(&v, p + i, 8);
-        h = (h ^ v) * 0x100000001B3ull;
-        h ^= h >> 29;
+    for (; i + 32 <= n; i += 32) {
+        uint64_t v[4];
+        std::memcpy(v, p + i, 32);
+        a = (a ^ v[0]) * m;
+        a ^= a >> 32;
+        b = (b ^ v[1]) * m;
+        b ^= b >> 32;
+        c = (c ^ v[2]) * m;
+        c ^= c >> 32;
+        d = (d ^ v[3]) * m;
+        d ^= d >> 32;
     }
+    uint64_t h = a ^ (b * 31) ^ (c * 131) ^ (d * 1031);
     for (; i < n; ++i) h = (h ^ p[i]) * 0x100000001B3ull;
+    h ^= h >> 33;
+    h *= m;
+    h ^= h >> 33;
+    return h;
+}
+
+// Texture data already hashed since the GPU's texture cache was last
+// invalidated (BP 0x66) or the frame began, by address and length. On the
+// Wii the GPU keeps what it fetched until told to drop it, so a game that
+// changes a texture in memory invalidates before drawing with it again: until
+// then the data the GPU would use is the data hashed.
+std::unordered_map<uint64_t, uint64_t> g_hashed;
+uint64_t hash_texture(uint32_t address, const uint8_t* src, uint32_t bytes) {
+    const uint64_t key = uint64_t(address) << 32 | bytes;
+    if (const auto it = g_hashed.find(key); it != g_hashed.end()) return it->second;
+    const uint64_t h = hash_bytes(src, bytes);
+    g_hashed.emplace(key, h);
     return h;
 }
 
@@ -234,7 +264,11 @@ int32_t texture_for(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w,
         if ((tlut & 0x3FF) * 512u + entries * 2 > sizeof g_tmem) rt::fatal(nullptr, "a palette runs past TMEM");
         palette_hash = hash_bytes(palette, entries * 2) ^ tf;
     }
-    const uint64_t hash = hash_bytes(src, bytes);
+    RecorderStats& st = recorder_stats();
+    st.texture_lookups.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t h0 = now_ns();
+    const uint64_t hash = hash_texture(address, src, bytes);
+    st.hash_ns.fetch_add(now_ns() - h0, std::memory_order_relaxed);
     const Key key{address, format, w, h, levels, palette_hash};
     auto it = g_cache.find(key);
     if (it != g_cache.end() && it->second.hash == hash) {
@@ -249,12 +283,16 @@ int32_t texture_for(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w,
     size_t total = 0;
     for (uint32_t l = 0, lw = w, lh = h; l < levels; ++l, lw = std::max(1u, lw / 2), lh = std::max(1u, lh / 2)) total += size_t(lw) * lh * 4;
     t.rgba.resize(total);
+    const uint64_t d0 = now_ns();
     size_t at = 0;
     for (uint32_t l = 0, lw = w, lh = h; l < levels; ++l, lw = std::max(1u, lw / 2), lh = std::max(1u, lh / 2)) {
         decode_texture(format, src, lw, lh, palette, tf, t.rgba.data() + at);
         src += texture_bytes(format, lw, lh);
         at += size_t(lw) * lh * 4;
     }
+    st.decode_ns.fetch_add(now_ns() - d0, std::memory_order_relaxed);
+    st.textures_decoded.fetch_add(1, std::memory_order_relaxed);
+    st.texture_bytes.fetch_add(bytes, std::memory_order_relaxed);
     if (it != g_cache.end()) frame.released.push_back(it->second.id);
     g_cache[key] = {t.id, hash, g_frame};
     frame.textures.push_back(std::move(t));
@@ -268,8 +306,11 @@ int32_t texture_from_copy(uint32_t address, uint32_t w, uint32_t h, Frame& frame
     return e.id;
 }
 
+void textures_invalidated() { g_hashed.clear(); }
+
 void textures_end_frame(Frame& frame) {
     ++g_frame;
+    g_hashed.clear();
     constexpr uint64_t kKeep = 600;  // ten seconds unused
     for (auto it = g_cache.begin(); it != g_cache.end();)
         if (g_frame - it->second.used > kKeep) {

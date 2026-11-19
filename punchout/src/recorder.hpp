@@ -2,6 +2,8 @@
 // as commands arrive, and frames go to the renderer.
 #pragma once
 
+#include <atomic>
+
 #include <cstdint>
 
 namespace punchout::gx {
@@ -26,9 +28,23 @@ void record_copy(const Registers& r, uint32_t command);
 // BP 0x65: a palette load.
 void record_tlut_load(const Registers& r, uint32_t command);
 
+// Counters for the five-second stats line, since boot. The main thread
+// writes rendered, render_ns, gpu_wait_ns, gpu_textures, gpu_spares and
+// images_made; the guest's thread the rest.
 struct RecorderStats {
-    uint64_t frames = 0, textures_decoded = 0, texture_bytes = 0;
+    std::atomic<uint64_t> frames{0};
+    std::atomic<uint64_t> record_ns{0};    // the guest's thread recording (wait_ns not included)
+    std::atomic<uint64_t> wait_ns{0};      // ... waiting for the main thread to take a frame
+    std::atomic<uint64_t> texture_lookups{0}, hash_ns{0};  // textures bound, and checking them for changes
+    std::atomic<uint64_t> textures_decoded{0}, texture_bytes{0}, decode_ns{0};  // decoding new ones (bytes of guest data)
+    std::atomic<uint64_t> rendered{0}, render_ns{0};  // the main thread drawing frames
+    std::atomic<uint64_t> gpu_wait_ns{0};             // ... of which waiting for the GPU to finish an older frame
+    std::atomic<uint64_t> gpu_textures{0}, gpu_spares{0};  // images the renderer holds now: in use, and kept to reuse
+    std::atomic<uint64_t> images_made{0};             // images created since boot (the rest are reused)
 };
-const RecorderStats& recorder_stats();
+RecorderStats& recorder_stats();
+
+// Nanoseconds on a steady clock, for the counters.
+uint64_t now_ns();
 
 }  // namespace punchout::gx

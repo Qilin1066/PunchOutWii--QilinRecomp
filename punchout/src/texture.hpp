@@ -23,6 +23,8 @@ int32_t texture_from_copy(uint32_t address, uint32_t width, uint32_t height, Fra
 
 // Once per frame: forget what hasn't been used for a while.
 void textures_end_frame(Frame& frame);
+// BP 0x66: the GPU's texture cache was invalidated (texture data may have changed).
+void textures_invalidated();
 
 // GX's texture formats and their sizes in memory.
 uint32_t texture_bytes(unsigned format, uint32_t width, uint32_t height);

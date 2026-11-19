@@ -11,6 +11,24 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-11-19
+The renderer stops leaking GPU memory, and does less work a frame.
+
+### Fixed
+- **A leak of GPU images:** a texture made and released in the same frame (two EFB copies to one address, three times a frame on the boot screens) was never freed. A frame's releases are now handled after it's drawn. A release of a texture that was never made is fatal.
+
+### Changed
+- **GPU images are reused** instead of being created and destroyed every frame. EFB copy targets, uploaded textures and XFB images become spares once their frame's fence passes, and spares unused for two seconds are freed. On the boot screens, nothing is created after start-up.
+- **Texture checks are about 5x cheaper:**
+  - A faster hash (four lanes, about 2.8x).
+  - Each texture is hashed once per frame, or after each invalidation of the GPU's texture cache (BP `0x66`), rather than at every draw.
+  - On the save dialog this went from 3 ms a frame to 0.6.
+- **The stats line reports drawing:**
+  - recording, texture checks and decoding;
+  - waits on either side;
+  - GPU waits;
+  - textures held, spares and images made.
+
 ## [0.13.2] - 2026-11-19
 The controls can be changed, in a settings file.
 
