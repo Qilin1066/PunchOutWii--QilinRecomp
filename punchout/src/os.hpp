@@ -25,6 +25,11 @@ void post_interrupt(std::function<void(qilin::rt::Cpu&)> work);
 // every thread blocked knows how long to sleep.
 void add_timer_source(std::function<void()> poll, std::function<uint64_t()> deadline);
 uint64_t next_timer_deadline();
+// Sleep up to `ns` while every guest thread waits, or until another host
+// thread calls wake_idle because it has something for a timer source to
+// post (the GPU thread, reaching a draw-done command).
+void idle_sleep(uint64_t ns);
+void wake_idle();
 
 // Called when the guest writes WPAR (PPCMtwpar), which resets the write-gather
 // pipe; the GPU (gpu.cpp) installs it.

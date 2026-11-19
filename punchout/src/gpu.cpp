@@ -25,6 +25,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <bit>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "os.hpp"
@@ -100,10 +103,12 @@ struct PeEvent {
     uint16_t token;
     bool interrupt;
 };
-std::vector<PeEvent> g_pe_events;
+std::vector<PeEvent> g_pe_events;  // the GPU thread adds, the guest's timer polls them
+std::mutex g_pe_lock;
 
 void poll_pe() {
     const uint64_t now = time_base();
+    std::lock_guard l(g_pe_lock);
     for (size_t i = 0; i < g_pe_events.size();) {
         const PeEvent e = g_pe_events[i];
         if (e.at > now) {
@@ -124,18 +129,27 @@ void poll_pe() {
     }
 }
 uint64_t pe_deadline() {
+    std::lock_guard l(g_pe_lock);
     uint64_t t = UINT64_MAX;
     for (const auto& e : g_pe_events) t = std::min(t, e.at);
     return t;
 }
 
 void pe_finish() {
-    if (g_trace) rt::log("GPU: draw done (PE control %04X)", g_pe[kPeCtrl]);
-    g_pe_events.push_back({time_base() + kGpuLatency, true, 0, false});
+    if (g_trace) rt::log("GPU: draw done");
+    {
+        std::lock_guard l(g_pe_lock);
+        g_pe_events.push_back({time_base() + kGpuLatency, true, 0, false});
+    }
+    wake_idle();  // a guest thread may be asleep waiting for it
 }
 void pe_token(uint16_t token, bool interrupt) {
-    if (g_trace) rt::log("GPU: token %04X%s (PE control %04X)", token, interrupt ? " with interrupt" : "", g_pe[kPeCtrl]);
-    g_pe_events.push_back({time_base() + kGpuLatency, false, token, interrupt});
+    if (g_trace) rt::log("GPU: token %04X%s", token, interrupt ? " with interrupt" : "");
+    {
+        std::lock_guard l(g_pe_lock);
+        g_pe_events.push_back({time_base() + kGpuLatency, false, token, interrupt});
+    }
+    wake_idle();
 }
 
 void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
@@ -296,6 +310,30 @@ uint8_t g_gather[32];
 unsigned g_gathered = 0;
 
 void send_burst(Cpu& c);
+void consume(Cpu& c, const uint8_t* bytes, size_t n);
+
+// The GPU thread (v0.17.0): the guest's thread only queues the pipe's bursts;
+// this one decodes and records them, as the console's GPU works beside its
+// CPU. It reaches draw-done and token commands when it gets to them, and the
+// guest learns of them then, as on the hardware. Memory it reads (display
+// lists, vertex arrays, textures) is read when it gets there too, which games
+// allow for: they sync with the GPU before reusing it. PUNCHOUT_GPU_THREAD=0
+// decodes on the guest's thread.
+const bool g_gpu_threaded = [] {
+    const char* e = std::getenv("PUNCHOUT_GPU_THREAD");
+    return !(e && *e == '0');
+}();
+// Bytes queued before the guest waits. Small, as the hardware's lag is: with
+// 1 MB the decoder fell whole draws behind and read vertex arrays and
+// matrices the game had already rewritten (corrupt fights); at 16 KB it trails
+// by a few draws, which the game allows for.
+constexpr size_t kMaxIncoming = 16u << 10;
+std::mutex g_gpu_lock;
+std::condition_variable g_gpu_cv;
+std::vector<uint8_t> g_incoming;  // bursts not yet decoded
+Cpu* g_guest_cpu = nullptr;       // for the decoder's error reports
+std::mutex g_stats_lock;
+Stats g_stats_seen;  // g_stats as of the last batch, for other threads
 
 void pipe_write(Cpu& c, uint32_t value, unsigned size) {
     for (unsigned i = 0; i < size; ++i) {  // a write can straddle two bursts
@@ -331,8 +369,20 @@ void send_burst(Cpu& c) {
     const uint32_t cp_write = g_pi[kPiFifoWrite] & kFifoAddress;
     g_cp[kCpWriteLo] = static_cast<uint16_t>(cp_write);
     g_cp[kCpWriteHi] = static_cast<uint16_t>(cp_write >> 16);
-    g_fifo.insert(g_fifo.end(), g_gather, g_gather + 32);
-    g_stats.fifo_bytes += 32;
+    if (!g_gpu_threaded) return consume(c, g_gather, 32);
+    std::unique_lock l(g_gpu_lock);
+    g_guest_cpu = &c;
+    // A bounded queue, as the hardware's FIFO is: the CPU waits when it's full.
+    g_gpu_cv.wait(l, [] { return g_incoming.size() < kMaxIncoming; });
+    g_incoming.insert(g_incoming.end(), g_gather, g_gather + 32);
+    if (g_incoming.size() == 32) g_gpu_cv.notify_all();
+}
+
+// The GPU's side of the FIFO: decode what has arrived (the GPU thread, or the
+// guest's own with PUNCHOUT_GPU_THREAD=0).
+void consume(Cpu& c, const uint8_t* bytes, size_t n) {
+    g_fifo.insert(g_fifo.end(), bytes, bytes + n);
+    g_stats.fifo_bytes += n;
     decode(c, g_fifo.data(), g_fifo.size(), g_fifo_at, false);
     if (g_fifo_at == g_fifo.size()) {
         g_fifo.clear();
@@ -340,6 +390,24 @@ void send_burst(Cpu& c) {
     } else if (g_fifo_at > 65536) {
         g_fifo.erase(g_fifo.begin(), g_fifo.begin() + static_cast<long>(g_fifo_at));
         g_fifo_at = 0;
+    }
+    std::lock_guard l(g_stats_lock);
+    g_stats_seen = g_stats;
+}
+
+void gpu_thread() {
+    std::vector<uint8_t> batch;
+    for (;;) {
+        Cpu* c;
+        {
+            std::unique_lock l(g_gpu_lock);
+            g_gpu_cv.wait(l, [] { return !g_incoming.empty(); });
+            batch.swap(g_incoming);
+            c = g_guest_cpu;
+        }
+        g_gpu_cv.notify_all();  // room again
+        consume(*c, batch.data(), batch.size());
+        batch.clear();
     }
 }
 
@@ -401,7 +469,11 @@ void init_gpu() {
     map_mmio({0xCC003000u, 0xCC003100u, "the processor interface", read_reg, write_reg});
     map_mmio({0xCC008000u, 0xCC008020u, "the write-gather pipe", read_reg, write_reg});
     add_timer_source(poll_pe, pe_deadline);
+    if (g_gpu_threaded) std::thread(gpu_thread).detach();  // runs until the process exits
 }
-const Stats& gpu_stats() { return g_stats; }
+Stats gpu_stats() {
+    std::lock_guard l(g_stats_lock);
+    return g_gpu_threaded ? g_stats_seen : g_stats;
+}
 
 }  // namespace punchout

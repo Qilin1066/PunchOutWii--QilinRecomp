@@ -11,6 +11,8 @@
 #include <ctime>
 #include <thread>
 #include <cstring>
+#include <mutex>
+#include <condition_variable>
 #include <deque>
 #include <string>
 #include <vector>
@@ -370,6 +372,24 @@ void add_timer_source(std::function<void()> poll, std::function<uint64_t()> dead
 }
 void on_wpar_write(void (*reset)()) { g_wpar_reset = reset; }
 
+namespace {
+std::mutex g_idle_lock;
+std::condition_variable g_idle_cv;
+bool g_idle_woken = false;
+}  // namespace
+void idle_sleep(uint64_t ns) {
+    std::unique_lock l(g_idle_lock);
+    g_idle_cv.wait_for(l, std::chrono::nanoseconds(ns), [] { return g_idle_woken; });
+    g_idle_woken = false;
+}
+void wake_idle() {
+    {
+        std::lock_guard l(g_idle_lock);
+        g_idle_woken = true;
+    }
+    g_idle_cv.notify_all();
+}
+
 uint64_t next_timer_deadline() {
     uint64_t t = UINT64_MAX;
     for (const auto& timer : g_timers) t = std::min(t, timer.deadline());
@@ -413,7 +433,7 @@ void poll_loop(Cpu& c) {
     }
     // Nothing came: wait for the next timed event, a millisecond at most, rather than spin.
     const uint64_t now = time_base(), next = std::min(next_timer_deadline(), now + kTimerHz / 1000);
-    if (next > now) std::this_thread::sleep_for(std::chrono::nanoseconds((next - now) * 4000 / 243));
+    if (next > now) idle_sleep((next - now) * 4000 / 243);
 }
 
 bool deliver_interrupts_idle(Cpu& c) {

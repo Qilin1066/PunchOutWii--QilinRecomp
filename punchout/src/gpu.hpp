@@ -12,6 +12,7 @@ struct Stats {
 
 // Map the GPU's registers (CP, PE, PI, the write-gather pipe); init_hardware calls it.
 void init_gpu();
-const Stats& gpu_stats();
+// What the decoder has seen, as of its last batch.
+Stats gpu_stats();
 
 }  // namespace punchout

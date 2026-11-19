@@ -169,7 +169,7 @@ void block(Cpu& c, bool leaving = false) {
             rt::fatal(&c, "every guest thread is waiting, and nothing is left to wake one (deadlock)");
         const uint64_t now = time_base();
         if (deadline > now)
-            std::this_thread::sleep_for(std::chrono::nanoseconds((deadline - now) * 1000000000 / kTimerHz));
+            idle_sleep((deadline - now) * 1000000000 / kTimerHz);
     }
 }
 

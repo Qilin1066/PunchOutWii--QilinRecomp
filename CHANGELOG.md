@@ -11,6 +11,16 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-19
+The GPU's command stream is decoded and recorded on a thread of its own.
+
+### Changed
+- **A GPU thread.** The guest's thread now only queues the write-gather pipe's bursts (still writing the CPU's FIFO in memory, as before); a separate thread decodes them and records the frames, as the console's GPU works beside its CPU. The game's own thread no longer pays the ~13 ms a fight frame that recording costs, so on a machine with cores to spare (the Raspberry Pi 4 has four) the two run in parallel.
+  - Draw-done and token interrupts come when the GPU thread reaches those commands, as on the hardware; a guest thread asleep waiting for one is woken then (`wake_idle`), not at the next timer.
+  - The queue is 16 KB, about the hardware's lag. With 1 MB the decoder fell whole draws behind and read vertex arrays and matrices the game had already rewritten: fight frames were visibly corrupt. At 16 KB a scripted run from the title to a knockdown in round 1 is clean.
+  - `PUNCHOUT_GPU_THREAD=0` decodes on the guest's thread, as before.
+  - In this session's 2-core sandbox the software GPU takes the cores, so the frame rate is unchanged here (34-39 frames per 5 s in a fight); the gain needs spare cores.
+
 ## [0.16.0] - 2026-11-19
 The recorder's CPU time per fight frame halved: 26 ms to 13 ms (on this session's Xeon core; a Raspberry Pi 4 core is roughly 3x slower).
 

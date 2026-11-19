@@ -191,6 +191,7 @@ Two threads share the work. The game's thread records what the command stream as
   - `PUNCHOUT_INPUT="Y@16,Start@20.5"` presses pad buttons at those seconds of game time, for a fifth of a second each. Game time is the frames the game has handed VI, over 60: the game waits for the GPU, so on a slow one this keeps a script in step with the screen where the clock would drift.
   - `PUNCHOUT_POINTER="x,y"` holds the pointer at a point (−1 to 1, y up); `"x,y;x,y@40;x,y@52"` moves it at those times.
   - The save lives in the per-user folder's `nand/`; copying it aside and back makes a scripted run repeatable.
+  - `PUNCHOUT_GPU_THREAD=0` decodes the command stream on the guest's thread instead of the GPU thread (v0.17.0; gpu.cpp explains the 16 KB queue).
   - `PUNCHOUT_FULL_VERTICES=1` stores every vertex in the full 132-byte layout instead of the compact 60-byte one where it fits (v0.16.0).
   - `PUNCHOUT_PROFILE=<file>` (Linux): a SIGPROF sampler, 1 kHz of CPU time, needing no perf or ptrace; `tools/analysis/profile_report.py <exe> <file>` names the hot functions.
 
