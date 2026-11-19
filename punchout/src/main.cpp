@@ -33,6 +33,7 @@
 #include "gx.hpp"
 #include "input.hpp"
 #include "os.hpp"
+#include "profile.hpp"
 #include "settings.hpp"
 #include "qilin/host/paths.hpp"
 #include "renderer.hpp"
@@ -72,6 +73,7 @@ std::vector<Press> scripted_input(const char* text) {
 int main(int argc, char** argv) {
     namespace rt = qilin::rt;
     punchout::set_command_line(argc, argv);  // for the game's reset
+    punchout::start_profiler();              // PUNCHOUT_PROFILE, for development
     bool headless = false, offscreen = false;
     const char* folder = nullptr;
     for (int i = 1; i < argc; ++i) {
@@ -209,6 +211,13 @@ int main(int argc, char** argv) {
             punchout::take_frame(&sequence, 10, rgba, w, h);
             continue;
         }
+        // PUNCHOUT_SPECIALIZE_FROM=<seconds of game time>: the ubershader until
+        // then (for comparing the two on the same scene).
+        static const double specialize_from = [] {
+            const char* t = std::getenv("PUNCHOUT_SPECIALIZE_FROM");
+            return t ? std::atof(t) : -1.0;
+        }();
+        if (specialize_from >= 0) renderer->set_specialization(punchout::frame_count() / 60.0 >= specialize_from);
         // Draw what the guest recorded, then show what VI shows.
         for (int i = 0; i < 2; ++i)  // what's queued (two at most), then on to showing
             if (auto f = punchout::gx::next_frame(i == 0 ? 4 : 0)) renderer->render(*f);

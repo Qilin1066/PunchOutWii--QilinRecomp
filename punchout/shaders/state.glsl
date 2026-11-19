@@ -33,5 +33,8 @@ layout(push_constant) uniform Push {
 } pc;
 
 #define S st[pc.state]
-uint bp(uint i) { return S.bp[i >> 2][i & 3u]; }
+uint bp_dyn(uint i) { return S.bp[i >> 2][i & 3u]; }
+#ifndef BP_SPECIALIZED  // gx.frag reads the shape registers from specialisation constants
+uint bp(uint i) { return bp_dyn(i); }
+#endif
 uint bits(uint v, uint at, uint n) { return bitfieldExtract(v, int(at), int(n)); }

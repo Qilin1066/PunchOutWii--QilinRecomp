@@ -21,6 +21,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <unordered_map>
 
 #include "gx.hpp"
 #include "qilin/rt/system.hpp"
@@ -33,6 +34,18 @@ namespace {
 
 RecorderStats g_stats;
 std::unique_ptr<Frame> g_frame = std::make_unique<Frame>();
+
+// Every shape seen, by its words, and by id for the renderer's threads.
+struct ShapeHash {
+    size_t operator()(const ShapeWords& w) const {
+        uint64_t h = 0x9E3779B97F4A7C15ull;
+        for (uint32_t x : w) h = (h ^ x) * 0x100000001B3ull;
+        return size_t(h ^ (h >> 29));
+    }
+};
+std::unordered_map<ShapeWords, uint32_t, ShapeHash> g_shape_ids;  // the guest thread's
+std::mutex g_shapes_lock;
+std::deque<ShapeWords> g_shapes;  // by id
 bool g_dirty = true;
 uint32_t g_state = 0;
 int32_t g_tev_regs[4][4] = {}, g_konst[4][4] = {};
@@ -557,6 +570,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     if (d.index_count == 0) return;
     bool alpha_target;
     d.pipeline = pipeline_key(r.bp, alpha_target);
+    d.shape = shape_id(r.bp);
     f.alpha_target = alpha_target;
     d.pipeline.topology = type <= 4 ? 0 : type <= 6 ? 1 : 2;
     d.line_width = uint8_t(r.bp[0x22] & 255);         // in sixths of a pixel
@@ -648,6 +662,21 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
 RecorderStats& recorder_stats() { return g_stats; }
 uint64_t now_ns() {
     return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+uint32_t shape_id(const uint32_t* bp) {
+    const ShapeWords w = shape_of(bp);
+    const auto [it, added] = g_shape_ids.try_emplace(w, uint32_t(g_shape_ids.size()));
+    if (added) {
+        std::lock_guard lock(g_shapes_lock);
+        g_shapes.push_back(w);
+    }
+    return it->second;
+}
+ShapeWords shape_words(uint32_t id) {
+    std::lock_guard lock(g_shapes_lock);
+    if (id >= g_shapes.size()) rt::fatal(nullptr, "the renderer asked for shape %u, which the recorder never made", id);
+    return g_shapes[id];
 }
 
 }  // namespace punchout::gx

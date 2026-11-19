@@ -76,6 +76,34 @@ struct PipelineKey {
     bool operator==(const PipelineKey&) const = default;
 };
 
+// A draw's TEV "shape": the BP registers that decide what the pixel shader
+// does, as opposed to the colours it uses. The renderer compiles a pipeline
+// specialised to each shape (gx.frag's specialisation constants, in this
+// order), so a weak GPU runs straight-line code instead of interpreting the
+// registers per pixel. Masked to the bits the shader reads, so draws that
+// differ only elsewhere share one.
+constexpr unsigned kShapeWords = 70;
+using ShapeWords = std::array<uint32_t, kShapeWords>;
+// genmode (stage counts), 0x10-0x1F (indirect), 0x25-0x2F (indirect scales
+// and refs, orders), 0xC0-0xDF (combiners), 0xF5 (Z texture mode),
+// 0xF6-0xFD (konst and swap selects), 0xF3 bits 16-23 (alpha test functions).
+inline ShapeWords shape_of(const uint32_t* bp) {
+    ShapeWords w{};
+    unsigned n = 0;
+    w[n++] = bp[0x00] & 0x73C00u;  // TEV stages (10-13), indirect stages (16-18)
+    for (unsigned i = 0x10; i < 0x20; ++i) w[n++] = bp[i];
+    for (unsigned i = 0x25; i < 0x30; ++i) w[n++] = bp[i];
+    for (unsigned i = 0xC0; i < 0xE0; ++i) w[n++] = bp[i];
+    w[n++] = bp[0xF5] & 0xFu;
+    for (unsigned i = 0xF6; i < 0xFE; ++i) w[n++] = bp[i];
+    w[n++] = (bp[0xF3] >> 16) & 0xFFu;
+    return w;
+}
+// The registry of shapes (recorder.cpp): the id for a draw's BP registers,
+// and, from any thread, the words of an id handed out.
+uint32_t shape_id(const uint32_t* bp);
+ShapeWords shape_words(uint32_t id);
+
 struct Sampler {
     uint8_t wrap_s, wrap_t;  // 0 clamp, 1 repeat, 2 mirror
     uint8_t mag_linear, min_linear, mip;  // mip: 0 none, 1 point, 2 linear
@@ -89,6 +117,7 @@ struct Draw {
     uint32_t has;          // Has bits
     uint32_t first_index, index_count;
     PipelineKey pipeline;
+    uint32_t shape;        // shape id (shape_words)
     uint8_t cull;          // Vulkan cull mode
     uint8_t depth_test, depth_write, depth_func;  // Vulkan compare op
     float viewport[6];     // x, y, width, height, min, max depth (EFB pixels)

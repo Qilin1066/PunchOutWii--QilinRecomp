@@ -23,6 +23,9 @@ public:
     // The latest external frame buffer copied to `address` (in
     // TRANSFER_SRC_OPTIMAL layout), if there is one.
     bool xfb(uint32_t address, VkImage& image, uint32_t& width, uint32_t& height) const;
+    // Whether draws may use pipelines specialised to their shape (on unless
+    // PUNCHOUT_UBERSHADER is set); off, everything draws with the ubershader.
+    void set_specialization(bool on);
 
 private:
     struct Impl;

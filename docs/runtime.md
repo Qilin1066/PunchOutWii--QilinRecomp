@@ -153,6 +153,11 @@ Two threads share the work. The game's thread records what the command stream as
 - **Shaders** (`punchout/shaders/`, built by `tools/build_shaders.py`):
   - The vertex shader does XF's transform, lighting (the channel controls, attenuation, spot and specular) and texture-coordinate generation.
   - One fragment ubershader reads the TEV configuration from the state and does all 16 stages: indirect textures, the colour and alpha combiners with the hardware's 8-bit rounding and compares, konst and swap tables, the alpha test, dither and fog.
+  - **Specialised pipelines (v0.15.0):** a weak GPU pays dearly for interpreting the TEV registers per pixel, so each draw's *shape* (gx.hpp `shape_of`: 70 words of stage counts, indirect commands, orders, combiners, konst and swap selects, the Z-texture mode and the alpha-test functions; colours stay dynamic) also gets a pipeline of its own. The same shader source is built once per stage count (`kGxFragStages1`…`16`, stages unrolled) and the shape goes in as specialisation constants, so the driver folds every decision away and compiles only the stages the draw has.
+    - A worker thread compiles them; until one is ready its draws use the ubershader, so a new shape never stalls a frame. The Vulkan pipeline cache is written to `pipelines.bin` in the user folder whenever the worker catches up, so later runs start with them compiled (drivers that keep nothing there, like lavapipe, still have Mesa's own disk cache).
+    - Draws that write depth (Z textures with late Z) keep the ubershader variant.
+    - `PUNCHOUT_UBERSHADER=1` draws everything with the ubershader; `PUNCHOUT_SPECIALIZE_SYNC=1` compiles each specialised pipeline when first needed (the tests); `PUNCHOUT_SPECIALIZE_FROM=<seconds>` switches specialisation on at that game time, to compare the two on one scene.
+    - `punchout_render_test` runs on both paths (`_ubershader`, `_specialized`) with the same expectations; a planted shape bug fails 32 of its checks.
   - A copy shader handles the EFB copy formats, halving and gamma.
   - They're compiled to SPIR-V when the shaders change, not at build time, into `punchout/src/shaders.inc`, which is committed. `--check` fails if the header is stale.
 - **GPU images are reused:** a texture or copy target that's done with becomes spare once its frame's fence has passed. The next image of the same size and use takes it, and spares unused for two seconds are freed. On the boot screens, no image is created after start-up. A frame's releases are handled after it's drawn: one frame can make and release the same texture (two copies to one address), and handling them first leaked it.
@@ -186,6 +191,7 @@ Two threads share the work. The game's thread records what the command stream as
   - `PUNCHOUT_INPUT="Y@16,Start@20.5"` presses pad buttons at those seconds of game time, for a fifth of a second each. Game time is the frames the game has handed VI, over 60: the game waits for the GPU, so on a slow one this keeps a script in step with the screen where the clock would drift.
   - `PUNCHOUT_POINTER="x,y"` holds the pointer at a point (−1 to 1, y up); `"x,y;x,y@40;x,y@52"` moves it at those times.
   - The save lives in the per-user folder's `nand/`; copying it aside and back makes a scripted run repeatable.
+  - `PUNCHOUT_PROFILE=<file>` (Linux): a SIGPROF sampler, 1 kHz of CPU time, needing no perf or ptrace; `tools/analysis/profile_report.py <exe> <file>` names the hot functions.
 
 ## Input (`wpad.cpp`)
 

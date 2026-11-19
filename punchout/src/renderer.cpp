@@ -18,12 +18,22 @@
 #include "recorder.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <filesystem>
 #include <map>
+#include <mutex>
+#include <set>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
+#include "qilin/host/paths.hpp"
 #include "qilin/rt/system.hpp"
 #include "shaders.inc"
 
@@ -141,9 +151,38 @@ struct Renderer::Impl {
     uint64_t frames = 0;
 
     VkShaderModule gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag;
+    VkShaderModule gx_frag_stages[16];  // specialised, by TEV stage count
     VkDescriptorSetLayout states_layout, textures_layout, copy_set_layout;
     VkPipelineLayout gx_layout, clear_layout, copy_layout;
-    std::map<PipelineKey, VkPipeline> pipelines;
+    std::map<PipelineKey, VkPipeline> pipelines;  // the ubershader's
+    // Pipelines specialised to a draw's shape (gx.hpp, gx.frag): compiled by
+    // a worker thread into a pipeline cache kept on disk, the ubershader's
+    // pipeline drawing until each is ready, so a new shape never stalls a
+    // frame. PUNCHOUT_UBERSHADER=1 keeps to the ubershader.
+    enum class Specialize { kOff, kAsync, kSync } specialize = Specialize::kAsync;
+    bool specialize_on = true;  // set_specialization
+    struct SpecKey {
+        gx::PipelineKey k;
+        uint32_t shape;
+        bool operator<(const SpecKey& o) const {
+            const int c = std::memcmp(&k, &o.k, sizeof k);
+            return c != 0 ? c < 0 : shape < o.shape;
+        }
+    };
+    std::map<SpecKey, VkPipeline> specialized;  // ready (main thread)
+    std::set<SpecKey> requested;                 // asked of the worker (main thread)
+    std::mutex spec_lock;
+    std::condition_variable spec_wake;
+    std::deque<SpecKey> spec_queue;                       // to compile
+    std::vector<std::pair<SpecKey, VkPipeline>> spec_done;  // compiled, not yet taken
+    bool spec_quit = false;
+    std::thread spec_worker;
+    VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
+    std::filesystem::path cache_path;
+    size_t cache_saved_at = 0;  // specialised pipelines when the cache was last written
+    uint64_t draws_specialized = 0, draws_total = 0;
+    double spec_ms = 0;      // time the worker spent compiling (under spec_lock)
+    uint64_t spec_count = 0;
     std::map<unsigned, VkPipeline> clear_pipelines;  // colour mask | depth write << 4
     VkPipeline copy_pipeline = VK_NULL_HANDLE;
     std::map<SamplerKey, VkSampler> samplers;
@@ -169,6 +208,10 @@ struct Renderer::Impl {
     }
     // A frame's garbage, its fence passed: spare now. Old spares go.
     void recycle(Slot& s) {
+        // The cap: at least a frame's worth of what comes back. A fight makes
+        // ~75 EFB copies a frame, each replacing last frame's image; capping
+        // below that destroyed images every frame only to make them again.
+        const size_t cap = std::max(kMaxSpares, 2 * s.garbage.size());
         for (Spare& g : s.garbage) {
             g.since = frames;
             spares.push_back(g);
@@ -179,7 +222,7 @@ struct Renderer::Impl {
             sp.image.destroy(gpu);
             return true;
         });
-        while (spares.size() > kMaxSpares) {  // the oldest first
+        while (spares.size() > cap) {  // the oldest first
             auto oldest = std::min_element(spares.begin(), spares.end(), [](const Spare& a, const Spare& b) { return a.since < b.since; });
             oldest->image.destroy(gpu);
             *oldest = spares.back();
@@ -192,6 +235,7 @@ struct Renderer::Impl {
     // ---- setup
 
     void create() {
+        start_specialization();
         VkFormatProperties fp;
         vkGetPhysicalDeviceFormatProperties(gpu.physical, VK_FORMAT_D32_SFLOAT, &fp);
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) depth_format = VK_FORMAT_X8_D24_UNORM_PACK32;
@@ -225,6 +269,11 @@ struct Renderer::Impl {
         gx_vert = module(gpu.device, kGxVert, sizeof kGxVert);
         gx_frag = module(gpu.device, kGxFrag, sizeof kGxFrag);
         gx_frag_depth = module(gpu.device, kGxFragDepth, sizeof kGxFragDepth);
+        static constexpr struct {
+            const uint32_t* code;
+            size_t bytes;
+        } kStages[16] = {{kGxFragStages1, sizeof kGxFragStages1}, {kGxFragStages2, sizeof kGxFragStages2}, {kGxFragStages3, sizeof kGxFragStages3}, {kGxFragStages4, sizeof kGxFragStages4}, {kGxFragStages5, sizeof kGxFragStages5}, {kGxFragStages6, sizeof kGxFragStages6}, {kGxFragStages7, sizeof kGxFragStages7}, {kGxFragStages8, sizeof kGxFragStages8}, {kGxFragStages9, sizeof kGxFragStages9}, {kGxFragStages10, sizeof kGxFragStages10}, {kGxFragStages11, sizeof kGxFragStages11}, {kGxFragStages12, sizeof kGxFragStages12}, {kGxFragStages13, sizeof kGxFragStages13}, {kGxFragStages14, sizeof kGxFragStages14}, {kGxFragStages15, sizeof kGxFragStages15}, {kGxFragStages16, sizeof kGxFragStages16}};
+        for (unsigned i = 0; i < 16; ++i) gx_frag_stages[i] = module(gpu.device, kStages[i].code, kStages[i].bytes);
         fs_vert = module(gpu.device, kFullscreenVert, sizeof kFullscreenVert);
         clear_frag = module(gpu.device, kClearFrag, sizeof kClearFrag);
         copy_frag = module(gpu.device, kCopyFrag, sizeof kCopyFrag);
@@ -301,10 +350,10 @@ struct Renderer::Impl {
 
     VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, bool vertices, VkPrimitiveTopology topology,
                              const VkPipelineColorBlendAttachmentState& blend, bool depth, bool depth_dynamic, int logic_op = -1,
-                             bool line_width_dynamic = false) {
+                             bool line_width_dynamic = false, const VkSpecializationInfo* fs_constants = nullptr) {
         const VkPipelineShaderStageCreateInfo stages[2] = {
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr},
-            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr}};
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", fs_constants}};
         VkVertexInputBindingDescription bind{0, sizeof(gx::Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
         std::vector<VkVertexInputAttributeDescription> attrs = {
             {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(gx::Vertex, pos)},
@@ -371,13 +420,12 @@ struct Renderer::Impl {
         pci.pDynamicState = &dy;
         pci.layout = layout;
         VkPipeline p;
-        check(vkCreateGraphicsPipelines(gpu.device, VK_NULL_HANDLE, 1, &pci, nullptr, &p), "vkCreateGraphicsPipelines");
+        check(vkCreateGraphicsPipelines(gpu.device, pipeline_cache, 1, &pci, nullptr, &p), "vkCreateGraphicsPipelines");
         return p;
     }
 
-    VkPipeline gx_pipeline(const gx::PipelineKey& k) {
-        auto& p = pipelines[{k}];
-        if (p) return p;
+    // A GX pipeline: the ubershader's, or specialised to `shape` (thread-safe).
+    VkPipeline build_gx(const gx::PipelineKey& k, const gx::ShapeWords* shape) {
         VkPipelineColorBlendAttachmentState b{};
         b.blendEnable = k.blend;
         b.srcColorBlendFactor = VkBlendFactor(k.src);
@@ -405,9 +453,143 @@ struct Renderer::Impl {
         }
         static constexpr VkPrimitiveTopology kTopology[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
                                                               VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
-        p = make_pipeline(gx_vert, k.depth_out ? gx_frag_depth : gx_frag, gx_layout, true, kTopology[k.topology], b, true, true, logic,
-                          k.topology == 1 && gpu.wide_lines);
+        // Specialisation: constants 1-70 are the shape's words (constant 0, the
+        // switch, is fixed on in the specialised modules; an entry for it is ignored).
+        uint32_t values[1 + gx::kShapeWords];
+        VkSpecializationMapEntry entries[1 + gx::kShapeWords];
+        VkSpecializationInfo info{};
+        if (shape) {
+            values[0] = 1;
+            for (uint32_t i = 0; i < gx::kShapeWords; ++i) values[1 + i] = (*shape)[i];
+            for (uint32_t i = 0; i <= gx::kShapeWords; ++i) entries[i] = {i, uint32_t(i * sizeof(uint32_t)), sizeof(uint32_t)};
+            info = {1 + gx::kShapeWords, entries, sizeof values, values};
+        }
+        const VkShaderModule fs = shape ? gx_frag_stages[((*shape)[0] >> 10) & 15] : k.depth_out ? gx_frag_depth : gx_frag;
+        return make_pipeline(gx_vert, fs, gx_layout, true, kTopology[k.topology], b, true, true, logic,
+                             k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr);
+    }
+
+    // The pipeline for a draw: specialised if ready, else the ubershader's
+    // while the worker compiles it.
+    VkPipeline gx_pipeline(const gx::PipelineKey& k, uint32_t shape) {
+        ++draws_total;
+        if (specialize != Specialize::kOff && specialize_on && !k.depth_out) {  // depth-writing draws (rare) keep the ubershader
+            const SpecKey key{k, shape};
+            if (auto it = specialized.find(key); it != specialized.end()) {
+                ++draws_specialized;
+                return it->second;
+            }
+            if (specialize == Specialize::kSync) {
+                const gx::ShapeWords w = gx::shape_words(shape);
+                ++draws_specialized;
+                return specialized[key] = build_gx(k, &w);
+            }
+            if (requested.insert(key).second) {
+                std::lock_guard lock(spec_lock);
+                spec_queue.push_back(key);
+                spec_wake.notify_one();
+            }
+        }
+        auto& p = pipelines[{k}];
+        if (!p) p = build_gx(k, nullptr);
         return p;
+    }
+
+    // The worker: compiles queued shapes, newest request last.
+    void compile_specialized() {
+        for (;;) {
+            SpecKey key;
+            {
+                std::unique_lock lock(spec_lock);
+                spec_wake.wait(lock, [&] { return spec_quit || !spec_queue.empty(); });
+                if (spec_quit) return;
+                key = spec_queue.front();
+                spec_queue.pop_front();
+            }
+            const gx::ShapeWords w = gx::shape_words(key.shape);
+            const auto t0 = std::chrono::steady_clock::now();
+            const VkPipeline p = build_gx(key.k, &w);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            std::lock_guard lock(spec_lock);
+            spec_done.push_back({key, p});
+            spec_ms += ms;
+            ++spec_count;
+        }
+    }
+
+    // Main thread, each frame: take what the worker finished; now and then
+    // write the pipeline cache, so the next run starts with them compiled.
+    void collect_specialized() {
+        {
+            std::lock_guard lock(spec_lock);
+            for (auto& [k, p] : spec_done) specialized[k] = p;
+            spec_done.clear();
+        }
+        // Write the cache when the worker has caught up with something new, so
+        // it survives however the game ends.
+        if (!cache_path.empty() && specialized.size() > cache_saved_at && specialized.size() == requested.size()) save_pipeline_cache();
+        if (frames % 600 == 0 && draws_total)
+            rt::log("pipelines: %llu specialised (%.0f ms each to compile), %llu compiling; %.0f%% of draws specialised (last 600 frames)",
+                    static_cast<unsigned long long>(specialized.size()), spec_count ? spec_ms / double(spec_count) : 0.0,
+                    static_cast<unsigned long long>(requested.size() - specialized.size()),
+                    100.0 * double(draws_specialized) / double(draws_total));
+        if (frames % 600 == 0) draws_specialized = draws_total = 0;
+    }
+
+    void save_pipeline_cache() {
+        cache_saved_at = specialized.size();
+        size_t size = 0;
+        if (vkGetPipelineCacheData(gpu.device, pipeline_cache, &size, nullptr) != VK_SUCCESS || size == 0) return;
+        std::vector<char> data(size);
+        if (vkGetPipelineCacheData(gpu.device, pipeline_cache, &size, data.data()) != VK_SUCCESS) return;
+        const auto tmp = cache_path.string() + ".tmp";
+        if (FILE* f = std::fopen(tmp.c_str(), "wb")) {
+            const bool ok = std::fwrite(data.data(), 1, size, f) == size;
+            if (std::fclose(f) == 0 && ok) {
+                std::error_code ec;
+                std::filesystem::rename(tmp, cache_path, ec);
+            }
+        }
+    }
+
+    // The pipeline cache, from disk if there (the driver checks it's its own
+    // and ignores it otherwise), and the worker.
+    void start_specialization() {
+        if (const char* u = std::getenv("PUNCHOUT_UBERSHADER"); u && *u && *u != '0') specialize = Specialize::kOff;
+        if (const char* s = std::getenv("PUNCHOUT_SPECIALIZE_SYNC"); s && *s && *s != '0') specialize = Specialize::kSync;
+        std::vector<char> data;
+        if (specialize != Specialize::kOff) {
+            cache_path = host::user_folder() / "pipelines.bin";
+            if (FILE* f = std::fopen(cache_path.string().c_str(), "rb")) {
+                char buf[65536];
+                for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) data.insert(data.end(), buf, buf + n);
+                std::fclose(f);
+            }
+        }
+        VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+        ci.initialDataSize = data.size();
+        ci.pInitialData = data.empty() ? nullptr : data.data();
+        if (vkCreatePipelineCache(gpu.device, &ci, nullptr, &pipeline_cache) != VK_SUCCESS) {
+            ci.initialDataSize = 0;  // a damaged file: start empty
+            ci.pInitialData = nullptr;
+            check(vkCreatePipelineCache(gpu.device, &ci, nullptr, &pipeline_cache), "vkCreatePipelineCache");
+        }
+        if (specialize == Specialize::kAsync) spec_worker = std::thread([this] { compile_specialized(); });
+    }
+    void stop_specialization() {
+        if (spec_worker.joinable()) {
+            {
+                std::lock_guard lock(spec_lock);
+                spec_quit = true;
+            }
+            spec_wake.notify_all();
+            spec_worker.join();
+        }
+        for (auto& [k, p] : spec_done) specialized[k] = p;
+        spec_done.clear();
+        if (!cache_path.empty() && specialized.size() > cache_saved_at) save_pipeline_cache();
+        for (auto& [k, p] : specialized) vkDestroyPipeline(gpu.device, p, nullptr);
+        vkDestroyPipelineCache(gpu.device, pipeline_cache, nullptr);
     }
     VkPipeline clear_pipeline(unsigned mask, bool depth) {
         auto& p = clear_pipelines[mask | (depth ? 16u : 0u)];
@@ -606,6 +788,7 @@ struct Renderer::Impl {
     }
 
     void render(gx::Frame& f) {
+        collect_specialized();
         slot = (slot + 1) % 2;
         Slot& s = slots[slot];
         const uint64_t w0 = gx::now_ns();  // the GPU finishing the frame before last
@@ -654,7 +837,7 @@ struct Renderer::Impl {
             }
             const gx::Draw& d = f.draws[pk.index];
             if (d.viewport[2] <= 0.0f || d.viewport[3] <= 0.0f || d.scissor[2] <= 0 || d.scissor[3] <= 0) continue;
-            VkPipeline p = gx_pipeline(d.pipeline);
+            VkPipeline p = gx_pipeline(d.pipeline, d.shape);
             if (p != bound) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
                 bound = p;
@@ -759,6 +942,7 @@ struct Renderer::Impl {
         if (efb_depth_sampler) vkDestroySampler(gpu.device, efb_depth_sampler, nullptr);
         for (Spare& sp : spares) sp.image.destroy(gpu);
         for (auto& [k, x] : xfbs) x.destroy(gpu);
+        stop_specialization();
         for (auto& [k, p] : pipelines) vkDestroyPipeline(gpu.device, p, nullptr);
         for (auto& [k, p] : clear_pipelines) vkDestroyPipeline(gpu.device, p, nullptr);
         if (copy_pipeline) vkDestroyPipeline(gpu.device, copy_pipeline, nullptr);
@@ -767,12 +951,14 @@ struct Renderer::Impl {
         for (VkPipelineLayout l : {gx_layout, clear_layout, copy_layout}) vkDestroyPipelineLayout(gpu.device, l, nullptr);
         for (VkDescriptorSetLayout l : {states_layout, textures_layout, copy_set_layout}) vkDestroyDescriptorSetLayout(gpu.device, l, nullptr);
         for (VkShaderModule m : {gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag}) vkDestroyShaderModule(gpu.device, m, nullptr);
+        for (VkShaderModule m : gx_frag_stages) vkDestroyShaderModule(gpu.device, m, nullptr);
         efb.destroy(gpu);
         efb_depth.destroy(gpu);
         white.destroy(gpu);
     }
 };
 
+void Renderer::set_specialization(bool on) { impl_->specialize_on = on; }
 Renderer::Renderer(host::Gpu& gpu, unsigned scale) : impl_(std::make_unique<Impl>(gpu, scale)) { impl_->create(); }
 Renderer::~Renderer() { impl_->destroy(); }
 void Renderer::render(gx::Frame& frame) {

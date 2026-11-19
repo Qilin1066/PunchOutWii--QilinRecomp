@@ -29,6 +29,24 @@ SHADERS = [
     # A shader that writes depth turns off the GPU's early depth test, so only
     # the draws that need it use this one.
     ("gx.frag", "kGxFragDepth", ["-DZTEX_DEPTH"]),
+    # Specialised to a draw's shape (renderer.cpp), one per TEV stage count, so
+    # a driver compiles only the stages the draw has.
+    ("gx.frag", "kGxFragStages1", ["-DSTAGES=1"]),
+    ("gx.frag", "kGxFragStages2", ["-DSTAGES=2"]),
+    ("gx.frag", "kGxFragStages3", ["-DSTAGES=3"]),
+    ("gx.frag", "kGxFragStages4", ["-DSTAGES=4"]),
+    ("gx.frag", "kGxFragStages5", ["-DSTAGES=5"]),
+    ("gx.frag", "kGxFragStages6", ["-DSTAGES=6"]),
+    ("gx.frag", "kGxFragStages7", ["-DSTAGES=7"]),
+    ("gx.frag", "kGxFragStages8", ["-DSTAGES=8"]),
+    ("gx.frag", "kGxFragStages9", ["-DSTAGES=9"]),
+    ("gx.frag", "kGxFragStages10", ["-DSTAGES=10"]),
+    ("gx.frag", "kGxFragStages11", ["-DSTAGES=11"]),
+    ("gx.frag", "kGxFragStages12", ["-DSTAGES=12"]),
+    ("gx.frag", "kGxFragStages13", ["-DSTAGES=13"]),
+    ("gx.frag", "kGxFragStages14", ["-DSTAGES=14"]),
+    ("gx.frag", "kGxFragStages15", ["-DSTAGES=15"]),
+    ("gx.frag", "kGxFragStages16", ["-DSTAGES=16"]),
     ("fullscreen.vert", "kFullscreenVert", []),
     ("clear.frag", "kClearFrag", []),
     ("copy.frag", "kCopyFrag", []),

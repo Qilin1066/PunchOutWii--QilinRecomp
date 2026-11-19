@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.14.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.15.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -150,6 +150,12 @@ if(QILIN_HOST)
     endif()
     add_test(NAME punchout_render_test COMMAND punchout_render_test)
     set_tests_properties(punchout_render_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+    # The same checks on each pixel shader path: the ubershader alone, and
+    # every draw specialised to its shape (compiled as it's needed).
+    add_test(NAME punchout_render_test_ubershader COMMAND punchout_render_test)
+    set_tests_properties(punchout_render_test_ubershader PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "PUNCHOUT_UBERSHADER=1")
+    add_test(NAME punchout_render_test_specialized COMMAND punchout_render_test)
+    set_tests_properties(punchout_render_test_specialized PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 ENVIRONMENT "PUNCHOUT_SPECIALIZE_SYNC=1")
 endif()
 
 # ---- Tests (no game files needed) ----
@@ -247,7 +253,7 @@ if(QILIN_GAME_DOL)
                 --files ${QILIN_LIFT_FILES}
         DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
         COMMENT "Lifting the game's main.dol to C++")
-    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp ${gen_sources})
+    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp punchout/src/profile.cpp ${gen_sources})
     target_include_directories(punchout PRIVATE punchout/src ${gen})
     target_link_libraries(punchout PRIVATE qilin_rt qilin_dol qilin_host)
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).

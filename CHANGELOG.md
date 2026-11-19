@@ -11,6 +11,21 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-19
+Efficiency for weak hardware: pixel shaders specialised to each draw, and no GPU image churn in fights.
+
+### Added
+- **Specialised pixel pipelines.** The ubershader interprets the TEV registers for every pixel, which is what a weak GPU (the Raspberry Pi 4's) can least afford. Each draw's TEV shape (70 words: stage counts, indirect commands, orders, combiners, konst and swap selects, the Z-texture mode, the alpha-test functions; colours stay dynamic) now gets a pipeline with those as specialisation constants, from a build of the same shader per stage count (`kGxFragStages1`-`16`), so the driver folds every decision away and compiles only the stages the draw has.
+  - Compiled on a worker thread; the ubershader draws until each is ready, so there's no stutter. The Vulkan pipeline cache goes to `pipelines.bin` in the user folder.
+  - Measured on a fight under a software GPU (lavapipe, 2 cores): GPU time per frame 250-307 ms → 126-154 ms, frames per 5 s 16-20 → 31-37. On the no-Mii dialog: 66 → 37 ms.
+  - A fight uses about 195 such pipelines. Per-stage-count modules took a pipeline's compile from 14 s to about 2 s on lavapipe (LLVM); GPU drivers are much faster, and they keep them in the cache.
+  - `punchout_render_test` runs on both paths with the same expectations (two new ctest entries).
+  - `PUNCHOUT_UBERSHADER=1`, `PUNCHOUT_SPECIALIZE_SYNC=1` and `PUNCHOUT_SPECIALIZE_FROM=<seconds>` for comparing them.
+- **`PUNCHOUT_PROFILE=<file>`** (Linux): a built-in SIGPROF sampler, for machines without perf or ptrace, and `tools/analysis/profile_report.py` to name the hot functions.
+
+### Fixed
+- **GPU images were destroyed and made again every frame in fights.** A fight makes ~75 EFB copies a frame; the spare pool was capped at 64, so each frame's returned images were trimmed and remade (about 9 a frame). The cap now covers the batch being recycled; images unused for two seconds still go. Now 0 a frame.
+
 ## [0.14.0] - 2026-11-19
 The first fight: from the title screen through profile creation, the main menu and Career to round 1 against Glass Joe, with punches landing. Checked from frame dumps here (software GPU); not yet on real hardware.
 
