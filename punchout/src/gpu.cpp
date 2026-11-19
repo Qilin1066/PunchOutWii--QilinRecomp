@@ -8,8 +8,9 @@
 // its write pointer, and the CPU never waits on it. Draw-done and token
 // commands raise the pixel engine's interrupts, as the hardware does when the
 // GPU reaches them. What the commands mean for drawing is the renderer's job
-// (roadmap step 4, on Vulkan); for now the decoder keeps the state it needs to
-// parse (vertex descriptors and attribute tables) and counts what it sees.
+// (renderer.cpp): the decoder keeps the registers and hands primitives, state
+// changes and EFB copies to the recorder (recorder.cpp), which reads what
+// they need from guest memory as it is at that command.
 //
 // The command formats and register layouts are the hardware's, as documented
 // by YAGCD and Dolphin (VideoCommon: OpcodeDecoding.h, CPMemory.h,
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "os.hpp"
+#include "recorder.hpp"
 
 namespace punchout {
 namespace rt = qilin::rt;
@@ -46,6 +48,8 @@ std::array<uint32_t, 256> g_cpmem{};  // CP registers set by LOAD_CP_REG (VCD at
 std::array<uint32_t, 256> g_bp{};     // BP registers (24-bit)
 std::vector<uint32_t> g_xf(0x1058);   // XF memory and registers
 Stats g_stats;
+
+gx::Registers regs() { return {g_cpmem.data(), g_xf.data(), g_bp.data()}; }
 
 std::vector<uint8_t> g_fifo;  // bytes written to the pipe, not yet a whole command
 size_t g_fifo_at = 0;
@@ -141,6 +145,7 @@ void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
         g_bp[0xFE] = value;
         return;
     }
+    gx::bp_written(reg, g_bp[reg]);
     switch (reg) {
     case 0x45: pe_finish(); break;                                  // draw done
     case 0x47: pe_token(static_cast<uint16_t>(value), false); break;  // token
@@ -148,7 +153,12 @@ void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
     case 0x52:                                                      // EFB copy
         if (value & (1u << 14)) ++g_stats.xfb_copies;
         else ++g_stats.texture_copies;
+        gx::record_copy(regs(), value);
         break;
+    case 0x63:                                                      // TMEM preload
+        if (value & 0x7FFF) rt::fatal(&c, "GX preloads TMEM (BP 63 = %06X): not handled", value);
+        break;
+    case 0x65: gx::record_tlut_load(regs(), value); break;          // palette load
     default: break;
     }
     (void)c;
@@ -191,6 +201,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
         } else if (op == 0x08) {  // LOAD_CP_REG: register, value
             if (left < 6) return;
             g_cpmem[p[1]] = be32(p + 2);
+            gx::state_changed();
             n = 6;
         } else if (op == 0x10) {  // LOAD_XF_REG: (count - 1) << 16 | address, then the values
             if (left < 5) return;
@@ -198,10 +209,21 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             if (left < 5 + 4 * count) return;
             for (uint32_t i = 0; i < count; ++i)
                 if (addr + i < g_xf.size()) g_xf[addr + i] = be32(p + 5 + 4 * i);
+            gx::state_changed();
             n = 5 + 4 * count;
         } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {  // LOAD_INDX_A-D
             if (left < 5) return;
             ++g_stats.indexed_loads;
+            // Matrices from CP arrays 12-15 into XF memory: index, then size - 1 and the address.
+            const uint32_t v = be32(p + 1), index = v >> 16, words = ((v >> 12) & 15) + 1, addr = v & 0xFFF;
+            const unsigned array = 12 + (op - 0x20) / 8;
+            const uint32_t src = (g_cpmem[0xA0 + array] + index * g_cpmem[0xB0 + array]) & 0x1FFFFFFFu;
+            if (!((src < 0x01800000u && src + 4 * words <= 0x01800000u) || (src >= 0x10000000u && src + 4 * words <= 0x14000000u)))
+                rt::fatal(&c, "GX indexed load from %08X is outside MEM1 and MEM2", src);
+            const uint8_t* m = rt::guest_ptr(0x80000000u | src);
+            for (uint32_t i = 0; i < words; ++i)
+                if (addr + i < g_xf.size()) g_xf[addr + i] = be32(m + 4 * i);
+            gx::state_changed();
             n = 5;
         } else if (op == 0x40) {  // CALL_DL: address, size
             if (left < 9) return;
@@ -223,6 +245,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                         vertex_size(op & 7), g_cpmem[0x50], g_cpmem[0x60], g_cpmem[0x70 + (op & 7)], g_cpmem[0x80 + (op & 7)],
                         g_cpmem[0x90 + (op & 7)]);
             if (left < 3 + bytes) return;
+            gx::record_primitive(regs(), op, p + 3, count);
             ++g_stats.draws;
             g_stats.vertices += count;
             n = 3 + bytes;

@@ -52,7 +52,7 @@ uint16_t wii_buttons() {
     if (p & host::kPadRight) b |= kDown;
     if (p & host::kPadA) b |= kTwo;
     if (p & host::kPadB) b |= kOne;
-    if (p & (host::kPadX | host::kPadY)) b |= kA;
+    if (p & (host::kPadX | host::kPadY | host::kPadClick)) b |= kA;
     if (p & host::kPadStart) b |= kPlus;
     if (p & host::kPadBack) b |= kMinus;
     if (p & host::kPadGuide) b |= kHome;
@@ -151,6 +151,33 @@ void WPADGetAccGravityUnit(Cpu& c) {  // (chan, type, WPADAcc*): 1 g on each axi
     }
 }
 
+// ---- the pointer: the two lights of the sensor bar as the remote's camera
+// sees them when it points where the player points. The geometry is
+// Dolphin's camera emulation (WiimoteEmu/Camera.cpp): a 1024x768 camera with
+// a 42 by 31.5 degree view, the bar's lights 20 cm apart, seen from 2 m; the
+// remote turns to point. Each object is x, y (camera pixels), a size and a trace id.
+void write_dots(uint32_t at) {
+    if (!g_pointer_on.load(std::memory_order_relaxed)) return;  // pointing off the screen: no lights
+    constexpr double kPi = 3.14159265358979323846, kDeg = kPi / 180.0;
+    constexpr double kDistance = 2.0, kHalfSeparation = 0.1;
+    const double px = g_pointer_x.load(std::memory_order_relaxed) / 1000.0, py = g_pointer_y.load(std::memory_order_relaxed) / 1000.0;
+    // Measured against the game's cursor: 8.7 degrees either way spans the
+    // screen, and with the bar below the TV (the console's default) the
+    // remote points 4.5 degrees up to reach the middle.
+    const double yaw = px * 8.7 * kDeg, pitch = (py * 8.7 + 4.5) * kDeg;
+    const double tx = std::tan(21.0 * kDeg), ty = std::tan(15.75 * kDeg);
+    for (int i = 0; i < 2; ++i) {
+        const double led = i == 0 ? -kHalfSeparation : kHalfSeparation;
+        const double a = std::atan2(led, kDistance) + yaw, b = -pitch;
+        const double x = (1.0 - std::tan(a) / tx) * 512.0, y = (1.0 - std::tan(b) / ty) * 384.0;
+        if (x < 0 || x >= 1024 || y < 0 || y >= 768) continue;
+        rt::poke16(at + 8 * i, static_cast<uint16_t>(std::lround(x)));
+        rt::poke16(at + 8 * i + 2, static_cast<uint16_t>(std::lround(y)));
+        rt::poke16(at + 8 * i + 4, 2);  // size, as at 2 m
+        rt::poke8(at + 8 * i + 6, static_cast<uint8_t>(i));
+    }
+}
+
 // ---- reading: a WPADStatus is buttons (+0), acceleration x, y, z (+2), four
 // pointer objects of 8 bytes (+8), the device type (+0x28) and an error (+0x29).
 void WPADRead(Cpu& c) {
@@ -159,6 +186,7 @@ void WPADRead(Cpu& c) {
     if (ch == 0 && g_connected) {
         rt::poke16(s, wii_buttons());
         rt::poke16(s + 6, static_cast<uint16_t>(kOneG));  // resting flat: 1 g on z
+        if (g_dpd[0]) write_dots(s + 8);
         rt::poke8(s + 0x28, kDevCore);
     } else {
         rt::poke8(s + 0x28, kDevNotFound);

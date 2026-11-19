@@ -6,7 +6,7 @@ A static recompilation of **Punch-Out!!** (Next Level Games / Nintendo, Wii, 200
 
 ## Status
 
-Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime (step 3) runs the game's front end with sound; nothing is drawn yet (step 4).
+Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime (step 3) runs the game's front end with sound; the renderer (step 4) draws it on Vulkan, up to the intro movie.
 
 | Piece | State |
 |---|---|
@@ -19,7 +19,7 @@ Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime
 | Hardware-access profile, exception tables, timing model | ✅ lifted code touches no hardware register or uncached mirror, but writes the GX FIFO directly (803 stores in the engine's mesh drawers), so the FIFO decoder is required; no C++ exception can be thrown; one frame per retrace, gameplay driven by a time step in seconds (`docs/runtime-analysis.md`) |
 | Lifter → C++, differential test | ✅ integer code, floating point and paired singles with GQR quantisation (bit-exact with Broadway: NI mode, NaN rules, single rounding, the estimate tables): 13,392 of 13,487 functions (99.3%) lifted, every one in the libraries we lift; the 95 stubs, all in code we replace or drop, trap with the reason; all of it compiles and links; 323,904 differential runs against an independent reference interpreter and known-answer tests from hardware data, 0 differences (`docs/recompiler-core.md`) |
 | Runtime skeleton: the game built from your own `main.dol`, booted as `__start` boots it, a replacement registry that names anything missing; OS (threads, mutexes, message queues, alarms, interrupts, time, locked cache), DVD from the extracted disc, VI's retrace, console settings | ✅ runs the front end at 59 frames a second from the extracted disc: GX lifted with its command stream decoded, NAND saves, input, and sound (AI/AX/DSP lifted, the DSP's AX microcode emulated, out through SDL3) (`docs/runtime.md`) |
-| GX on Vulkan (the renderer) | next (see roadmap) |
+| GX on Vulkan (the renderer) | 🚧 draws the boot screens and the save dialog: vertices, XF lighting, TEV as one precompiled ubershader, every texture format, EFB copies on the GPU; the pointer works (`docs/runtime.md`) |
 
 ## Versions and changes
 

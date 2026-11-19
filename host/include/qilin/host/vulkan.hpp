@@ -54,12 +54,17 @@ struct Image {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
-    uint32_t width = 0, height = 0;
-    static Image create(const Gpu& gpu, uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage);
+    uint32_t width = 0, height = 0, levels = 1;
+    // Depth formats get a depth view; others a colour view of every level.
+    static Image create(const Gpu& gpu, uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage,
+                        uint32_t levels = 1);
     void destroy(const Gpu& gpu);
 };
 
-// One layout transition with synchronization2, for everything the image needs.
-void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to);
+// One layout transition with synchronization2, for everything the image needs
+// (and an execution and memory dependency on all earlier work on the queue).
+void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to,
+                VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);
+bool is_depth(VkFormat format);
 
 }  // namespace qilin::host

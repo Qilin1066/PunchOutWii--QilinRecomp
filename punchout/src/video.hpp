@@ -12,6 +12,10 @@ namespace punchout {
 // shows black.
 void show_frame(uint32_t xfb, uint32_t width, uint32_t height);
 
+// From the main thread: if VI has shown a frame newer than `*sequence` (wait
+// up to `timeout_ms`), the frame buffer's guest address and size.
+bool take_xfb(uint64_t* sequence, unsigned timeout_ms, uint32_t& xfb, uint32_t& width, uint32_t& height);
+
 // From the main thread: wait up to `timeout_ms` for a frame newer than
 // `*sequence`; if one came, convert it to RGBA8 and return true.
 bool take_frame(uint64_t* sequence, unsigned timeout_ms, std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height);

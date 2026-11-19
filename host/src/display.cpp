@@ -5,6 +5,7 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "qilin/host/vulkan.hpp"
@@ -49,6 +50,12 @@ struct Display::Impl {
     uint32_t buttons = 0;
     SDL_Gamepad* pad = nullptr;
     bool rumbling = false;
+    float stick_x = 0, stick_y = 0;
+    bool moved = false;
+    float mouse_x = 0, mouse_y = 0;  // window pixels
+    float pic_x = 0, pic_y = 0, pic_w = 1, pic_h = 1;  // the picture's place, last present
+
+    void show(VkImage src, uint32_t sw, uint32_t sh, float aspect);
 
     void build_swapchain() {
         vkDeviceWaitIdle(gpu.device);
@@ -98,19 +105,26 @@ struct Display::Impl {
         need_rebuild = false;
     }
 
-    // Record: upload the frame, clear the destination, blit the frame into it letterboxed.
-    void record(VkImage dst, VkExtent2D dst_size, VkImageLayout final_layout, float aspect) {
-        transition(cmd, frame.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        VkBufferImageCopy region{};
-        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageExtent = {frame.width, frame.height, 1};
-        vkCmdCopyBufferToImage(cmd, staging.buffer, frame.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        transition(cmd, frame.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    // Record: upload the frame (if it's ours), clear the destination, blit the frame into it letterboxed.
+    void record(VkImage dst, VkExtent2D dst_size, VkImageLayout final_layout, float aspect, VkImage src, uint32_t sw, uint32_t sh) {
+        if (src == VK_NULL_HANDLE) {
+            transition(cmd, frame.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkBufferImageCopy region{};
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageExtent = {frame.width, frame.height, 1};
+            vkCmdCopyBufferToImage(cmd, staging.buffer, frame.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            transition(cmd, frame.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            src = frame.image;
+            sw = frame.width;
+            sh = frame.height;
+        } else {  // drawn by the caller: wait for it
+            transition(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        }
         transition(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         const VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
         const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
-        // The largest rectangle of the frame's aspect that fits, centred.
+    // The largest rectangle of the frame's aspect that fits, centred.
         const float dw = static_cast<float>(dst_size.width), dh = static_cast<float>(dst_size.height);
         float w = dw, h = dw / aspect;
         if (h > dh) {
@@ -118,13 +132,14 @@ struct Display::Impl {
             w = dh * aspect;
         }
         const int32_t x0 = static_cast<int32_t>((dw - w) / 2), y0 = static_cast<int32_t>((dh - h) / 2);
+        pic_x = float(x0), pic_y = float(y0), pic_w = w, pic_h = h;
         VkImageBlit blit{};
         blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        blit.srcOffsets[1] = {static_cast<int32_t>(frame.width), static_cast<int32_t>(frame.height), 1};
+        blit.srcOffsets[1] = {static_cast<int32_t>(sw), static_cast<int32_t>(sh), 1};
         blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         blit.dstOffsets[0] = {x0, y0, 0};
         blit.dstOffsets[1] = {x0 + static_cast<int32_t>(w), y0 + static_cast<int32_t>(h), 1};
-        vkCmdBlitImage(cmd, frame.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+        vkCmdBlitImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                        VK_FILTER_LINEAR);
         transition(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, final_layout);
     }
@@ -191,9 +206,16 @@ bool Display::poll() {
     Impl& d = *impl_;
     if (!d.window) return true;
     SDL_Event e;
+    d.moved = false;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) return false;
         if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) d.need_rebuild = true;
+        if (e.type == SDL_EVENT_MOUSE_MOTION) {
+            const float density = SDL_GetWindowPixelDensity(d.window);
+            d.mouse_x = e.motion.x * density;
+            d.mouse_y = e.motion.y * density;
+            d.moved = true;
+        }
         if (e.type == SDL_EVENT_GAMEPAD_ADDED && !d.pad) d.pad = SDL_OpenGamepad(e.gdevice.which);
         if (e.type == SDL_EVENT_GAMEPAD_REMOVED && d.pad && SDL_GetGamepadID(d.pad) == e.gdevice.which) {
             SDL_CloseGamepad(d.pad);
@@ -221,7 +243,16 @@ bool Display::poll() {
         if (x > 16384) b |= kPadRight;
         if (y < -16384) b |= kPadUp;
         if (y > 16384) b |= kPadDown;
+        const auto axis = [](int v) {  // a dead zone of a quarter, then linear to 1
+            const float f = std::clamp(v / 32767.0f, -1.0f, 1.0f);
+            return std::fabs(f) < 0.25f ? 0.0f : (f - std::copysign(0.25f, f)) / 0.75f;
+        };
+        d.stick_x = axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX));
+        d.stick_y = -axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY));
+    } else {
+        d.stick_x = d.stick_y = 0;
     }
+    if (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) b |= kPadClick;
     const bool* k = SDL_GetKeyboardState(nullptr);
     struct Key {
         SDL_Scancode sc;
@@ -240,6 +271,17 @@ bool Display::poll() {
 }
 
 uint32_t Display::buttons() const { return impl_->buttons; }
+void Display::right_stick(float& x, float& y) const {
+    x = impl_->stick_x;
+    y = impl_->stick_y;
+}
+bool Display::mouse_moved(float& x, float& y) const {
+    const Impl& d = *impl_;
+    if (!d.moved) return false;
+    x = (d.mouse_x - d.pic_x) / d.pic_w * 2.0f - 1.0f;
+    y = 1.0f - (d.mouse_y - d.pic_y) / d.pic_h * 2.0f;
+    return true;
+}
 
 void Display::rumble(bool on) {
     Impl& d = *impl_;
@@ -248,20 +290,8 @@ void Display::rumble(bool on) {
     SDL_RumbleGamepad(d.pad, on ? 0xFFFF : 0, on ? 0xFFFF : 0, on ? 60000 : 0);
 }
 
-void Display::present(uint32_t width, uint32_t height, const uint8_t* rgba, float aspect) {
-    Impl& d = *impl_;
-    check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-    const VkDeviceSize bytes = VkDeviceSize{width} * height * 4;
-    if (d.staging.size < bytes) {
-        d.staging.destroy(d.gpu);
-        d.staging = Buffer::host_visible(d.gpu, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-    }
-    if (d.frame.width != width || d.frame.height != height) {
-        d.frame.destroy(d.gpu);
-        d.frame = Image::create(d.gpu, width, height, kFrameFormat, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    }
-    std::memcpy(d.staging.mapped, rgba, bytes);
-
+void Display::Impl::show(VkImage src, uint32_t sw, uint32_t sh, float aspect) {
+    Impl& d = *this;
     VkImage dst;
     VkExtent2D dst_size;
     uint32_t index = 0;
@@ -285,7 +315,7 @@ void Display::present(uint32_t width, uint32_t height, const uint8_t* rgba, floa
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     check(vkBeginCommandBuffer(d.cmd, &bi), "vkBeginCommandBuffer");
-    d.record(dst, dst_size, d.window ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, aspect);
+    d.record(dst, dst_size, d.window ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, aspect, src, sw, sh);
     check(vkEndCommandBuffer(d.cmd), "vkEndCommandBuffer");
 
     VkCommandBufferSubmitInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
@@ -317,6 +347,32 @@ void Display::present(uint32_t width, uint32_t height, const uint8_t* rgba, floa
         else check(r, "vkQueuePresentKHR");
     }
 }
+
+
+void Display::present(uint32_t width, uint32_t height, const uint8_t* rgba, float aspect) {
+    Impl& d = *impl_;
+    check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    const VkDeviceSize bytes = VkDeviceSize{width} * height * 4;
+    if (d.staging.size < bytes) {
+        d.staging.destroy(d.gpu);
+        d.staging = Buffer::host_visible(d.gpu, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    }
+    if (d.frame.width != width || d.frame.height != height) {
+        d.frame.destroy(d.gpu);
+        d.frame = Image::create(d.gpu, width, height, kFrameFormat, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    }
+    std::memcpy(d.staging.mapped, rgba, bytes);
+
+    impl_->show(VK_NULL_HANDLE, 0, 0, aspect);
+}
+
+void Display::present_image(VkImage image, uint32_t width, uint32_t height, float aspect) {
+    Impl& d = *impl_;
+    check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    d.show(image, width, height, aspect);
+}
+
+Gpu& Display::gpu() { return impl_->gpu; }
 
 std::vector<uint8_t> Display::read_back() {
     Impl& d = *impl_;

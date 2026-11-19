@@ -9,7 +9,8 @@ The game is built only from the player's own `main.dol`; nothing derived from it
 ```sh
 cmake -S . -B build-game -DQILIN_GAME_DOL="<extracted disc>/sys/main.dol"
 cmake --build build-game --target punchout
-build-game/punchout "<extracted disc>"      # the folder with sys/ and files/ (--headless: no window)
+build-game/punchout "<extracted disc>"      # the folder with sys/ and files/
+                                            # --offscreen: draw without a window; --headless: don't draw
 ```
 
 At build time `qilin lift <main.dol> -o build-game/generated --plan data/R7PP01/plan.tsv --files 32` writes the C++ (32 files of functions, the function table, the replaced-function table), which is compiled into `punchout` with the runtime and the replacements in `punchout/src/`. A full build takes about 7 minutes on two cores (GCC 14, `-O2`); after that, changes to the replacements rebuild in seconds. The extracted disc is what Dolphin's *Extract Entire Disc* or `wit extract` produces: `sys/main.dol`, `sys/boot.bin`, `sys/fst.bin` and `files/`.
@@ -119,7 +120,45 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **The write-gather pipe** collects 32 bytes before the decoder sees them, as on hardware (a write can straddle two bursts).
 - **Interrupts:** draw-done (BP `0x45`) and token commands (`0x47`, `0x48`) raise the pixel engine's finish and token interrupts, which reach GX's own handlers; the token register reads back the last token.
 - **GPU latency:** the game relies on the GPU being behind. It writes draw-done, installs the callback for it, then waits. So these interrupts come 50 µs after the command is decoded, as timed events. Dolphin likewise schedules them at least 500 CPU cycles out.
-- **Counting:** every five seconds it logs the draws, vertices, display lists, frame-buffer copies and command bytes it has seen. Drawing them is the renderer's job (next).
+- **Counting:** every five seconds it logs the draws, vertices, display lists, frame-buffer copies and command bytes it has seen. Drawing them is the renderer's job.
+
+## The renderer (`recorder.cpp`, `texture.cpp`, `renderer.cpp`, v0.13.0)
+
+Two threads share the work. The game's thread records what the command stream asks for; the main thread owns Vulkan and draws it.
+- **Recording** (`recorder.cpp`): each primitive's vertices are decoded by the current vertex format into one canonical vertex (position, normal, binormal and tangent, two colours, eight texture coordinates, matrix indices, and bits saying which are present). Quads, strips and fans become index lists. The XF, BP and TEV state the shaders read is mirrored in a `gx::State` (std430). A new one is snapshotted only when a register it depends on changes. Viewport and scissor follow the hardware's rules as Dolphin documents them.
+- **Textures** (`texture.cpp`): TMEM is modelled for palettes and preloads. Every format (I4, I8, IA4, IA8, RGB565, RGB5A3, RGBA8, C4, C8, C14X2, CMPR) is decoded on the CPU, with mip levels, into a cache keyed by address, format, size, levels and palette, and checked by a hash of the data. A texture that an EFB copy wrote is used straight from the GPU while guest memory still holds what the copy left there. Entries unused for 600 frames go.
+- **Frames:** a copy to the XFB ends a frame. The main thread takes it, at most two frames behind (otherwise the game waits).
+- **Drawing** (`renderer.cpp`): the EFB is RGBA8 plus a 32-bit depth buffer at a whole-number scale of 640×528 (`PUNCHOUT_SCALE`). Draws use dynamic rendering. Pipelines are keyed by blending and primitive type; cull mode and depth test are dynamic state. GX's reversed depth range goes into the viewport's min and max depth.
+- **Shaders** (`punchout/shaders/`, built by `tools/build_shaders.py`):
+  - The vertex shader does XF's transform, lighting (the channel controls, attenuation, spot and specular) and texture-coordinate generation.
+  - One fragment ubershader reads the TEV configuration from the state and does all 16 stages: indirect textures, the colour and alpha combiners with the hardware's 8-bit rounding and compares, konst and swap tables, the alpha test, dither and fog.
+  - A copy shader handles the EFB copy formats, halving and gamma.
+  - They're compiled to SPIR-V when the shaders change, not at build time, into `punchout/src/shaders.inc`, which is committed. `--check` fails if the header is stale.
+- **Copies:** a copy to a texture stays a GPU image, found again by its address. A copy to the XFB becomes the image VI presents (`Display::present_image`). When there isn't one, VI converts the XFB in guest memory on the CPU, as before v0.13.0.
+- **Not done yet:** each of these is logged once if the game uses it.
+  - line and point widths;
+  - logic ops other than copy;
+  - EFB depth copies;
+  - Z textures;
+  - constant alpha together with source-alpha blending (dual-source blending isn't in the Pi 4's driver).
+- **Testing without a screen:**
+  - `--offscreen` draws with no window, for example on llvmpipe.
+  - `PUNCHOUT_DUMP=dir` writes every 60th frame shown as a PPM at 1280×720.
+  - `PUNCHOUT_INPUT="Y@16,Start@20.5"` presses pad buttons at those seconds, for a fifth of a second each.
+  - `PUNCHOUT_POINTER="x,y"` holds the pointer at a point (−1 to 1, y up).
+
+## Input (`wpad.cpp`)
+
+WPAD is replaced, and KPAD is lifted on top of it. The remote is held sideways and buttons only, with no motion controls, per the design targets. The first pad maps as:
+- D-pad or left stick: the cross;
+- A: 2;
+- B: 1;
+- X or Y: A;
+- Start: +;
+- Back: −;
+- Guide: HOME.
+
+The keyboard works too. The pointer is real input, since the menus need it. The runtime places the sensor bar's two lights where the remote's camera would see them, after Dolphin's camera geometry. KPAD then works out the pointer from them as on hardware. The mouse over the picture moves the pointer, and its left button is A. The right stick also moves it, a screen's width a second. The angles are calibrated so the pointer lands where the mouse is, with the bar below the TV, the console's default setting.
 
 ## Hardware registers (`hw.cpp`, v0.12.0)
 
@@ -144,12 +183,13 @@ The game boots, runs its static constructors (which bring up the OS, DVD, VI and
 - Wwise starts AX; the DSP boots the AX microcode and mixes every 3 ms;
 - the HOME Button Menu loads its archives and sounds;
 - the Mii library reads its database;
-- the front end runs: 59 frames a second, about 900 draws and 15,000 vertices a second, with sound playing.
+- the front end runs: 59 frames a second, about 900 draws and 15,000 vertices a second, with sound playing;
+- the renderer draws the strap screen and the save dialog; pointing at OK and pressing A creates the save (`banner.bin`, `save_games`), and the game goes on to its intro movie.
 
-It runs until closed. What's on screen is the next step: nothing is drawn yet.
+From there it needs more of the disc: its Wwise sound bank's files (`files/art/wwiseaudio`, about 1 GB) and the movies.
 
 ## Next
 
-1. **The renderer (roadmap step 4):** the decoded stream on Vulkan: vertex loading, XF transform and lighting, TEV as generated shaders, textures, EFB copies to the XFB and to textures, presenting the XFB that `VISetNextFrameBuffer` names.
+1. **The renderer's gaps** as the game reaches them, and checking pictures against hardware behaviour on the player's PC.
 2. **The rest of the game's paths:** what the menus, fights and movies reach that the front end doesn't.
 3. **Tests:** a test of the thread model without the game, using small guest programs built from encoded instructions, like the differential test's.

@@ -1,9 +1,9 @@
 // Frames from the guest to the window (video.hpp).
 //
-// For now a frame is the external frame buffer in guest memory, YUV 4:2:2
-// (Y0 U Y1 V per pair of pixels, BT.601 studio range), converted on the CPU.
-// Once the renderer draws EFB copies on the GPU, the copy that names this
-// address is shown instead (roadmap step 4).
+// VI names an external frame buffer; the renderer's EFB copy to that address
+// is shown (main.cpp). Without one (no renderer, or a frame buffer the CPU
+// wrote), the frame buffer in guest memory is converted on the CPU: YUV
+// 4:2:2 (Y0 U Y1 V per pair of pixels, BT.601 studio range).
 #include "video.hpp"
 
 #include <algorithm>
@@ -34,6 +34,16 @@ void show_frame(uint32_t xfb, uint32_t width, uint32_t height) {
         ++g_sequence;
     }
     g_cv.notify_one();
+}
+
+bool take_xfb(uint64_t* sequence, unsigned timeout_ms, uint32_t& xfb, uint32_t& width, uint32_t& height) {
+    std::unique_lock l(g_lock);
+    if (!g_cv.wait_for(l, std::chrono::milliseconds(timeout_ms), [&] { return g_sequence != *sequence; })) return false;
+    *sequence = g_sequence;
+    xfb = g_xfb;
+    width = g_width;
+    height = g_height;
+    return true;
 }
 
 bool take_frame(uint64_t* sequence, unsigned timeout_ms, std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) {

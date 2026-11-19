@@ -11,6 +11,27 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-19
+The renderer: the game draws, on Vulkan. It shows the strap screen and the save dialog, takes the pointer and A, creates its save and goes on to the intro movie.
+
+### Added
+- **The renderer** (`punchout/src/recorder.*`, `texture.*`, `renderer.*`, `gx.hpp`, `shaders/`). The game's thread records; the main thread draws.
+  - **Recording:** the decoder hands each primitive to a recorder, which decodes its vertices by the vertex format into one canonical layout and turns quads, strips and fans into index lists. It snapshots the transform, lighting, TEV and pixel state when it changes, decodes textures from guest memory (every GX format, palettes from TMEM) into a cache keyed by address, format, size and a hash of the data, and records EFB copies. A copy to the XFB ends a frame, which goes to the main thread at most two frames ahead.
+  - **Drawing:** the EFB is an RGBA8 image and a 32-bit depth buffer at a whole-number scale of 640×528, drawn with dynamic rendering. Pipelines are keyed by blending and primitive type; cull and depth are dynamic state. Copies to textures stay on the GPU and are found again by address. Copies to the XFB become the images VI shows.
+  - **Shaders:** a vertex shader does XF's transform, lighting and texture-coordinate generation. One fragment ubershader does TEV: 16 stages, indirect textures, the hardware's rounding, compares, konst and swap tables, the alpha test, dither and fog. A copy shader does the copy formats, halving and gamma. All are GLSL compiled to SPIR-V ahead of time by `tools/build_shaders.py` into a committed header, so nothing compiles at run time and no shader compiler ships. The arithmetic follows Dolphin's documentation; the code is ours.
+  - Features the game hasn't been seen to use are logged once when it uses them: line and point widths, logic ops other than copy, EFB depth copies, Z textures, and constant alpha with source-alpha blending.
+- **The Wii Remote's pointer:** the sensor bar's two lights as the remote's camera would see them, so KPAD works out the pointer as on hardware. The mouse points over the picture, and its left button is A. The right stick moves the pointer too.
+- **Testing aids:**
+  - `--offscreen` runs the renderer without a window.
+  - `PUNCHOUT_DUMP=dir` saves every 60th frame shown as a PPM.
+  - `PUNCHOUT_SCALE` sets the EFB scale.
+  - `PUNCHOUT_INPUT="Y@16,Start@20"` presses buttons at given seconds.
+  - `PUNCHOUT_POINTER="x,y"` holds the pointer.
+
+### Changed
+- VI shows the renderer's XFB image when it has one, and otherwise converts the XFB in guest memory on the CPU, as before.
+- Sound runs only with a window.
+
 ## [0.12.0] - 2026-11-18
 Sound, and the front end running: past audio start-up, the game reaches its menus at 59 frames a second, mixing sound every 3 ms.
 

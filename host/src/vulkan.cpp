@@ -201,16 +201,22 @@ void Buffer::destroy(const Gpu& gpu) {
     *this = {};
 }
 
-Image Image::create(const Gpu& gpu, uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage) {
+bool is_depth(VkFormat f) {
+    return f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D16_UNORM ||
+           f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
+
+Image Image::create(const Gpu& gpu, uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, uint32_t levels) {
     Image im;
     im.format = format;
     im.width = width;
     im.height = height;
+    im.levels = levels;
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = format;
     ici.extent = {width, height, 1};
-    ici.mipLevels = 1;
+    ici.mipLevels = levels;
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -228,7 +234,7 @@ Image Image::create(const Gpu& gpu, uint32_t width, uint32_t height, VkFormat fo
     vci.image = im.image;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vci.format = format;
-    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vci.subresourceRange = {is_depth(format) ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT) : VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT), 0, levels, 0, 1};
     check(vkCreateImageView(gpu.device, &vci, nullptr, &im.view), "vkCreateImageView");
     return im;
 }
@@ -240,7 +246,7 @@ void Image::destroy(const Gpu& gpu) {
     *this = {};
 }
 
-void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to) {
+void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect) {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -251,7 +257,7 @@ void transition(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageL
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = image;
-    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.subresourceRange = {aspect, 0, VK_REMAINING_MIP_LEVELS, 0, 1};
     VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     d.imageMemoryBarrierCount = 1;
     d.pImageMemoryBarriers = &b;
