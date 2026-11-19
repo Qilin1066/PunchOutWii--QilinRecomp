@@ -182,9 +182,10 @@ Two threads share the work. The game's thread records what the command stream as
   It shows which side holds the game back on a given machine.
 - **Testing without a screen:**
   - `--offscreen` draws with no window, for example on llvmpipe.
-  - `PUNCHOUT_DUMP=dir` writes every 60th frame shown as a PPM at 1280×720.
-  - `PUNCHOUT_INPUT="Y@16,Start@20.5"` presses pad buttons at those seconds, for a fifth of a second each.
-  - `PUNCHOUT_POINTER="x,y"` holds the pointer at a point (−1 to 1, y up).
+  - `PUNCHOUT_DUMP=dir` writes every 60th frame shown as a PPM at 1280×720 and logs the time of each; `PUNCHOUT_DUMP_EVERY=n` changes the 60.
+  - `PUNCHOUT_INPUT="Y@16,Start@20.5"` presses pad buttons at those seconds of game time, for a fifth of a second each. Game time is the frames the game has handed VI, over 60: the game waits for the GPU, so on a slow one this keeps a script in step with the screen where the clock would drift.
+  - `PUNCHOUT_POINTER="x,y"` holds the pointer at a point (−1 to 1, y up); `"x,y;x,y@40;x,y@52"` moves it at those times.
+  - The save lives in the per-user folder's `nand/`; copying it aside and back makes a scripted run repeatable.
 
 ## Input (`wpad.cpp`)
 

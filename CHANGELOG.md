@@ -11,6 +11,25 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-19
+The first fight: from the title screen through profile creation, the main menu and Career to round 1 against Glass Joe, with punches landing. Checked from frame dumps here (software GPU); not yet on real hardware.
+
+### Fixed
+- **Display lists built at run time** (GXBeginDisplayList, used for the Mii heads among others) were decoded at once instead of written to memory, so the decoder lost its place right after the "no Mii characters" dialog. The write-gather pipe now writes each 32-byte burst to the CPU's FIFO in memory at the PI's write pointer, as the hardware does, and the decoder sees it only while the command processor is linked to that FIFO (CP control bit 4).
+- **The PI's FIFO write pointer** wraps at the end with bit 26 set (GXGetFifoWrap) and keeps bit 28, so FIFOs in MEM2 work.
+- **Writing WPAR** (PPCMtwpar) now resets the gather pipe, as the hardware does, so GXFlush's padding stays out of a new display list.
+- **CALL_DL** takes a virtual address too: the GPU ignores the top three bits, and GXCallDisplayList passes the caller's pointer.
+
+### Added
+- A lost command decoder reports the last primitive's vertex formats and the last CP register writes.
+- `PUNCHOUT_POINTER` takes a schedule (`"x,y;x,y@40"`), and `PUNCHOUT_DUMP_EVERY` sets how often frames are dumped; each dump logs its time.
+
+### Changed
+- `PUNCHOUT_INPUT` and `PUNCHOUT_POINTER` are timed in game frames (frames handed to VI, over 60), not wall-clock seconds. The game waits for the GPU, so on a slow one the clock drifted against what was on screen.
+
+### Known
+- Default Mii faces are drawn without eyes or eyebrows, and one is black. The menus and fights don't depend on them.
+
 ## [0.13.9] - 2026-11-19
 The renderer's gaps: logic ops, line and point sizes, Z textures and depth copies.
 
