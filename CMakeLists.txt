@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.13.7 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.13.8 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -192,6 +192,20 @@ else()
     set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/difftest_cases.cpp PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 add_test(NAME qilin_difftest COMMAND qilin_difftest)
+
+# The runtime's floating-point helpers against exact rational arithmetic
+# (recomp/tests/fp/fp_check.py): rounding, the NI flush, round25, the single
+# multiply-add's one rounding, conversions, quantisation, and fres/frsqrte
+# (with hardware results for frsqrte). Built with this compiler and run on this
+# CPU, so each CI platform checks its own FPU's part in the results.
+add_executable(qilin_fp_eval recomp/tests/fp/fp_eval.cpp)
+target_link_libraries(qilin_fp_eval PRIVATE qilin_rt qilin_warnings)
+qilin_tool(qilin_fp_eval)
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME qilin_fp_check COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/recomp/tests/fp/fp_check.py
+             $<TARGET_FILE:qilin_fp_eval> --cases 40000)
+endif()
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it

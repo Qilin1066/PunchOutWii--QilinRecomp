@@ -231,7 +231,12 @@ inline double madd_single(double a, double c, double b, bool subtract) {
     if ((rb & 0x1FFFFFFFull) == 0x10000000ull) {
         const double a1 = bs - r;   // -(a*cr) plus the fma's rounding error, rounded
         const double b1 = r + a1;
-        const double err = std::fma(a, cr, a1) + (bs - b1);
+        double err = std::fma(a, cr, a1) + (bs - b1);
+        // A product below the smallest subnormal leaves r == bs with an error the
+        // transformation can't see (it underflows to zero): the error is then the
+        // product itself, and its sign is the product's.
+        if (err == 0.0 && r == bs && a != 0.0 && cr != 0.0 && std::isfinite(a) && std::isfinite(cr))
+            err = std::signbit(a) != std::signbit(cr) ? -1.0 : 1.0;
         if (err != 0.0) r = from_bits((err > 0.0) == (r > 0.0) ? rb + 1 : rb - 1);
     }
     return is_nan(r) ? nan3(a, b, c) : r;

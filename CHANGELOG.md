@@ -11,6 +11,13 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-11-19
+### Added
+- **`qilin_fp_check`:** the runtime's floating-point helpers against exact rational arithmetic (`recomp/tests/fp/`). It covers every double and single arithmetic instruction, `round25`, `frsp`, `fctiw`/`fctiwz`, `lfs`/`stfs`, paired-single quantisation, and `fres`/`frsqrte` (with Dolphin's hardware-measured `frsqrte` results). That's 40,000 cases a run, including constructed double-rounding traps, on every CI platform's own FPU. The differential test already checked the floating-point wiring; this checks the arithmetic under it.
+
+### Fixed
+- **`fmadds`/`fmsubs` (and the paired-single multiply-adds) could round the wrong way** when the product was below the smallest subnormal and `b` was exactly halfway between two singles. The error-free transformation that keeps the rounding single couldn't see an error that small. Found by the new check.
+
 ## [0.13.7] - 2026-11-19
 ### Fixed
 - **`fopen` reached dropped code:** MSL's `fopen`, which the game calls from four places, opens files through MetroTRK's host-file open, which was dropped with the rest of the debugger stub. That function is now replaced (a new override in `identify_libraries.py`, so `plan.tsv` gains a line) by what it does without a debugger: it fails, so `fopen` returns NULL as on a retail Wii.
