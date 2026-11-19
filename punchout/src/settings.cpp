@@ -31,7 +31,6 @@ constexpr PadName kPadNames[] = {
     {"LB", "Pad LB", host::kPadLB},       {"RB", "Pad RB", host::kPadRB},        {"LT", "Pad LT", host::kPadLT},
     {"RT", "Pad RT", host::kPadRT},       {"L3", "Pad L3", host::kPadL3},        {"R3", "Pad R3", host::kPadR3},
 };
-constexpr const char* kPresets[] = {"original", "low-end", "desktop"};
 
 std::string trim(const std::string& s) {
     size_t a = 0, b = s.size();

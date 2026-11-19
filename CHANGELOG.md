@@ -11,6 +11,19 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-19
+A Windows download that needs nothing installed, as the APB recomp has.
+
+### Added
+- **The Windows download** (`tools/player-kit`, built by `.github/workflows/player-kit.yml` on every push, and attached to a GitHub Release for a version tag): `PunchOut-QilinComp-<version>-windows-x64.zip`, 78 MB. Unpack it and double-click **Play Punch-Out.bat**: the first time it asks for the extracted disc folder (checking it's the supported build), lifts its `main.dol` and compiles it with the bundled compiler (LLVM-MinGW 20261104, the same pinned release as APB's), then starts the game; after that it starts at once. It holds everything but the game's own code, prebuilt: `qilin.exe`, the library plan, and the runtime, renderer, host layer, SDL3, Dear ImGui and volk merged into `libpunchout_kit.a`. Nothing made from the game is distributed.
+  - Checked here: the download built from scratch; `play.ps1` (run under PowerShell 7 with a cross compiler) lifted the game, compiled the 35 files and linked `Punch-Out.exe` (50 MB; Windows system DLLs only; 16 MB stack) in 2 min 48 s on 8 cores; a second start is immediate; an update that doesn't change the game's code takes 3 s; a folder without `sys/main.dol`, and a `main.dol` of another build, are refused with the reason. Wine crashes in this sandbox, so the .exe files weren't run here.
+- **From the source, double-click:** `Play Punch-Out.bat` (builds the first time, then starts the game) and `Update Punch-Out.bat` (pulls, rebuilds what changed, starts it), through `tools/build-punchout.ps1`, which finds Visual Studio's CMake and Git itself and remembers the disc folder.
+
+### Changed
+- `qilin lift` leaves a file whose text is unchanged alone, so a rebuild after an update recompiles only what changed.
+- `main.cpp` declares the lifted code's tables itself instead of including the generated `functions.hpp`, so the runtime builds without the lifted code (the download's prebuilt part).
+- Fixed for Clang: a missing `<cstdlib>` in `display.cpp` and an unused table in `settings.cpp`.
+
 ## [0.19.0] - 2026-11-19
 A whole-disc audit: is every byte of the game's code found? (`docs/code-analysis.md`, "The whole-disc audit".)
 

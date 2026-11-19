@@ -295,7 +295,13 @@ int cmd_lift(const Args& a) {
     };
     const std::filesystem::path dir = *a.out;
     std::filesystem::create_directories(dir);
+    // A file whose text is unchanged is left alone, so a build after an update
+    // recompiles only what the update changed.
     auto write = [&](const std::string& name, const std::string& text) {
+        {
+            std::ifstream old(dir / name, std::ios::binary);
+            if (old && std::string(std::istreambuf_iterator<char>(old), {}) == text) return;
+        }
         std::ofstream f(dir / name, std::ios::binary);
         if (!(f << text)) throw Failure{std::format("cannot write {}", (dir / name).string())};
     };

@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.19.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.20.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -256,6 +256,9 @@ if(Python3_FOUND)
              $<TARGET_FILE:qilin_fp_eval> --cases 40000)
 endif()
 
+# The game's runtime: everything in punchout but the code lifted from main.dol.
+set(punchout_runtime_sources punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp punchout/src/profile.cpp punchout/src/menu.cpp)
+
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
 # into C++ at build time (into the build tree, never the source tree), with the
@@ -284,7 +287,7 @@ if(QILIN_GAME_DOL)
                 --files ${QILIN_LIFT_FILES}
         DEPENDS qilin ${QILIN_GAME_DOL} ${CMAKE_CURRENT_SOURCE_DIR}/data/R7PP01/plan.tsv
         COMMENT "Lifting the game's main.dol to C++")
-    add_executable(punchout punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp punchout/src/profile.cpp punchout/src/menu.cpp ${gen_sources})
+    add_executable(punchout ${punchout_runtime_sources} ${gen_sources})
     target_include_directories(punchout PRIVATE punchout/src ${gen})
     target_link_libraries(punchout PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static)
     target_compile_definitions(punchout PRIVATE PUNCHOUT_VERSION="${PROJECT_VERSION}")
@@ -301,4 +304,59 @@ if(QILIN_GAME_DOL)
     else()
         set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w")
     endif()
+endif()
+
+# ---- The player kit: everything punchout needs but the code lifted from main.dol ----
+# For the Windows download (tools/player-kit), as the APB recomp's: the game's
+# runtime and every library it links (the host layer, SDL3, Dear ImGui, volk),
+# merged into one archive, with the headers the lifted code includes, qilin,
+# the library plan, and the flags and libraries to build the rest with
+# (kit.ninja). A player's own PC lifts their own main.dol and compiles only
+# that code, with the same compiler, against the kit. Needs a MinGW toolchain
+# (tools/player-kit/mingw-cross.cmake) and SDL3 built statically (the fetched one).
+option(QILIN_PLAYER_KIT "Build the player kit (tools/player-kit)" OFF)
+if(QILIN_PLAYER_KIT)
+    if(NOT QILIN_HOST OR NOT TARGET SDL3-static)
+        message(FATAL_ERROR "the player kit needs the host layer with SDL3 built statically (QILIN_HOST=ON)")
+    endif()
+    add_library(punchout_kit_main OBJECT ${punchout_runtime_sources})
+    target_include_directories(punchout_kit_main PRIVATE punchout/src)
+    target_link_libraries(punchout_kit_main PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
+    target_compile_definitions(punchout_kit_main PRIVATE PUNCHOUT_VERSION="${PROJECT_VERSION}")
+    set(kit_libraries qilin_rt qilin_dol qilin_host qilin_imgui qilin_volk SDL3-static)
+    set(kit_archive "${CMAKE_BINARY_DIR}/libpunchout_kit.a")
+    set(mri "CREATE ${kit_archive}\n")
+    foreach(library IN LISTS kit_libraries)
+        string(APPEND mri "ADDLIB $<TARGET_FILE:${library}>\n")
+    endforeach()
+    string(APPEND mri "ADDMOD $<JOIN:$<TARGET_OBJECTS:punchout_kit_main>,\nADDMOD >\nSAVE\nEND\n")
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/punchout_kit.mri" CONTENT "${mri}")
+    add_custom_command(OUTPUT "${kit_archive}"
+        COMMAND "${CMAKE_COMMAND}" "-DAR=${CMAKE_AR}" "-DMRI=${CMAKE_BINARY_DIR}/punchout_kit.mri" "-DOUT=${kit_archive}"
+                -P "${CMAKE_SOURCE_DIR}/tools/player-kit/merge.cmake"
+        DEPENDS punchout_kit_main ${kit_libraries} $<TARGET_OBJECTS:punchout_kit_main> "${CMAKE_BINARY_DIR}/punchout_kit.mri"
+        COMMENT "Merging the player kit's libraries" VERBATIM)
+    add_custom_target(punchout_kit ALL DEPENDS "${kit_archive}")
+    # The system libraries SDL3 and the runtime need (MinGW names).
+    set(kit_system_libraries -lm -lkernel32 -luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32
+        -lsetupapi -lshell32 -ldinput8 -lwinspool -lcomdlg32)
+    string(JOIN " " kit_system_text ${kit_system_libraries})
+    # What the lifted code is compiled and linked with: kit.ninja, included by
+    # the build.ninja the player's script writes ($kit is the kit's folder).
+    # Lifted calls nest as deeply as the guest's: a 16 MB main stack, as MSVC's /STACK.
+    file(WRITE "${CMAKE_BINARY_DIR}/kit.ninja"
+        "# Written by CMake for the player kit (QILIN_PLAYER_KIT).\n"
+        "cxxflags = -O2 -DNDEBUG -std=c++23 -w -I$kit/include\n"
+        "ldflags = -static -O2 -Wl,--stack,16777216\n"
+        "libs = $kit/lib/libpunchout_kit.a ${kit_system_text}\n")
+    # Linked with stand-ins for the lifted code: the kit is complete.
+    add_executable(punchout_kit_link_check tools/player-kit/link_check.cpp)
+    target_link_libraries(punchout_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
+    add_dependencies(punchout_kit_link_check punchout_kit)
+
+    install(TARGETS qilin RUNTIME DESTINATION kit COMPONENT player)
+    install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
+    install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/R7PP01/plan.tsv DESTINATION kit COMPONENT player)
+    file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)
+    install(FILES ${kit_headers} DESTINATION kit/include/qilin/rt COMPONENT player)
 endif()

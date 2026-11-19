@@ -29,7 +29,6 @@
 #include <vector>
 
 #include "boot.hpp"
-#include "functions.hpp"
 #include "audio.hpp"
 #include "hw.hpp"
 #include "gx.hpp"
@@ -45,6 +44,16 @@
 #include <SDL3/SDL_timer.h>
 #include "threads.hpp"
 #include "video.hpp"
+
+// The lifted code's tables (qilin lift's table.cpp and replaced.cpp), declared
+// here rather than through its functions.hpp, so this file builds without the
+// lifted code (the Windows download's prebuilt part, tools/player-kit).
+namespace qilin::gen {
+extern const ::qilin::rt::FunctionEntry kFunctions[];
+extern const unsigned kFunctionCount;
+extern const ::qilin::rt::ReplacedEntry kReplaced[];
+extern const unsigned kReplacedCount;
+}  // namespace qilin::gen
 
 namespace {
 struct Press {

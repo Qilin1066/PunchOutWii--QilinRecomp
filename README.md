@@ -46,6 +46,17 @@ ctest --test-dir build --output-on-failure
 
 ## Playing
 
+**On Windows, the download (nothing to install).** Each release has `PunchOut-QilinComp-<version>-windows-x64.zip` (about 80 MB; GitHub builds it, `.github/workflows/player-kit.yml`), as the APB recomp has. Unpack it and double-click **`Play Punch-Out.bat`**: the first time it asks for your extracted disc folder and builds the game from it (a few minutes: 3 on an 8-core PC), with the compiler inside the download (LLVM-MinGW: Clang, free and open source); after that it starts the game at once. The download has everything but the game's own code, prebuilt: the recompiler, the runtime, the renderer, SDL3, the menu. The code made from the disc is made on the player's PC, from their own copy, and never distributed. See `tools/player-kit/` (`package.sh` builds the download on Linux; `play.ps1` is what Play runs).
+
+**On Windows, from the source, double-click.** With Visual Studio 2022 (17.10 or newer, the free Community edition, with "Desktop development with C++") and Git installed, in the project's folder:
+
+- **`Play Punch-Out.bat`** starts the game. The first time it builds it (10 to 40 minutes), asking for your extracted disc folder with a folder picker.
+- **`Update Punch-Out.bat`** gets the latest code, rebuilds only what changed, and starts the game.
+
+Both run `tools/build-punchout.ps1`, which finds Visual Studio's CMake and Git itself.
+
+**By hand:**
+
 The game is built from your own disc's `main.dol`; nothing of the game is in this repository. Extract the whole disc first (Dolphin: right-click the game, *Extract Entire Disc*; or `wit extract`). That gives a folder with `sys/` and `files/`. Then:
 
 ```sh
