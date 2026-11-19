@@ -162,7 +162,7 @@ Two threads share the work. The game's thread records what the command stream as
 
 ## Input (`wpad.cpp`)
 
-WPAD is replaced, and KPAD is lifted on top of it. The remote is held sideways and buttons only, with no motion controls, per the design targets. The first pad maps as:
+WPAD is replaced, and KPAD is lifted on top of it. The remote is held sideways and buttons only, with no motion controls, per the design targets. Which inputs press which of its buttons is the player's choice, in the settings file (below). By default the first pad maps as:
 - D-pad or left stick: the cross;
 - A: 2;
 - B: 1;
@@ -171,7 +171,25 @@ WPAD is replaced, and KPAD is lifted on top of it. The remote is held sideways a
 - Back: −;
 - Guide: HOME.
 
-The keyboard works too. The pointer is real input, since the menus need it. The runtime places the sensor bar's two lights where the remote's camera would see them, after Dolphin's camera geometry. KPAD then works out the pointer from them as on hardware. The mouse over the picture moves the pointer, and its left button is A. The right stick also moves it, a screen's width a second. The angles are calibrated so the pointer lands where the mouse is, with the bar below the TV, the console's default setting.
+The keyboard's defaults are the arrows, Z and X for 1 and 2, C or Space for A, Enter for +, Backspace for − and Escape for HOME. The pointer is real input, since the menus need it. The runtime places the sensor bar's two lights where the remote's camera would see them, after Dolphin's camera geometry. KPAD then works out the pointer from them as on hardware. The mouse over the picture moves the pointer, and its left button is A. The right stick also moves it, a screen's width a second. The angles are calibrated so the pointer lands where the mouse is, with the bar below the TV, the console's default setting.
+
+## Settings (`settings.cpp`, v0.13.2)
+
+`settings.ini` sits in the per-user folder, next to the saves (Windows: `%APPDATA%\Qilin\PunchOut-QilinComp`). The first run writes it with the defaults and comments explaining each line.
+- `[video] scale`: the EFB's resolution, 1 to 8 times 640×528. The default is 1, which suits the Pi 4. `PUNCHOUT_SCALE` overrides it.
+- `[controls]`: each of the remote's buttons, in the player's terms (`up down left right one two a plus minus home`), takes a comma-separated list of inputs:
+  - `pad:<Xbox name>`;
+  - `key:<SDL key name>`;
+  - `mouse`, its left button.
+
+  An empty list leaves the button unused. Controls the file doesn't mention keep their defaults.
+
+The main thread turns the pad, the keys and the mouse into the remote's buttons after each poll; WPAD turns those into its own bits. Mistakes stop the program at start-up, naming the line or the key, rather than leaving a button dead without saying why:
+- an unknown name, section, button or key;
+- a scale out of range;
+- a control set twice.
+
+`punchout_settings_test` checks that the defaults read back as written, that edits are read, and that mistakes are reported.
 
 ## Hardware registers (`hw.cpp`, v0.12.0)
 

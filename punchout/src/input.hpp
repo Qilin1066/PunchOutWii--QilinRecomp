@@ -6,9 +6,10 @@
 
 namespace punchout {
 
-// The pad's buttons (qilin::host::PadButton bits), written by the main thread
-// after each poll; and whether the guest wants the pad to rumble.
-inline std::atomic<uint32_t> g_pad_buttons{0};
+// The Wii Remote's buttons held (a bit per punchout::Control, settings.hpp),
+// written by the main thread after each poll from the player's bindings; and
+// whether the guest wants the pad to rumble.
+inline std::atomic<uint32_t> g_controls{0};
 inline std::atomic<bool> g_rumble{false};
 
 // Where the player points (the Wii Remote's pointer, from the mouse or the

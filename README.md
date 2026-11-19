@@ -44,6 +44,39 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
+## Playing
+
+The game is built from your own disc's `main.dol`; nothing of the game is in this repository. Extract the whole disc first (Dolphin: right-click the game, *Extract Entire Disc*; or `wit extract`). That gives a folder with `sys/` and `files/`. Then:
+
+```sh
+cmake -S . -B build-game -DCMAKE_BUILD_TYPE=Release -DQILIN_GAME_DOL="<extracted disc>/sys/main.dol"
+cmake --build build-game --parallel --target punchout
+build-game/punchout "<extracted disc>"
+```
+
+On Windows, with Visual Studio's Developer PowerShell, for example:
+
+```powershell
+cmake -S . -B build-game -DQILIN_GAME_DOL="D:\PunchOutWii Project\ROM\ROM Extract\sys\main.dol"
+cmake --build build-game --config Release --parallel --target punchout
+build-game\Release\punchout.exe "D:\PunchOutWii Project\ROM\ROM Extract"
+```
+
+The first build lifts the whole game to C++ and compiles it, which takes several minutes.
+
+**Controls:** a gamepad (Xbox names) or the keyboard, standing in for a Wii Remote held sideways. Buttons only: there are no motion controls.
+
+| Wii Remote | Pad | Keyboard |
+|---|---|---|
+| Cross pad (dodge, duck, block) | D-pad or left stick | Arrows |
+| 1 (left punch) | B | Z |
+| 2 (right punch) | A | X |
+| A (Star Punch, menus' OK) | X or Y | C or Space |
+| + / − / HOME | Start / Back / Guide | Enter / Backspace / Escape |
+| Pointer (menus) | Right stick | Mouse (left button is A) |
+
+All of these can be changed in `settings.ini`, which the first run writes to your user folder (Windows: `%APPDATA%\Qilin\PunchOut-QilinComp`, next to the saves). The file's comments explain it. The same file sets the picture's resolution (`scale`, 1 to 8 times the Wii's).
+
 ## Using it
 
 Extract `main.dol` from your disc first (`docs/dol-analysis.md` says how, with Dolphin or Wiimms ISO Tools).

@@ -11,6 +11,20 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-19
+The controls can be changed, in a settings file.
+
+### Added
+- **`settings.ini`** in the per-user folder, written with the defaults and comments on the first run.
+  - It sets each Wii Remote button's inputs: pad buttons, keys by name, or the mouse.
+  - It sets the render scale.
+  - A mistake stops the game at start-up and names the line or key.
+- **`punchout_settings_test`** for the settings file, in `ctest`.
+
+### Changed
+- The keyboard is no longer fixed to pad buttons. Each key is bound to a Wii Remote button in the settings, with the same defaults as before.
+- The pad's button names moved to `host/include/qilin/host/pad.hpp`.
+
 ## [0.13.1] - 2026-11-19
 Thread fixes, found by a new test of the thread model that needs no game files.
 

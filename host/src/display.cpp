@@ -253,24 +253,21 @@ bool Display::poll() {
         d.stick_x = d.stick_y = 0;
     }
     if (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) b |= kPadClick;
-    const bool* k = SDL_GetKeyboardState(nullptr);
-    struct Key {
-        SDL_Scancode sc;
-        uint32_t bit;
-    };
-    static constexpr Key kKeys[] = {
-        {SDL_SCANCODE_UP, kPadUp},        {SDL_SCANCODE_DOWN, kPadDown},     {SDL_SCANCODE_LEFT, kPadLeft},
-        {SDL_SCANCODE_RIGHT, kPadRight},  {SDL_SCANCODE_X, kPadA},           {SDL_SCANCODE_Z, kPadB},
-        {SDL_SCANCODE_C, kPadY},          {SDL_SCANCODE_SPACE, kPadY},       {SDL_SCANCODE_RETURN, kPadStart},
-        {SDL_SCANCODE_BACKSPACE, kPadBack}, {SDL_SCANCODE_ESCAPE, kPadGuide},
-    };
-    for (const Key& key : kKeys)
-        if (k[key.sc]) b |= key.bit;
     d.buttons = b;
     return true;
 }
 
 uint32_t Display::buttons() const { return impl_->buttons; }
+int Display::key_code(const char* name) const {
+    const SDL_Scancode sc = SDL_GetScancodeFromName(name);
+    return sc == SDL_SCANCODE_UNKNOWN ? -1 : static_cast<int>(sc);
+}
+bool Display::key_down(int code) const {
+    if (impl_->window == nullptr || code < 0) return false;
+    int n = 0;
+    const bool* k = SDL_GetKeyboardState(&n);
+    return code < n && k[code];
+}
 void Display::right_stick(float& x, float& y) const {
     x = impl_->stick_x;
     y = impl_->stick_y;

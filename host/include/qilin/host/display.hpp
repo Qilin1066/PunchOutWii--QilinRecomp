@@ -10,20 +10,10 @@
 #include <string>
 #include <vector>
 
+#include "qilin/host/pad.hpp"
 #include "qilin/host/vulkan.hpp"
 
 namespace qilin::host {
-
-// The pad's buttons, by an Xbox pad's names (any SDL gamepad maps onto them),
-// and the keyboard's stand-ins: arrows for the D-pad, Z and X for B and A,
-// C or Space for Y, Enter for Start, Backspace for View, Escape for Guide.
-// The left stick counts as the D-pad past half way.
-enum PadButton : uint32_t {
-    kPadUp = 1u << 0, kPadDown = 1u << 1, kPadLeft = 1u << 2, kPadRight = 1u << 3,
-    kPadA = 1u << 4, kPadB = 1u << 5, kPadX = 1u << 6, kPadY = 1u << 7,
-    kPadStart = 1u << 8, kPadBack = 1u << 9, kPadGuide = 1u << 10,
-    kPadClick = 1u << 11,  // the mouse's left button
-};
 
 class Display {
 public:
@@ -39,8 +29,14 @@ public:
 
     // Handle the window's events. False once the player has closed it.
     bool poll();
-    // The buttons held now (PadButton bits), as of the last poll.
+    // The pad's buttons and the mouse's left button held now (PadButton bits),
+    // as of the last poll.
     uint32_t buttons() const;
+    // A key by its SDL name ("X", "Space", "Left Shift"): a code for key_down,
+    // or -1 if there's no such key. Whether it's held, as of the last poll
+    // (never, headless).
+    int key_code(const char* name) const;
+    bool key_down(int code) const;
     // The right stick, -1 to 1 each way (y up), dead zone removed.
     void right_stick(float& x, float& y) const;
     // If the mouse moved over the window since the last poll: where, over the

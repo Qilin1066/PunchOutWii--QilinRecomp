@@ -7,21 +7,20 @@
 // in view of its pointer, and the other three channels as empty. KPAD and WBC
 // stay lifted and see exactly that.
 //
-// The mapping (to be remappable in the settings file): held sideways, the
-// remote's cross pad is turned a quarter: the player's up is its RIGHT, left
-// its UP, down its LEFT, right its DOWN.
+// The mapping is the player's, from settings.ini (settings.hpp); by default
 //   pad D-pad or left stick -> cross pad (dodge, duck, block)
-//   A -> 2 (right punch), B -> 1 (left punch), Y or X -> A (Star Punch)
+//   A -> 2 (right punch), B -> 1 (left punch), Y, X or the mouse -> A (Star Punch)
 //   Start -> +, View -> -, Guide -> HOME
+// Held sideways, the remote's cross pad is turned a quarter: the player's up
+// is its RIGHT, left its UP, down its LEFT, right its DOWN.
 #include "boot.hpp"
 #include "input.hpp"
 #include "os.hpp"
-#include "qilin/host/display.hpp"
+#include "settings.hpp"
 
 namespace punchout {
 namespace rt = qilin::rt;
 using rt::Cpu;
-namespace host = qilin::host;
 
 namespace {
 
@@ -44,18 +43,14 @@ uint8_t g_speaker_volume = 0x40;
 uint64_t g_next_sample = 0;
 
 uint16_t wii_buttons() {
-    const uint32_t p = g_pad_buttons.load(std::memory_order_relaxed);
+    static constexpr uint16_t kBits[kControlCount] = {
+        kRight, kLeft, kUp, kDown,  // the player's up, down, left, right: the cross pad turned a quarter
+        kOne, kTwo, kA, kPlus, kMinus, kHome,
+    };
+    const uint32_t held = g_controls.load(std::memory_order_relaxed);
     uint16_t b = 0;
-    if (p & host::kPadUp) b |= kRight;
-    if (p & host::kPadLeft) b |= kUp;
-    if (p & host::kPadDown) b |= kLeft;
-    if (p & host::kPadRight) b |= kDown;
-    if (p & host::kPadA) b |= kTwo;
-    if (p & host::kPadB) b |= kOne;
-    if (p & (host::kPadX | host::kPadY | host::kPadClick)) b |= kA;
-    if (p & host::kPadStart) b |= kPlus;
-    if (p & host::kPadBack) b |= kMinus;
-    if (p & host::kPadGuide) b |= kHome;
+    for (unsigned i = 0; i < kControlCount; ++i)
+        if (held & (1u << i)) b |= kBits[i];
     return b;
 }
 

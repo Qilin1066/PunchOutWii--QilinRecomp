@@ -7,7 +7,8 @@
 // guest records (renderer.cpp) and shows the frame buffer VI names.
 // --headless runs without a window, GPU or sound; --offscreen draws without a
 // window (with PUNCHOUT_DUMP=<folder>, a frame a second is saved there as PPM).
-// PUNCHOUT_SCALE sets the EFB's resolution (1 to 8 times the console's).
+// settings.ini in the per-user folder holds the controls and the EFB's
+// resolution (settings.hpp); PUNCHOUT_SCALE overrides the resolution.
 // PUNCHOUT_INPUT presses buttons on a schedule, for runs without a player:
 // "A@12,Start@20.5" holds each for a fifth of a second at that many seconds;
 // PUNCHOUT_POINTER="x,y" holds the pointer there (-1 to 1, y up).
@@ -28,6 +29,8 @@
 #include "hw.hpp"
 #include "gx.hpp"
 #include "input.hpp"
+#include "settings.hpp"
+#include "qilin/host/paths.hpp"
 #include "renderer.hpp"
 #include "qilin/host/audio.hpp"
 #include "qilin/host/display.hpp"
@@ -88,6 +91,7 @@ int main(int argc, char** argv) {
     punchout::init_hardware();
     punchout::load_game(folder);
 
+    const punchout::Settings settings = punchout::load_settings(qilin::host::user_folder());
     std::unique_ptr<qilin::host::Display> display;
     std::unique_ptr<punchout::Renderer> renderer;
     if (!headless) {
@@ -95,7 +99,7 @@ int main(int argc, char** argv) {
         o.title = "Punch-Out!!";
         o.headless = offscreen;
         display = std::make_unique<qilin::host::Display>(o);
-        unsigned scale = 1;
+        unsigned scale = settings.scale;
         if (const char* e = std::getenv("PUNCHOUT_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
         renderer = std::make_unique<punchout::Renderer>(display->gpu(), scale);
         punchout::gx::set_rendering(true);
@@ -109,6 +113,23 @@ int main(int argc, char** argv) {
         }, audio.get());
     }
     punchout::run_on_host_thread([](void*) { punchout::start_game(); }, nullptr);
+
+    // The controls, with each key's name looked up once.
+    struct Input {
+        punchout::Binding::Kind kind;
+        uint32_t pad;
+        int key;
+    };
+    std::vector<Input> bindings[punchout::kControlCount];
+    if (display)
+        for (unsigned c = 0; c < punchout::kControlCount; ++c)
+            for (const punchout::Binding& b : settings.controls[c]) {
+                int key = -1;
+                if (b.kind == punchout::Binding::kKey && (key = display->key_code(b.key.c_str())) < 0)
+                    rt::fatal(nullptr, "settings.ini: %s = key:%s, but there's no key called '%s'",
+                              punchout::control_name(static_cast<punchout::Control>(c)), b.key.c_str(), b.key.c_str());
+                bindings[c].push_back({b.kind, b.pad, key});
+            }
 
     const char* dump = offscreen ? std::getenv("PUNCHOUT_DUMP") : nullptr;
     const std::vector<Press> presses = scripted_input(std::getenv("PUNCHOUT_INPUT"));
@@ -129,7 +150,15 @@ int main(int argc, char** argv) {
             const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             for (const Press& p : presses)
                 if (now >= p.at && now < p.at + 0.2) held |= p.button;
-            punchout::g_pad_buttons.store(held, std::memory_order_relaxed);
+            uint32_t controls = 0;
+            for (unsigned c = 0; c < punchout::kControlCount; ++c)
+                for (const Input& in : bindings[c]) {
+                    const bool on = in.kind == punchout::Binding::kPad     ? (held & in.pad) != 0
+                                    : in.kind == punchout::Binding::kMouse ? (held & qilin::host::kPadClick) != 0
+                                                                           : display->key_down(in.key);
+                    if (on) controls |= 1u << c;
+                }
+            punchout::g_controls.store(controls, std::memory_order_relaxed);
             // The pointer: the mouse where it moves, the right stick at a screen's width a second.
             const auto tick = std::chrono::steady_clock::now();
             const float dt = std::chrono::duration<float>(tick - last).count();
