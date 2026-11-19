@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinComp VERSION 0.15.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinComp VERSION 0.16.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -156,6 +156,9 @@ if(QILIN_HOST)
     set_tests_properties(punchout_render_test_ubershader PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "PUNCHOUT_UBERSHADER=1")
     add_test(NAME punchout_render_test_specialized COMMAND punchout_render_test)
     set_tests_properties(punchout_render_test_specialized PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 ENVIRONMENT "PUNCHOUT_SPECIALIZE_SYNC=1")
+    # And with every vertex in the full layout (the compact one is the default).
+    add_test(NAME punchout_render_test_full_vertices COMMAND punchout_render_test)
+    set_tests_properties(punchout_render_test_full_vertices PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "PUNCHOUT_FULL_VERTICES=1")
 endif()
 
 # ---- Tests (no game files needed) ----

@@ -264,21 +264,24 @@ inline uint32_t compare(double a, double b) {
 
 // lfs and stfs: the PowerPC manual's conversions, bit by bit (no rounding,
 // signalling NaNs kept), not the host's float/double conversions.
+// A single's denormal, normalised into the double (rare: kept out of line so
+// load_single inlines into the lifted code).
+[[gnu::noinline, gnu::cold]] inline double load_single_denormal(uint32_t x) {
+    const uint64_t v = x;
+    uint64_t exp = 1023 - 126, frac = v & 0x7FFFFF;
+    do {
+        frac <<= 1;
+        exp -= 1;
+    } while (!(frac & 0x800000));
+    return from_bits(((v & 0x80000000u) << 32) | (exp << 52) | ((frac & 0x7FFFFF) << 29));
+}
 inline double load_single(uint32_t x) {
-    const uint64_t v = x, e = (v >> 23) & 0xFF, f = v & 0x7FFFFF;
-    if (e > 0 && e < 255) {
-        const uint64_t y = !(e >> 7), z = y << 61 | y << 60 | y << 59;
-        return from_bits(((v & 0xC0000000u) << 32) | z | ((v & 0x3FFFFFFFu) << 29));
-    }
-    if (e == 0 && f != 0) {
-        uint64_t exp = 1023 - 126, frac = f;
-        do {
-            frac <<= 1;
-            exp -= 1;
-        } while (!(frac & 0x800000));
-        return from_bits(((v & 0x80000000u) << 32) | (exp << 52) | ((frac & 0x7FFFFF) << 29));
-    }
-    const uint64_t y = e >> 7, z = y << 61 | y << 60 | y << 59;
+    const uint64_t v = x, e = (v >> 23) & 0xFF;
+    if (e == 0 && (v & 0x7FFFFF) != 0) [[unlikely]]
+        return load_single_denormal(x);
+    // Normal, zero, infinity or NaN: the bits move over; the exponent's top
+    // bit fills the three new ones (inverted for normals).
+    const uint64_t y = (e > 0 && e < 255) ? !(e >> 7) : (e >> 7), z = y << 61 | y << 60 | y << 59;
     return from_bits(((v & 0xC0000000u) << 32) | z | ((v & 0x3FFFFFFFu) << 29));
 }
 inline uint32_t store_single(double d) {

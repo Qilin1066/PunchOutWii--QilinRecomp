@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -114,12 +115,34 @@ void read_color(const uint8_t* p, unsigned fmt, uint8_t* out) {
 }
 unsigned color_size(unsigned fmt) { return fmt == 0 || fmt == 3 ? 2 : fmt == 1 || fmt == 4 ? 3 : 4; }
 
+// An indexed array, resolved once per primitive: a lookup is then a compare
+// and a multiply-add (array_data checks and translates every element).
+struct Array {
+    const uint8_t* host = nullptr;
+    uint32_t stride = 0, last = 0;  // the highest index whose element lies in memory
+    bool any = false;               // false: no element does (array_data reports it)
+};
+
 struct Format {
     uint32_t vcd_lo, vcd_hi, a, b, c;
     unsigned pos_fmt, pos_n, nrm_fmt, col_fmt[2], tc_fmt[8], tc_n[8];
     float pos_scale, tc_scale[8];
     bool nbt, nbt3, dequant;
+    Array arrays[12];  // 0 position, 1 normal, 2-3 colours, 4-11 texture coordinates
 };
+
+// The array's elements of `bytes` each, as far as they stay inside MEM1 or MEM2.
+Array resolve_array(const Registers& r, unsigned array, uint32_t bytes) {
+    Array a;
+    const uint32_t base = r.cp[0xA0 + array] & 0x1FFFFFFFu, stride = r.cp[0xB0 + array];
+    const uint32_t end = base < 0x01800000u ? 0x01800000u : (base >= 0x10000000u && base < 0x14000000u) ? 0x14000000u : 0;
+    if (end == 0 || base + bytes > end) return a;
+    a.host = rt::guest_ptr(0x80000000u | base);
+    a.stride = stride;
+    a.last = stride == 0 ? 0xFFFFFFFFu : (end - base - bytes) / stride;
+    a.any = true;
+    return a;
+}
 Format format_of(const Registers& r, unsigned vat) {
     Format f{};
     f.vcd_lo = r.cp[0x50];
@@ -144,6 +167,15 @@ Format format_of(const Registers& r, unsigned vat) {
         f.tc_fmt[i] = fm[i];
         f.tc_scale[i] = 1.0f / float(1u << fr[i]);
     }
+    // The indexed arrays the format reads, with the bytes an element takes.
+    const auto indexed = [](unsigned how) { return how >= 2; };
+    if (indexed((f.vcd_lo >> 9) & 3)) f.arrays[0] = resolve_array(r, 0, component_size(f.pos_fmt) * f.pos_n);
+    if (indexed((f.vcd_lo >> 11) & 3))
+        f.arrays[1] = resolve_array(r, 1, component_size(f.nrm_fmt) * (f.nbt && f.nbt3 ? 9 : f.nbt ? 9 : 3));
+    for (unsigned c = 0; c < 2; ++c)
+        if (indexed((f.vcd_lo >> (13 + 2 * c)) & 3)) f.arrays[2 + c] = resolve_array(r, 2 + c, color_size(f.col_fmt[c]));
+    for (unsigned t = 0; t < 8; ++t)
+        if (indexed((f.vcd_hi >> (2 * t)) & 3)) f.arrays[4 + t] = resolve_array(r, 4 + t, component_size(f.tc_fmt[t]) * f.tc_n[t]);
     return f;
 }
 
@@ -176,7 +208,10 @@ size_t read_vertex(const Registers& r, const Format& f, const uint8_t* p, Vertex
         uint32_t index;
         if (how == 2) index = *p++;
         else index = be16(p), p += 2;
-        return array_data(r, array, index, bytes);
+        const Array& a = f.arrays[array];
+        if (a.any && index <= a.last) [[likely]]
+            return a.host + size_t(index) * a.stride;
+        return array_data(r, array, index, bytes);  // reports it
     };
     // Position.
     {
@@ -231,6 +266,120 @@ size_t read_vertex(const Registers& r, const Format& f, const uint8_t* p, Vertex
         for (unsigned k = 0; k < f.tc_n[t]; ++k) v.uv[t][k] = component(d + k * cs, f.tc_fmt[t], f.tc_scale[t], f.dequant);
         has |= kHasUv0 << t;
     }
+    v.matrices[0] = mtx[0] | (uint32_t(mtx[1]) << 8) | (uint32_t(mtx[2]) << 16) | (uint32_t(mtx[3]) << 24);
+    v.matrices[1] = mtx[4] | (uint32_t(mtx[5]) << 8) | (uint32_t(mtx[6]) << 16) | (uint32_t(mtx[7]) << 24);
+    v.matrices[2] = mtx[8];
+    return size_t(p - start);
+}
+
+// A vertex format compiled to steps, once per primitive: a vertex then runs
+// only the attributes its format has, with formats, sizes and the default
+// matrix indices worked out (read_vertex's rules; it remains for the one
+// layout this doesn't take, NBT with an index per vector).
+struct Step {
+    enum Kind : uint8_t { kPosMtx, kTexMtx, kPos, kNormal, kColor, kUv } kind;
+    uint8_t how, fmt, n, slot, cs;  // n: components (or normal vectors); slot: matrix, colour or UV number
+    float scale;
+};
+struct Plan {
+    Step steps[24];
+    unsigned count = 0;
+    uint8_t mtx[9];
+    uint32_t has = 0;  // what the attributes give
+    bool usable = true;
+};
+Plan plan_of(const Registers& r, const Format& f) {
+    Plan pl;
+    const uint32_t ia = r.cp[0x30], ib = r.cp[0x40];
+    pl.mtx[0] = uint8_t(ia & 63);
+    for (int i = 0; i < 4; ++i) pl.mtx[1 + i] = uint8_t((ia >> (6 + 6 * i)) & 63);
+    for (int i = 0; i < 4; ++i) pl.mtx[5 + i] = uint8_t((ib >> (6 * i)) & 63);
+    const auto add = [&](Step st) { pl.steps[pl.count++] = st; };
+    if (f.vcd_lo & 1) add({Step::kPosMtx, 0, 0, 0, 0, 0, 0}), pl.has |= kHasPosMatrix;
+    for (uint8_t i = 0; i < 8; ++i)
+        if (f.vcd_lo & (2u << i)) add({Step::kTexMtx, 0, 0, 0, i, 0, 0}), pl.has |= kHasTexMatrix0 << i;
+    const unsigned pos_how = (f.vcd_lo >> 9) & 3;
+    if (pos_how == 0) rt::fatal(nullptr, "a vertex format without a position");
+    add({Step::kPos, uint8_t(pos_how), uint8_t(f.pos_fmt), uint8_t(f.pos_n), 0, uint8_t(component_size(f.pos_fmt)), f.pos_scale});
+    if (const unsigned how = (f.vcd_lo >> 11) & 3) {
+        if (how != 1 && f.nbt && f.nbt3) pl.usable = false;
+        add({Step::kNormal, uint8_t(how), uint8_t(f.nrm_fmt), uint8_t(f.nbt ? 3 : 1), 0, uint8_t(component_size(f.nrm_fmt)), 0});
+        pl.has |= kHasNormal | (f.nbt ? kHasTangent | kHasBinormal : 0);
+    }
+    for (uint8_t c = 0; c < 2; ++c)
+        if (const unsigned how = (f.vcd_lo >> (13 + 2 * c)) & 3) {
+            add({Step::kColor, uint8_t(how), uint8_t(f.col_fmt[c]), 0, c, uint8_t(color_size(f.col_fmt[c])), 0});
+            pl.has |= kHasColor0 << c;
+        }
+    for (uint8_t t = 0; t < 8; ++t)
+        if (const unsigned how = (f.vcd_hi >> (2 * t)) & 3) {
+            add({Step::kUv, uint8_t(how), uint8_t(f.tc_fmt[t]), uint8_t(f.tc_n[t]), t, uint8_t(component_size(f.tc_fmt[t])), f.tc_scale[t]});
+            pl.has |= kHasUv0 << t;
+        }
+    return pl;
+}
+
+// One vertex by its plan; returns the bytes it took.
+size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const uint8_t* p, Vertex& v) {
+    const uint8_t* const start = p;
+    uint8_t mtx[9];
+    std::memcpy(mtx, pl.mtx, 9);
+    std::memset(v.uv, 0, sizeof v.uv);
+    v.pos[2] = 0;
+    uint8_t col[2][4] = {{255, 255, 255, 255}, {255, 255, 255, 255}};
+    const auto fetch = [&](unsigned how, unsigned array, uint32_t bytes) -> const uint8_t* {
+        if (how == 1) {
+            const uint8_t* d = p;
+            p += bytes;
+            return d;
+        }
+        uint32_t index;
+        if (how == 2) index = *p++;
+        else index = be16(p), p += 2;
+        const Array& a = f.arrays[array];
+        if (a.any && index <= a.last) [[likely]]
+            return a.host + size_t(index) * a.stride;
+        return array_data(r, array, index, bytes);  // reports it
+    };
+    bool normal = false;
+    for (unsigned i = 0; i < pl.count; ++i) {
+        const Step& st = pl.steps[i];
+        switch (st.kind) {
+            case Step::kPosMtx: mtx[0] = *p++ & 63; break;
+            case Step::kTexMtx: mtx[1 + st.slot] = *p++ & 63; break;
+            case Step::kPos: {
+                const uint8_t* d = fetch(st.how, 0, st.cs * st.n);
+                if (st.fmt == 4) {  // float, the common case
+                    for (unsigned k = 0; k < st.n; ++k) v.pos[k] = as_float(be32(d + 4 * k));
+                } else {
+                    for (unsigned k = 0; k < st.n; ++k) v.pos[k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
+                }
+                break;
+            }
+            case Step::kNormal: {
+                const uint8_t* d = fetch(st.how, 1, st.cs * 3 * st.n);
+                float* dst[3] = {v.normal, v.tangent, v.binormal};
+                for (unsigned k = 0; k < st.n; ++k)
+                    for (unsigned j = 0; j < 3; ++j) dst[k][j] = normal_component(d + (3 * k + j) * st.cs, st.fmt);
+                normal = true;
+                std::memcpy(g_last_normal, v.normal, 12);
+                if (st.n == 3) std::memcpy(g_last_tangent, v.tangent, 12), std::memcpy(g_last_binormal, v.binormal, 12);
+                break;
+            }
+            case Step::kColor: read_color(fetch(st.how, 2 + st.slot, st.cs), st.fmt, col[st.slot]); break;
+            case Step::kUv: {
+                const uint8_t* d = fetch(st.how, 4 + st.slot, st.cs * st.n);
+                for (unsigned k = 0; k < st.n; ++k) v.uv[st.slot][k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
+                break;
+            }
+        }
+    }
+    if (!normal) std::memcpy(v.normal, g_last_normal, 12);
+    if (!(pl.has & kHasTangent)) std::memcpy(v.tangent, g_last_tangent, 12), std::memcpy(v.binormal, g_last_binormal, 12);
+    if ((pl.has & kHasColor0) && !(pl.has & kHasColor1)) std::memcpy(col[1], col[0], 4);
+    if (!(pl.has & kHasColor0) && (pl.has & kHasColor1)) std::memcpy(col[0], col[1], 4);
+    std::memcpy(v.color0, col[0], 4);
+    std::memcpy(v.color1, col[1], 4);
     v.matrices[0] = mtx[0] | (uint32_t(mtx[1]) << 8) | (uint32_t(mtx[2]) << 16) | (uint32_t(mtx[3]) << 24);
     v.matrices[1] = mtx[4] | (uint32_t(mtx[5]) << 8) | (uint32_t(mtx[6]) << 16) | (uint32_t(mtx[7]) << 24);
     v.matrices[2] = mtx[8];
@@ -493,6 +642,23 @@ void submit(std::unique_ptr<Frame> frame) {
     g_queue_cv.notify_all();
 }
 
+static std::vector<std::unique_ptr<Frame>> g_spare_frames;  // drawn, to reuse (under g_queue_lock)
+
+void recycle_frame(std::unique_ptr<Frame> frame) {
+    if (!frame) return;
+    frame->clear();
+    std::lock_guard l(g_queue_lock);
+    if (g_spare_frames.size() < 3) g_spare_frames.push_back(std::move(frame));
+}
+
+static std::unique_ptr<Frame> spare_frame() {
+    std::lock_guard l(g_queue_lock);
+    if (g_spare_frames.empty()) return std::make_unique<Frame>();
+    auto f = std::move(g_spare_frames.back());
+    g_spare_frames.pop_back();
+    return f;
+}
+
 std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
     std::unique_lock l(g_queue_lock);
     if (!g_queue_cv.wait_for(l, std::chrono::milliseconds(timeout_ms), [] { return !g_queue.empty(); })) return nullptr;
@@ -523,10 +689,44 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     if (count == 0) return;
     Frame& f = *g_frame;
     const Format fmt = format_of(r, opcode & 7);
-    const uint32_t first = uint32_t(f.vertices.size());
     uint32_t has = 0;
-    f.vertices.resize(first + count);
-    for (uint32_t i = 0; i < count; ++i) data += read_vertex(r, fmt, data, f.vertices[first + i], has);
+    thread_local std::vector<Vertex> decoded;
+    decoded.resize(count);
+    const Plan plan = plan_of(r, fmt);
+    if (plan.usable) {
+        has = plan.has;
+        for (uint32_t i = 0; i < count; ++i) data += decode_vertex(r, fmt, plan, data, decoded[i]);
+    } else {
+        for (uint32_t i = 0; i < count; ++i) data += read_vertex(r, fmt, data, decoded[i], has);
+    }
+    // The compact layout when nothing needs the rest: no tangents or binormals
+    // in the format, and none sent before (emboss texgen reads the last ones),
+    // and no texture coordinates past the second.
+    constexpr uint32_t kBig = kHasTangent | kHasBinormal | (0x3Fu * (kHasUv0 << 2));
+    static constexpr float kZero3[3] = {};
+    static const bool force_full = [] {  // PUNCHOUT_FULL_VERTICES=1: always the full layout (tests both)
+        const char* e = std::getenv("PUNCHOUT_FULL_VERTICES");
+        return e && *e && *e != '0';
+    }();
+    const bool small = !force_full && !(has & kBig) && std::memcmp(g_last_tangent, kZero3, 12) == 0 && std::memcmp(g_last_binormal, kZero3, 12) == 0;
+    uint32_t first;
+    if (small) {
+        first = uint32_t(f.small.size());
+        f.small.resize(first + count);
+        for (uint32_t i = 0; i < count; ++i) {
+            const Vertex& v = decoded[i];
+            SmallVertex& o = f.small[first + i];
+            std::memcpy(o.pos, v.pos, 12);
+            std::memcpy(o.normal, v.normal, 12);
+            std::memcpy(o.color0, v.color0, 4);
+            std::memcpy(o.color1, v.color1, 4);
+            std::memcpy(o.uv, v.uv, 16);
+            std::memcpy(o.matrices, v.matrices, 12);
+        }
+    } else {
+        first = uint32_t(f.vertices.size());
+        f.vertices.insert(f.vertices.end(), decoded.begin(), decoded.end());
+    }
     if (g_dirty) {
         f.states.emplace_back();
         build_state(r, f.states.back());
@@ -570,6 +770,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     if (d.index_count == 0) return;
     bool alpha_target;
     d.pipeline = pipeline_key(r.bp, alpha_target);
+    d.pipeline.small_vertices = small;
     d.shape = shape_id(r.bp);
     f.alpha_target = alpha_target;
     d.pipeline.topology = type <= 4 ? 0 : type <= 6 ? 1 : 2;
@@ -654,7 +855,7 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
         textures_end_frame(f);
         g_stats.frames.fetch_add(1, std::memory_order_relaxed);
         submit(std::move(g_frame));
-        g_frame = std::make_unique<Frame>();
+        g_frame = spare_frame();
         g_dirty = true;
     }
 }

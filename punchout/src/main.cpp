@@ -220,7 +220,10 @@ int main(int argc, char** argv) {
         if (specialize_from >= 0) renderer->set_specialization(punchout::frame_count() / 60.0 >= specialize_from);
         // Draw what the guest recorded, then show what VI shows.
         for (int i = 0; i < 2; ++i)  // what's queued (two at most), then on to showing
-            if (auto f = punchout::gx::next_frame(i == 0 ? 4 : 0)) renderer->render(*f);
+            if (auto f = punchout::gx::next_frame(i == 0 ? 4 : 0)) {
+                renderer->render(*f);
+                punchout::gx::recycle_frame(std::move(f));
+            }
             else break;
         uint32_t xfb, w, h;
         if (!punchout::take_xfb(&sequence, 0, xfb, w, h)) continue;

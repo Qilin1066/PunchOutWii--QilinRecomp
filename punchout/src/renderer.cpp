@@ -181,6 +181,7 @@ struct Renderer::Impl {
     std::filesystem::path cache_path;
     size_t cache_saved_at = 0;  // specialised pipelines when the cache was last written
     uint64_t draws_specialized = 0, draws_total = 0;
+    VkDeviceSize small_at = 0, zeros_at = 0;  // this frame's compact vertices and zeros, in the vertex buffer
     double spec_ms = 0;      // time the worker spent compiling (under spec_lock)
     uint64_t spec_count = 0;
     std::map<unsigned, VkPipeline> clear_pipelines;  // colour mask | depth write << 4
@@ -350,11 +351,13 @@ struct Renderer::Impl {
 
     VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, bool vertices, VkPrimitiveTopology topology,
                              const VkPipelineColorBlendAttachmentState& blend, bool depth, bool depth_dynamic, int logic_op = -1,
-                             bool line_width_dynamic = false, const VkSpecializationInfo* fs_constants = nullptr) {
+                             bool line_width_dynamic = false, const VkSpecializationInfo* fs_constants = nullptr,
+                             bool small_vertices = false) {
         const VkPipelineShaderStageCreateInfo stages[2] = {
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr},
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", fs_constants}};
-        VkVertexInputBindingDescription bind{0, sizeof(gx::Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        VkVertexInputBindingDescription binds[2] = {{0, sizeof(gx::Vertex), VK_VERTEX_INPUT_RATE_VERTEX},
+                                                    {1, 0, VK_VERTEX_INPUT_RATE_VERTEX}};  // binding 1: zeros, stride 0
         std::vector<VkVertexInputAttributeDescription> attrs = {
             {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(gx::Vertex, pos)},
             {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(gx::Vertex, normal)},
@@ -366,10 +369,25 @@ struct Renderer::Impl {
         for (uint32_t i = 0; i < 8; ++i)
             attrs.push_back({6 + i, 0, VK_FORMAT_R32G32_SFLOAT, uint32_t(offsetof(gx::Vertex, uv) + 8 * i)});
         attrs.push_back({14, 0, VK_FORMAT_R32G32B32_UINT, offsetof(gx::Vertex, matrices)});
+        if (small_vertices) {  // gx::SmallVertex; what it lacks reads zeros
+            binds[0].stride = sizeof(gx::SmallVertex);
+            attrs = {
+                {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(gx::SmallVertex, pos)},
+                {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(gx::SmallVertex, normal)},
+                {2, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
+                {3, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
+                {4, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(gx::SmallVertex, color0)},
+                {5, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(gx::SmallVertex, color1)},
+                {6, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(gx::SmallVertex, uv)},
+                {7, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(gx::SmallVertex, uv) + 8},
+            };
+            for (uint32_t i = 2; i < 8; ++i) attrs.push_back({6 + i, 1, VK_FORMAT_R32G32_SFLOAT, 0});
+            attrs.push_back({14, 0, VK_FORMAT_R32G32B32_UINT, offsetof(gx::SmallVertex, matrices)});
+        }
         VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         if (vertices) {
-            vi.vertexBindingDescriptionCount = 1;
-            vi.pVertexBindingDescriptions = &bind;
+            vi.vertexBindingDescriptionCount = small_vertices ? 2 : 1;
+            vi.pVertexBindingDescriptions = binds;
             vi.vertexAttributeDescriptionCount = uint32_t(attrs.size());
             vi.pVertexAttributeDescriptions = attrs.data();
         }
@@ -466,7 +484,7 @@ struct Renderer::Impl {
         }
         const VkShaderModule fs = shape ? gx_frag_stages[((*shape)[0] >> 10) & 15] : k.depth_out ? gx_frag_depth : gx_frag;
         return make_pipeline(gx_vert, fs, gx_layout, true, kTopology[k.topology], b, true, true, logic,
-                             k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr);
+                             k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0);
     }
 
     // The pipeline for a draw: specialised if ready, else the ubershader's
@@ -796,10 +814,17 @@ struct Renderer::Impl {
         gx::recorder_stats().gpu_wait_ns.fetch_add(gx::now_ns() - w0, std::memory_order_relaxed);
         recycle(s);
         check(vkResetDescriptorPool(gpu.device, s.descriptors, 0), "vkResetDescriptorPool");
-        ensure(s.vertices, std::max<size_t>(1, f.vertices.size()) * sizeof(gx::Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        // One buffer: the full vertices, the compact ones, then zeros for the
+        // attributes the compact layout lacks.
+        const size_t full_bytes = f.vertices.size() * sizeof(gx::Vertex), small_bytes = f.small.size() * sizeof(gx::SmallVertex);
+        small_at = full_bytes;
+        zeros_at = full_bytes + small_bytes;
+        ensure(s.vertices, zeros_at + 64, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         ensure(s.indices, std::max<size_t>(1, f.indices.size()) * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
         ensure(s.states, std::max<size_t>(1, f.states.size()) * sizeof(gx::State), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        std::memcpy(s.vertices.mapped, f.vertices.data(), f.vertices.size() * sizeof(gx::Vertex));
+        std::memcpy(s.vertices.mapped, f.vertices.data(), full_bytes);
+        std::memcpy(static_cast<uint8_t*>(s.vertices.mapped) + small_at, f.small.data(), small_bytes);
+        std::memset(static_cast<uint8_t*>(s.vertices.mapped) + zeros_at, 0, 64);
         std::memcpy(s.indices.mapped, f.indices.data(), f.indices.size() * 4);
         std::memcpy(s.states.mapped, f.states.data(), f.states.size() * sizeof(gx::State));
 
@@ -822,11 +847,11 @@ struct Renderer::Impl {
         vkUpdateDescriptorSets(gpu.device, 1, &wr, 0, nullptr);
 
         begin_efb(cmd);
-        VkDeviceSize zero = 0;
         VkPipeline bound = VK_NULL_HANDLE;
         std::map<std::vector<uint64_t>, VkDescriptorSet> texture_sets;
         VkDescriptorSet bound_textures = VK_NULL_HANDLE;
         bool need_bind = true;
+        uint8_t bound_small = 0;
         for (const gx::Packet& pk : f.packets) {
             if (pk.kind == gx::Packet::kCopy) {
                 copy(cmd, s, f.copies[pk.index]);
@@ -842,8 +867,13 @@ struct Renderer::Impl {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
                 bound = p;
             }
+            if (need_bind || d.pipeline.small_vertices != bound_small) {
+                const VkBuffer buffers[2] = {s.vertices.buffer, s.vertices.buffer};
+                const VkDeviceSize offsets[2] = {d.pipeline.small_vertices ? small_at : 0, zeros_at};
+                vkCmdBindVertexBuffers(cmd, 0, 2, buffers, offsets);
+                bound_small = d.pipeline.small_vertices;
+            }
             if (need_bind) {
-                vkCmdBindVertexBuffers(cmd, 0, 1, &s.vertices.buffer, &zero);
                 vkCmdBindIndexBuffer(cmd, s.indices.buffer, 0, VK_INDEX_TYPE_UINT32);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gx_layout, 0, 1, &states_set, 0, nullptr);
                 need_bind = false;

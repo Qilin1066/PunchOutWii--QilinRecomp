@@ -11,6 +11,15 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-19
+The recorder's CPU time per fight frame halved: 26 ms to 13 ms (on this session's Xeon core; a Raspberry Pi 4 core is roughly 3x slower).
+
+### Changed
+- **A compact vertex layout.** Draws without tangents, binormals or more than two texture coordinates (and none sent before: emboss texgen reads the last) store 60-byte vertices instead of 132, so less to write, upload and fetch. The renderer feeds the attributes they lack from a stride-0 binding of zeros, which is what the shader sees anyway. `PUNCHOUT_FULL_VERTICES=1` forces the full layout; the render test runs both ways (a planted bug in the compact path fails it).
+- **Vertex formats are compiled to steps once per primitive**, and indexed arrays resolved to a host pointer and a bound, so a vertex runs only its format's attributes (23% fewer instructions in a decode benchmark).
+- **Drawn frames are reused.** A fight frame's vectors hold 10-20 MB; they were allocated fresh each frame and regrown, with page faults and copies. The renderer now hands frames back (`recycle_frame`) and the recorder clears and refills them.
+- **`load_single`** keeps the rare denormal case out of line, so the common path inlines into the lifted code.
+
 ## [0.15.0] - 2026-11-19
 Efficiency for weak hardware: pixel shaders specialised to each draw, and no GPU image churn in fights.
 

@@ -27,6 +27,19 @@ struct Vertex {
 };
 static_assert(sizeof(Vertex) == 132);
 
+// The compact layout for the common draw (no tangents or binormals, at most
+// two texture coordinates): less than half the bytes to write, upload and
+// fetch. The renderer feeds the attributes it lacks from zeros, which is
+// what the shader would see anyway (renderer.cpp, kSmallVertices).
+struct SmallVertex {
+    float pos[3];
+    float normal[3];
+    uint8_t color0[4], color1[4];
+    float uv[2][2];
+    uint32_t matrices[3];
+};
+static_assert(sizeof(SmallVertex) == 60);
+
 // Which attributes the vertex format had (the shaders' lighting and texgen
 // rules depend on it).
 enum Has : uint32_t {
@@ -73,6 +86,7 @@ struct PipelineKey {
     uint8_t write_mask = 0xF;  // RGBA
     uint8_t logic = 0;        // logic op + 1, or 0 (approximated where the GPU has none)
     uint8_t depth_out = 0;    // the shader writes depth: Z textures with the Z test after texturing
+    uint8_t small_vertices = 0;  // the draw's vertices are SmallVertex (Frame::small)
     bool operator==(const PipelineKey&) const = default;
 };
 
@@ -156,6 +170,7 @@ struct Packet {
 // One frame: everything from one XFB copy to the next.
 struct Frame {
     std::vector<Vertex> vertices;
+    std::vector<SmallVertex> small;  // draws with PipelineKey::small_vertices index these
     std::vector<uint32_t> indices;
     std::vector<State> states;
     std::vector<Draw> draws;
@@ -164,6 +179,13 @@ struct Frame {
     std::vector<Texture> textures;  // new this frame
     std::vector<int32_t> released;  // texture ids no longer used
     bool alpha_target = true;       // the EFB has alpha (RGBA6_Z24)
+    // Empty again, keeping the vectors' capacity (recycle_frame). A new
+    // member must be reset here too.
+    void clear() {
+        vertices.clear(), small.clear(), indices.clear(), states.clear(), draws.clear(), copies.clear(), packets.clear();
+        textures.clear(), released.clear();
+        alpha_target = true;
+    }
 };
 
 // Hand a recorded frame to the renderer (it may wait while the renderer is
@@ -171,6 +193,10 @@ struct Frame {
 void submit(std::unique_ptr<Frame> frame);
 // The renderer's side: the next frame, or null after `timeout_ms`.
 std::unique_ptr<Frame> next_frame(unsigned timeout_ms);
+// Give a drawn frame back, so the recorder reuses its memory: a fight frame's
+// vectors hold 10-20 MB, which allocated fresh each frame cost page faults
+// and copies as they grew.
+void recycle_frame(std::unique_ptr<Frame> frame);
 // The renderer is there to take frames (else they're dropped: --headless).
 void set_rendering(bool on);
 

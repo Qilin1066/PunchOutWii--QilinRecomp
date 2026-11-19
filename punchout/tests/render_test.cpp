@@ -164,7 +164,10 @@ struct Target {
         const uint32_t cmd = 1u << 14;
         g.BP(0x52, cmd);
         gx::record_copy(g.regs(), cmd);  // ends the frame
-        while (auto f = gx::next_frame(0)) renderer.render(*f);
+        while (auto f = gx::next_frame(0)) {
+            renderer.render(*f);
+            gx::recycle_frame(std::move(f));
+        }
         vkDeviceWaitIdle(gpu.device);
         VkImage image;
         uint32_t w, h;
