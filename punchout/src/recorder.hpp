@@ -21,7 +21,8 @@ void record_primitive(const Registers& r, uint8_t opcode, const uint8_t* data, u
 // XF, BP or CP state changed: the next draw snapshots it again.
 void state_changed();
 // A BP register was written (the TEV colour registers latch by which half is written).
-void bp_written(uint32_t reg, uint32_t value);
+// `changed`: the value differs from before (else only commands it triggers matter).
+void bp_written(uint32_t reg, uint32_t value, bool changed = true);
 // BP 0x52: an EFB copy (to a texture, or to the external frame buffer, which
 // ends the frame).
 void record_copy(const Registers& r, uint32_t command);

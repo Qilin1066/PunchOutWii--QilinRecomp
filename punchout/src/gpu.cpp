@@ -168,6 +168,7 @@ void pe_token(uint16_t token, bool interrupt) {
 
 void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
     // A BP write is masked by the mask register (0xFE), which then resets.
+    const uint32_t before = g_bp[reg];
     if (reg != 0xFE) {
         const uint32_t mask = g_bp[0xFE] ? g_bp[0xFE] : 0xFFFFFFu;
         g_bp[reg] = (g_bp[reg] & ~mask) | (value & mask);
@@ -176,7 +177,7 @@ void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
         g_bp[0xFE] = value;
         return;
     }
-    gx::bp_written(reg, g_bp[reg]);
+    gx::bp_written(reg, g_bp[reg], g_bp[reg] != before);
     switch (reg) {
     case 0x45: pe_finish(); break;                                  // draw done
     case 0x47: pe_token(static_cast<uint16_t>(value), false); break;  // token
@@ -290,6 +291,66 @@ DffCapture* g_dff = [] () -> DffCapture* {
     return d;
 }();
 
+}  // namespace
+
+int bench_recording(const char* dff_path, unsigned times) {
+    std::vector<uint8_t> file;
+    if (FILE* f = std::fopen(dff_path, "rb")) {
+        uint8_t buf[1 << 16];
+        for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) file.insert(file.end(), buf, buf + n);
+        std::fclose(f);
+    }
+    const auto u32 = [&](uint64_t at) { uint32_t v = 0; if (at + 4 <= file.size()) std::memcpy(&v, file.data() + at, 4); return v; };
+    const auto u64 = [&](uint64_t at) { uint64_t v = 0; if (at + 8 <= file.size()) std::memcpy(&v, file.data() + at, 8); return v; };
+    if (file.size() < 128 || u32(0) != 0x0d01f1f0u) rt::fatal(nullptr, "--bench-record: %s isn't a FIFO log", dff_path);
+    const uint64_t bp_at = u64(12), cp_at = u64(24), xfm_at = u64(36), xfr_at = u64(48), frame_at = u64(60);
+    const uint64_t fifo_at = u64(frame_at), upd_at = u64(frame_at + 20);
+    const uint32_t fifo_size = u32(frame_at + 8), updates = u32(frame_at + 28);
+    if (fifo_at + fifo_size > file.size()) rt::fatal(nullptr, "--bench-record: %s is cut short", dff_path);
+    // The memory as the frame starts, then the later updates (their order in
+    // the frame doesn't matter for timing).
+    for (uint32_t i = 0; i < updates; ++i) {
+        const uint64_t e = upd_at + 24ull * i;
+        const uint32_t address = u32(e + 4), size = u32(e + 16);
+        const uint64_t data = u64(e + 8);
+        if (data + size > file.size()) rt::fatal(nullptr, "--bench-record: %s is cut short", dff_path);
+        const bool mem1 = address < 0x01800000u && address + size <= 0x01800000u;
+        const bool mem2 = address >= 0x10000000u && address + size <= 0x14000000u;
+        if (mem1 || mem2) std::memcpy(rt::guest_ptr(0x80000000u | address), file.data() + data, size);
+    }
+    for (int i = 0; i < 256; ++i) g_bp[size_t(i)] = u32(bp_at + 4ull * i), g_cpmem[size_t(i)] = u32(cp_at + 4ull * i);
+    for (int i = 0; i < 4096; ++i) g_xf[size_t(i)] = u32(xfm_at + 4ull * i);
+    for (int i = 0; i < 88; ++i) g_xf[0x1000 + size_t(i)] = u32(xfr_at + 4ull * i);
+    const std::vector<uint8_t> commands(file.begin() + long(fifo_at), file.begin() + long(fifo_at + fifo_size));
+    Cpu c = rt::new_cpu();
+    gx::set_rendering(true);  // frames are queued (and taken back below), as when drawing
+    std::vector<double> ms;
+    uint64_t draws = 0, vertices = 0;
+    for (unsigned i = 0; i < times + 5; ++i) {  // five to warm the caches up, not counted
+        for (int b = 0; b < 256; ++b) g_bp[size_t(b)] = u32(bp_at + 4ull * b), g_cpmem[size_t(b)] = u32(cp_at + 4ull * b);
+        gx::state_changed();
+        const uint64_t t0 = gx::now_ns();
+        size_t used = 0;
+        decode(c, commands.data(), commands.size(), used, false);
+        const uint64_t t1 = gx::now_ns();
+        while (auto f = gx::next_frame(0)) {
+            if (i >= 5) draws += f->draws.size(), vertices += f->vertices.size() + f->small.size();
+            gx::recycle_frame(std::move(f));
+        }
+        if (i >= 5) ms.push_back(double(t1 - t0) / 1e6);
+    }
+    std::sort(ms.begin(), ms.end());
+    double sum = 0;
+    for (double v : ms) sum += v;
+    std::printf("recording %s, %u times: median %.3f ms, fastest %.3f, slowest %.3f, mean %.3f; "
+                "%llu draws and %llu vertices a frame\n",
+                dff_path, times, ms[ms.size() / 2], ms.front(), ms.back(), sum / double(ms.size()),
+                static_cast<unsigned long long>(draws / times), static_cast<unsigned long long>(vertices / times));
+    return 0;
+}
+
+namespace {
+
 void dff_write(const DffCapture& d) {
     FILE* f = std::fopen(d.path.c_str(), "wb");
     if (!f) rt::fatal(nullptr, "PUNCHOUT_DFF: can't write %s", d.path.c_str());
@@ -378,17 +439,22 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             n = 1;
         } else if (op == 0x08) {  // LOAD_CP_REG: register, value
             if (left < 6) return;
-            g_cpmem[p[1]] = be32(p + 2);
-            g_cp_writes[g_cp_write_count++ % 8] = {p[1], be32(p + 2), in_display_list};
-            gx::state_changed();
+            const uint32_t v = be32(p + 2);
+            if (g_cpmem[p[1]] != v) g_cpmem[p[1]] = v, gx::state_changed();  // the same value again changes nothing
+            g_cp_writes[g_cp_write_count++ % 8] = {p[1], v, in_display_list};
             n = 6;
         } else if (op == 0x10) {  // LOAD_XF_REG: (count - 1) << 16 | address, then the values
             if (left < 5) return;
             const uint32_t h = be32(p + 1), count = ((h >> 16) & 0xF) + 1, addr = h & 0xFFFF;
             if (left < 5 + 4 * count) return;
+            bool changed = false;
             for (uint32_t i = 0; i < count; ++i)
-                if (addr + i < g_xf.size()) g_xf[addr + i] = be32(p + 5 + 4 * i);
-            gx::state_changed();
+                if (addr + i < g_xf.size()) {
+                    const uint32_t v = be32(p + 5 + 4 * i);
+                    changed |= g_xf[addr + i] != v;
+                    g_xf[addr + i] = v;
+                }
+            if (changed) gx::state_changed();  // the same values again change nothing
             n = 5 + 4 * count;
         } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {  // LOAD_INDX_A-D
             if (left < 5) return;
@@ -401,9 +467,14 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                 rt::fatal(&c, "GX indexed load from %08X is outside MEM1 and MEM2", src);
             if (g_dff_recording) gx::dff_use_memory(src, 4 * words);
             const uint8_t* m = rt::guest_ptr(0x80000000u | src);
+            bool changed = false;
             for (uint32_t i = 0; i < words; ++i)
-                if (addr + i < g_xf.size()) g_xf[addr + i] = be32(m + 4 * i);
-            gx::state_changed();
+                if (addr + i < g_xf.size()) {
+                    const uint32_t word = be32(m + 4 * i);
+                    changed |= g_xf[addr + i] != word;
+                    g_xf[addr + i] = word;
+                }
+            if (changed) gx::state_changed();
             n = 5;
         } else if (op == 0x40) {  // CALL_DL: address, size
             if (left < 9) return;

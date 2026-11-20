@@ -213,6 +213,21 @@ struct CopyEntry {
     uint64_t used;
 };
 std::map<uint32_t, CopyEntry> g_copies;
+
+// The last answer for each texture map: draws mostly reuse their textures,
+// and the answer can only change with the map's registers, or when what
+// texture_for reads may have changed: a cache invalidation (BP 0x66), a
+// palette load, an EFB copy, a new frame. Any of those clears it.
+struct Memo {
+    uint32_t regs[5];  // mode0, mode1, image0, image3, tlut
+    int32_t id;
+    uint32_t w, h;
+    bool valid;
+};
+Memo g_memo[8];
+void forget_memo() {
+    for (Memo& m : g_memo) m.valid = false;
+}
 int32_t g_next_id = 1;
 uint64_t g_frame = 0;
 
@@ -223,9 +238,13 @@ uint64_t ram_hash(uint32_t address, uint32_t w, uint32_t h) {
 
 }  // namespace
 
+static int32_t texture_lookup(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w, uint32_t& h, uint32_t mode0,
+                              uint32_t mode1, uint32_t image0, uint32_t image3, uint32_t tlut);
+
 void load_tlut(uint32_t source, uint32_t tmem_address, uint32_t bytes) {
     if (tmem_address + bytes > sizeof g_tmem) rt::fatal(nullptr, "a palette load runs past TMEM (%u bytes at %X)", bytes, tmem_address);
     std::memcpy(g_tmem + tmem_address, guest(source, bytes), bytes);
+    forget_memo();
     if (g_dff_use) [[unlikely]] dff_use_memory(source, bytes);
 }
 
@@ -234,6 +253,20 @@ int32_t texture_for(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w,
     const uint32_t mode0 = bp[(set ? 0xA0 : 0x80) + i], mode1 = bp[(set ? 0xA4 : 0x84) + i];
     const uint32_t image0 = bp[(set ? 0xA8 : 0x88) + i], image3 = bp[(set ? 0xB4 : 0x94) + i];
     const uint32_t tlut = bp[(set ? 0xB8 : 0x98) + i];
+    const uint32_t regs[5] = {mode0, mode1, image0, image3, tlut};
+    Memo& memo = g_memo[map & 7];
+    if (memo.valid && std::memcmp(memo.regs, regs, sizeof regs) == 0) {
+        w = memo.w, h = memo.h;
+        return memo.id;
+    }
+    const int32_t id = texture_lookup(bp, map, frame, w, h, mode0, mode1, image0, image3, tlut);
+    std::memcpy(memo.regs, regs, sizeof regs);
+    memo.id = id, memo.w = w, memo.h = h, memo.valid = true;
+    return id;
+}
+
+static int32_t texture_lookup(const uint32_t*, unsigned, Frame& frame, uint32_t& w, uint32_t& h, uint32_t mode0, uint32_t mode1,
+                       uint32_t image0, uint32_t image3, uint32_t tlut) {
     const uint32_t address = (image3 & 0xFFFFFF) << 5;
     w = (image0 & 0x3FF) + 1;
     h = ((image0 >> 10) & 0x3FF) + 1;
@@ -302,17 +335,19 @@ int32_t texture_for(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w,
 }
 
 int32_t texture_from_copy(uint32_t address, uint32_t w, uint32_t h, Frame& frame) {
+    forget_memo();
     auto& e = g_copies[address & 0x1FFFFFFFu];
     if (e.id) frame.released.push_back(e.id);
     e = {g_next_id++, w, h, ram_hash(address, w, h), g_frame};
     return e.id;
 }
 
-void textures_invalidated() { g_hashed.clear(); }
+void textures_invalidated() { g_hashed.clear(), forget_memo(); }
 
 void textures_end_frame(Frame& frame) {
     ++g_frame;
     g_hashed.clear();
+    forget_memo();
     constexpr uint64_t kKeep = 600;  // ten seconds unused
     for (auto it = g_cache.begin(); it != g_cache.end();)
         if (g_frame - it->second.used > kKeep) {

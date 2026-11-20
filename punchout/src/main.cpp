@@ -237,6 +237,15 @@ int main(int argc, char** argv) {
     punchout::set_this_thread_priority(punchout::Priority::high);
     bool headless = false, offscreen = false;
     const char* folder = nullptr;
+    // --bench-record <file.dff> [times]: time the recorder on a captured frame (gpu.hpp).
+    const char* bench_dff = nullptr;
+    unsigned bench_times = 200;
+    if (argc >= 3 && std::strcmp(argv[1], "--bench-record") == 0) {
+        bench_dff = argv[2];
+        if (argc >= 4) bench_times = unsigned(std::max(1, std::atoi(argv[3])));
+        folder = argv[2];
+        argc = 1;  // nothing else to read
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--headless") == 0) headless = true;
         else if (std::strcmp(argv[i], "--offscreen") == 0) offscreen = true;
@@ -251,7 +260,7 @@ int main(int argc, char** argv) {
     // the run before. On Windows the console closes with the game, so after
     // a crash the file is what's left to read (or send).
     rt::install_crash_handler();
-    {
+    if (!bench_dff) {  // (a benchmark leaves the game's log alone)
         const std::filesystem::path dir = qilin::host::user_folder(), log = dir / "punchout.log";
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
@@ -274,6 +283,11 @@ int main(int argc, char** argv) {
     rt::provide(punchout::wpad_replacements());
     rt::provide(punchout::nand_replacements());
     punchout::init_hardware();
+    if (bench_dff) {  // then out at once: the GPU thread is waiting, and exit's destructors would wait for it
+        const int code = punchout::bench_recording(bench_dff, bench_times);
+        std::fflush(nullptr);
+        std::_Exit(code);
+    }
     punchout::load_game(folder);
 
     const std::filesystem::path data = qilin::host::user_folder();

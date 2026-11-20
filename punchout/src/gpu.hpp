@@ -15,5 +15,12 @@ void init_gpu();
 // What the decoder has seen, as of its last batch.
 Stats gpu_stats();
 
+// punchout --bench-record <file.dff> [times]: decode and record a frame
+// captured with PUNCHOUT_DFF that many times (default 200) and print how
+// long recording it takes (no window, no game run; RAM and registers from the
+// log). For measuring the recorder, the CPU's part of drawing. Returns the
+// exit code.
+int bench_recording(const char* dff_path, unsigned times);
+
 
 }  // namespace punchout

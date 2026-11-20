@@ -28,17 +28,20 @@ struct Vertex {
 static_assert(sizeof(Vertex) == 132);
 
 // The compact layout for the common draw (no tangents or binormals, at most
-// two texture coordinates): less than half the bytes to write, upload and
-// fetch. The renderer feeds the attributes it lacks from zeros, which is
-// what the shader would see anyway (renderer.cpp, kSmallVertices).
+// four texture coordinates): 58% of the bytes to write, upload and fetch.
+// The renderer feeds the attributes it lacks from zeros, which is what the
+// shader would see anyway (renderer.cpp). Four, not two: the game's models
+// mostly have three (the main menu: 88,000 of its 89,000 vertices a frame),
+// which the full layout's 132 bytes took before.
 struct SmallVertex {
     float pos[3];
     float normal[3];
     uint8_t color0[4], color1[4];
-    float uv[2][2];
+    float uv[4][2];
     uint32_t matrices[3];
 };
-static_assert(sizeof(SmallVertex) == 60);
+static_assert(sizeof(SmallVertex) == 76);
+constexpr unsigned kSmallUvs = 4;  // texture coordinates SmallVertex has
 
 // Which attributes the vertex format had (the shaders' lighting and texgen
 // rules depend on it).

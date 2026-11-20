@@ -130,6 +130,18 @@ struct SamplerKey {
     gx::Sampler s;
     bool operator<(const SamplerKey& o) const { return std::memcmp(&s, &o.s, sizeof s) < 0; }
 };
+// A draw's eight (view, sampler) pairs: its texture descriptor set's key.
+struct TextureSetKey {
+    std::array<uint64_t, 16> v;
+    bool operator==(const TextureSetKey&) const = default;
+};
+struct TextureSetHash {
+    size_t operator()(const TextureSetKey& k) const {
+        uint64_t h = 1469598103934665603ull;  // FNV-1a over the words
+        for (uint64_t w : k.v) h = (h ^ w) * 1099511628211ull;
+        return size_t(h ^ (h >> 32));
+    }
+};
 struct PipelineKey {
     gx::PipelineKey k;
     bool operator<(const PipelineKey& o) const { return std::memcmp(&k, &o.k, sizeof k) < 0; }
@@ -232,6 +244,7 @@ struct Renderer::Impl {
     std::map<unsigned, VkPipeline> clear_pipelines;  // colour mask | depth write << 4
     VkPipeline copy_pipeline = VK_NULL_HANDLE;
     std::map<SamplerKey, VkSampler> samplers;
+    VkSampler unused_sampler = VK_NULL_HANDLE;  // for texture slots a draw doesn't use (one of samplers)
     VkSampler efb_sampler = VK_NULL_HANDLE, efb_depth_sampler = VK_NULL_HANDLE;  // linear for colour, nearest for depth
 
     std::unordered_map<int32_t, Spare> textures;  // by id, with the usage they were made for
@@ -448,10 +461,10 @@ struct Renderer::Impl {
                 {3, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
                 {4, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(gx::SmallVertex, color0)},
                 {5, 0, VK_FORMAT_R8G8B8A8_UNORM, offsetof(gx::SmallVertex, color1)},
-                {6, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(gx::SmallVertex, uv)},
-                {7, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(gx::SmallVertex, uv) + 8},
             };
-            for (uint32_t i = 2; i < 8; ++i) attrs.push_back({6 + i, 1, VK_FORMAT_R32G32_SFLOAT, 0});
+            for (uint32_t i = 0; i < gx::kSmallUvs; ++i)
+                attrs.push_back({6 + i, 0, VK_FORMAT_R32G32_SFLOAT, uint32_t(offsetof(gx::SmallVertex, uv) + 8 * i)});
+            for (uint32_t i = gx::kSmallUvs; i < 8; ++i) attrs.push_back({6 + i, 1, VK_FORMAT_R32G32_SFLOAT, 0});
             attrs.push_back({14, 0, VK_FORMAT_R32G32B32_UINT, offsetof(gx::SmallVertex, matrices)});
         }
         VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
@@ -708,7 +721,34 @@ struct Renderer::Impl {
 
     // The pipeline for a draw: specialised if ready, else the ubershader's
     // while a worker compiles it.
+    // The last draw's answer, reused while nothing new was made: most draws
+    // share their neighbour's pipeline, and the maps compare whole keys.
+    struct LastPipeline {
+        gx::PipelineKey raw{};
+        uint32_t shape = ~0u;
+        uint64_t version = ~0ull;
+        VkPipeline p = VK_NULL_HANDLE;
+        bool specialized = false;
+    } last_pipeline;
+    uint64_t pipelines_version = 0;  // bumped whenever a pipeline is added to either map
+
     VkPipeline gx_pipeline(const gx::PipelineKey& raw, uint32_t shape) {
+        LastPipeline& lp = last_pipeline;
+        if (lp.version == pipelines_version && lp.shape == shape && std::memcmp(&lp.raw, &raw, sizeof raw) == 0 &&
+            specialize_on == lp_specialize_on) {
+            ++draws_total;
+            if (lp.specialized) ++draws_specialized;
+            return lp.p;
+        }
+        const uint64_t specialized_before = draws_specialized;
+        VkPipeline p = gx_pipeline_lookup(raw, shape);
+        lp = {raw, shape, pipelines_version, p, draws_specialized != specialized_before};
+        lp_specialize_on = specialize_on;
+        return p;
+    }
+    bool lp_specialize_on = true;
+
+    VkPipeline gx_pipeline_lookup(const gx::PipelineKey& raw, uint32_t shape) {
         ++draws_total;
         const gx::PipelineKey k = base_key(raw);
         if (specialize != Specialize::kOff && specialize_on && !k.depth_out) {  // depth-writing draws (rare) keep the ubershader
@@ -721,6 +761,7 @@ struct Renderer::Impl {
                 const gx::ShapeWords w = gx::shape_words(shape);
                 ++draws_specialized;
                 if (requested.insert(key).second) remember(false, raw, shape);
+                ++pipelines_version;
                 return specialized[key] = build_gx(k, &w);
             }
             if (requested.insert(key).second) {
@@ -736,6 +777,7 @@ struct Renderer::Impl {
             if (!p) {     // new to every run so far (or not reached yet): compile it here
                 const auto t0 = std::chrono::steady_clock::now();
                 p = build_gx(k, nullptr);
+                ++pipelines_version;
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 ++stalls, stall_ms += ms;
                 if (stalls <= 64)
@@ -781,6 +823,7 @@ struct Renderer::Impl {
     // Main thread: take what the workers finished.
     void take_done() {
         std::lock_guard lock(spec_lock);
+        if (!spec_done.empty() || !uber_done.empty()) ++pipelines_version;
         for (auto& [k, p] : spec_done) specialized[k] = p;
         spec_done.clear();
         for (auto& [k, p] : uber_done) {
@@ -1242,8 +1285,18 @@ struct Renderer::Impl {
         VkPipeline bound = VK_NULL_HANDLE;
         gx::PipelineKey blend_key{};  // the blend state last set (dynamic blend)
         bool blend_set = false;
-        std::map<std::vector<uint64_t>, VkDescriptorSet> texture_sets;
+        unused_sampler = sampler(gx::Sampler{});  // (samplers are remade when the anisotropy changes)
+        std::unordered_map<TextureSetKey, VkDescriptorSet, TextureSetHash> texture_sets;
         VkDescriptorSet bound_textures = VK_NULL_HANDLE;
+        // What the last draw set, so a draw that changes nothing records
+        // nothing (most draws share their neighbours' textures and state).
+        // Copies bind pipelines of their own: everything is set again after one.
+        bool same_valid = false;
+        int32_t last_textures[8];
+        gx::Sampler last_samplers[8];
+        VkViewport last_viewport{};
+        VkRect2D last_scissor{};
+        uint8_t last_cull = 0, last_depth_test = 0, last_depth_write = 0, last_depth_func = 0;
         bool need_bind = true;
         uint8_t bound_small = 0;
         // PUNCHOUT_PROBE=x,y (EFB pixels, at 1x): for the frame PUNCHOUT_DFF
@@ -1294,6 +1347,7 @@ struct Renderer::Impl {
                 copy(cmd, s, f.copies[pk.index]);
                 bound = VK_NULL_HANDLE;
                 blend_set = false;
+                same_valid = false;
                 bound_textures = VK_NULL_HANDLE;
                 need_bind = true;
                 continue;
@@ -1320,48 +1374,61 @@ struct Renderer::Impl {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gx_layout, 0, 1, &states_set, 0, nullptr);
                 need_bind = false;
             }
-            // The draw's textures, as a descriptor set (shared by draws with the same ones).
-            std::vector<uint64_t> key;
-            VkDescriptorImageInfo infos[8];
-            for (int m = 0; m < 8; ++m) {
-                auto it = d.textures[m] >= 0 ? textures.find(d.textures[m]) : textures.end();
-                const VkImageView view = it != textures.end() ? it->second.image.view : white.view;
-                const VkSampler smp = sampler(d.samplers[m]);
-                infos[m] = {smp, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-                key.push_back(reinterpret_cast<uint64_t>(view));
-                key.push_back(reinterpret_cast<uint64_t>(smp));
-            }
-            VkDescriptorSet& ts = texture_sets[key];
-            if (!ts) {
-                ts = allocate(s, textures_layout);
-                VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                w.dstSet = ts;
-                w.descriptorCount = 8;
-                w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                w.pImageInfo = infos;
-                vkUpdateDescriptorSets(gpu.device, 1, &w, 0, nullptr);
-            }
-            if (ts != bound_textures) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gx_layout, 1, 1, &ts, 0, nullptr);
-                bound_textures = ts;
+            // The draw's textures, as a descriptor set (shared by draws with the
+            // same ones). Unused slots get the white texture and one sampler, so
+            // they don't split sets.
+            if (!same_valid || std::memcmp(d.textures, last_textures, sizeof last_textures) != 0 ||
+                std::memcmp(d.samplers, last_samplers, sizeof last_samplers) != 0) {
+                TextureSetKey key;
+                VkDescriptorImageInfo infos[8];
+                for (int m = 0; m < 8; ++m) {
+                    VkImageView view = white.view;
+                    VkSampler smp = unused_sampler;
+                    if (d.textures[m] >= 0) {
+                        if (auto it = textures.find(d.textures[m]); it != textures.end()) view = it->second.image.view;
+                        smp = sampler(d.samplers[m]);
+                    }
+                    infos[m] = {smp, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                    key.v[2 * m] = reinterpret_cast<uint64_t>(view);
+                    key.v[2 * m + 1] = reinterpret_cast<uint64_t>(smp);
+                }
+                VkDescriptorSet& ts = texture_sets[key];
+                if (!ts) {
+                    ts = allocate(s, textures_layout);
+                    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                    w.dstSet = ts;
+                    w.descriptorCount = 8;
+                    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    w.pImageInfo = infos;
+                    vkUpdateDescriptorSets(gpu.device, 1, &w, 0, nullptr);
+                }
+                if (ts != bound_textures) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gx_layout, 1, 1, &ts, 0, nullptr);
+                    bound_textures = ts;
+                }
+                std::memcpy(last_textures, d.textures, sizeof last_textures);
+                std::memcpy(last_samplers, d.samplers, sizeof last_samplers);
             }
             const float sc = float(scale);
             VkViewport vp{d.viewport[0] * sc, d.viewport[1] * sc, d.viewport[2] * sc, d.viewport[3] * sc,
                           std::clamp(d.viewport[4], 0.0f, 1.0f), std::clamp(d.viewport[5], 0.0f, 1.0f)};
-            vkCmdSetViewport(cmd, 0, 1, &vp);
             VkRect2D r{{d.scissor[0] * int(scale), d.scissor[1] * int(scale)}, {uint32_t(d.scissor[2]) * scale, uint32_t(d.scissor[3]) * scale}};
             clamp_rect(r);
             if (r.extent.width == 0 || r.extent.height == 0) continue;
-            vkCmdSetScissor(cmd, 0, 1, &r);
-            vkCmdSetCullMode(cmd, VkCullModeFlags(d.cull));
-            vkCmdSetDepthTestEnable(cmd, d.depth_test);
-            vkCmdSetDepthWriteEnable(cmd, d.depth_write);
-            vkCmdSetDepthCompareOp(cmd, VkCompareOp(d.depth_func));
+            if (!same_valid || std::memcmp(&vp, &last_viewport, sizeof vp) != 0) vkCmdSetViewport(cmd, 0, 1, &vp), last_viewport = vp;
+            if (!same_valid || std::memcmp(&r, &last_scissor, sizeof r) != 0) vkCmdSetScissor(cmd, 0, 1, &r), last_scissor = r;
+            if (!same_valid || d.cull != last_cull) vkCmdSetCullMode(cmd, VkCullModeFlags(d.cull)), last_cull = d.cull;
+            if (!same_valid || d.depth_test != last_depth_test) vkCmdSetDepthTestEnable(cmd, d.depth_test), last_depth_test = d.depth_test;
+            if (!same_valid || d.depth_write != last_depth_write) vkCmdSetDepthWriteEnable(cmd, d.depth_write), last_depth_write = d.depth_write;
+            if (!same_valid || d.depth_func != last_depth_func)
+                vkCmdSetDepthCompareOp(cmd, VkCompareOp(d.depth_func)), last_depth_func = d.depth_func;
             // Lines and points: GX's widths are in sixths of an EFB pixel.
             float point = 1.0f;
             if (d.pipeline.topology == 1) {
                 const float width = float(d.line_width) / 6.0f * sc;
                 if (gpu.wide_lines) {
+                    // Always: only line pipelines have it dynamic, so another
+                    // pipeline in between forgets it (lines are rare).
                     vkCmdSetLineWidth(cmd, std::clamp(width, 1.0f, gpu.max_line_width));
                 } else if (d.line_width != 6) {
                     static bool said = false;
@@ -1380,6 +1447,7 @@ struct Renderer::Impl {
             if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
             vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
             vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
+            same_valid = true;
         }
         if (probing) probe(probe_i);
         vkCmdEndRendering(cmd);

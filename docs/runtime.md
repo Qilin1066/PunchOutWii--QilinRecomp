@@ -194,7 +194,9 @@ Two threads share the work. The game's thread records what the command stream as
   - `PUNCHOUT_POINTER="x,y"` holds the pointer at a point (−1 to 1, y up); `"x,y;x,y@40;x,y@52"` moves it at those times.
   - The save lives in the per-user folder's `nand/`; copying it aside and back makes a scripted run repeatable.
   - `PUNCHOUT_GPU_THREAD=0` decodes the command stream on the guest's thread instead of the GPU thread (v0.17.0; gpu.cpp explains the 16 KB queue).
-  - `PUNCHOUT_FULL_VERTICES=1` stores every vertex in the full 132-byte layout instead of the compact 60-byte one where it fits (v0.16.0).
+  - `PUNCHOUT_FULL_VERTICES=1` stores every vertex in the full 132-byte layout instead of the compact one where it fits (v0.16.0; 76 bytes and up to four texture coordinates since the recording work after v0.20.0).
+  - `PUNCHOUT_CHECK_DECODE=1` decodes every primitive both ways, an attribute at a time across its vertices (the way used) and a vertex at a time (the reference), and stops at the first byte that differs.
+  - `punchout --bench-record <file.dff> [times]` decodes and records a frame captured with `PUNCHOUT_DFF` that many times (default 200), without a window or the game running, and prints the median, fastest and slowest times and the draws and vertices: the recorder's cost, on its own. With `PUNCHOUT_PROFILE` (run it long enough for a 5 s write) it shows where that goes.
   - `PUNCHOUT_PROFILE=<file>` (Linux): a SIGPROF sampler, 1 kHz of CPU time, needing no perf or ptrace; `tools/analysis/profile_report.py <exe> <file>` names the hot functions.
   - `PUNCHOUT_SAVE_DIR=dir` keeps the settings and save there instead of the per-user folder.
 - **Comparing a frame with Dolphin:**

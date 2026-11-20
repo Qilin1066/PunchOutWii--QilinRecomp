@@ -54,7 +54,7 @@ struct Gx {
     gx::Registers regs() const { return {cp, xf, bp}; }
     void BP(uint32_t reg, uint32_t v) {
         bp[reg] = v;
-        gx::bp_written(reg, v);
+        gx::bp_written(reg, v, true);
     }
     void XF(uint32_t a, uint32_t v) {
         xf[a] = v;

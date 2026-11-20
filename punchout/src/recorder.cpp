@@ -60,7 +60,7 @@ uint16_t be16(const uint8_t* p) { return uint16_t((p[0] << 8) | p[1]); }
 uint32_t be32(const uint8_t* p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; }
 
 unsigned component_size(unsigned fmt) { return fmt <= 1 ? 1 : fmt <= 3 ? 2 : 4; }
-float component(const uint8_t* p, unsigned fmt, float scale, bool scale_bytes) {
+[[gnu::always_inline]] inline float component(const uint8_t* p, unsigned fmt, float scale, bool scale_bytes) {
     switch (fmt) {
         case 0: return scale_bytes ? p[0] * scale : p[0];
         case 1: return scale_bytes ? static_cast<int8_t>(p[0]) * scale : static_cast<int8_t>(p[0]);
@@ -69,7 +69,7 @@ float component(const uint8_t* p, unsigned fmt, float scale, bool scale_bytes) {
         default: return as_float(be32(p));
     }
 }
-float normal_component(const uint8_t* p, unsigned fmt) {
+[[gnu::always_inline]] inline float normal_component(const uint8_t* p, unsigned fmt) {
     switch (fmt) {  // fixed scales: the fraction is the type's
         case 0: return p[0] / 128.0f;
         case 1: return static_cast<int8_t>(p[0]) / 64.0f;
@@ -331,7 +331,7 @@ Plan plan_of(const Registers& r, const Format& f) {
 }
 
 // One vertex by its plan, straight into the frame's layout (Vertex, or
-// SmallVertex when the format has no tangents and at most two texture
+// SmallVertex when the format has no tangents and at most four texture
 // coordinates); returns the bytes it took.
 template <class V>
 size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const uint8_t* p, V& v) {
@@ -376,8 +376,13 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
             case Step::kNormal: {
                 const uint8_t* d = fetch(st.how, 1, st.cs * 3 * st.n);
                 float nbt[3][3];
-                for (unsigned k = 0; k < st.n; ++k)
-                    for (unsigned j = 0; j < 3; ++j) nbt[k][j] = normal_component(d + (3 * k + j) * st.cs, st.fmt);
+                if (st.fmt == 4) {  // float
+                    for (unsigned k = 0; k < st.n; ++k)
+                        for (unsigned j = 0; j < 3; ++j) nbt[k][j] = as_float(be32(d + 4 * (3 * k + j)));
+                } else {
+                    for (unsigned k = 0; k < st.n; ++k)
+                        for (unsigned j = 0; j < 3; ++j) nbt[k][j] = normal_component(d + (3 * k + j) * st.cs, st.fmt);
+                }
                 std::memcpy(v.normal, nbt[0], 12);
                 normal = true;
                 std::memcpy(g_last_normal, nbt[0], 12);
@@ -390,9 +395,13 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
             case Step::kColor: read_color(fetch(st.how, 2 + st.slot, st.cs), st.fmt, col[st.slot]); break;
             case Step::kUv: {
                 const uint8_t* d = fetch(st.how, 4 + st.slot, st.cs * st.n);
-                if (!kFull && st.slot >= 2) [[unlikely]]
+                if (!kFull && st.slot >= kSmallUvs) [[unlikely]]
                     rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
-                for (unsigned k = 0; k < st.n; ++k) v.uv[st.slot][k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
+                if (st.fmt == 4) {  // float
+                    for (unsigned k = 0; k < st.n; ++k) v.uv[st.slot][k] = as_float(be32(d + 4 * k));
+                } else {
+                    for (unsigned k = 0; k < st.n; ++k) v.uv[st.slot][k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
+                }
                 break;
             }
         }
@@ -408,6 +417,159 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
     v.matrices[1] = mtx[4] | (uint32_t(mtx[5]) << 8) | (uint32_t(mtx[6]) << 16) | (uint32_t(mtx[7]) << 24);
     v.matrices[2] = mtx[8];
     return size_t(p - start);
+}
+
+// A primitive's vertices by its plan, an attribute at a time across all of
+// them (decode_vertex's results, the same bytes): each inner loop has one
+// format and one way of fetching, rather than a switch per attribute per
+// vertex. Every vertex of a primitive has the same size, so each attribute
+// sits at the same offset in each. Returns the bytes the vertices took.
+template <class V>
+size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const uint8_t* data, uint32_t count, V* out) {
+    constexpr bool kFull = std::is_same_v<V, Vertex>;
+    // Each step's offset in a vertex, and the vertex's size.
+    unsigned at[24], size = 0;
+    for (unsigned i = 0; i < pl.count; ++i) {
+        const Step& st = pl.steps[i];
+        at[i] = size;
+        if (st.kind == Step::kPosMtx || st.kind == Step::kTexMtx) size += 1;
+        else if (st.how == 2) size += 1;
+        else if (st.how == 3) size += 2;
+        else size += st.kind == Step::kPos ? st.cs * st.n : st.kind == Step::kNormal ? st.cs * 3u * st.n
+                     : st.kind == Step::kColor ? st.cs : st.cs * st.n;
+    }
+    // The defaults for what the format doesn't give.
+    uint32_t m0 = 0, m1 = 0;
+    for (int k = 0; k < 4; ++k) m0 |= uint32_t(pl.mtx[k]) << (8 * k), m1 |= uint32_t(pl.mtx[4 + k]) << (8 * k);
+    for (uint32_t i = 0; i < count; ++i) {
+        V& v = out[i];
+        std::memset(v.uv, 0, sizeof v.uv);
+        v.pos[2] = 0;
+        std::memcpy(v.normal, g_last_normal, 12);
+        if constexpr (kFull) std::memcpy(v.tangent, g_last_tangent, 12), std::memcpy(v.binormal, g_last_binormal, 12);
+        std::memset(v.color0, 255, 4), std::memset(v.color1, 255, 4);
+        v.matrices[0] = m0, v.matrices[1] = m1, v.matrices[2] = pl.mtx[8];
+    }
+    // Where vertex i's element of the step's array is: inline, or by index.
+    const auto element = [&](const Step& st, unsigned off, unsigned array, uint32_t bytes, uint32_t i) -> const uint8_t* {
+        const uint8_t* p = data + size_t(i) * size + off;
+        if (st.how == 1) return p;
+        const uint32_t index = st.how == 2 ? p[0] : be16(p);
+        const Array& a = f.arrays[array];
+        if (a.any && index <= a.last) [[likely]] {
+            if (g_dff_use) [[unlikely]] note_array(array, index * a.stride, bytes);
+            return a.host + size_t(index) * a.stride;
+        }
+        return array_data(r, array, index, bytes);  // reports it
+    };
+    for (unsigned s = 0; s < pl.count; ++s) {
+        const Step& st = pl.steps[s];
+        const unsigned off = at[s];
+        switch (st.kind) {
+            case Step::kPosMtx:
+                for (uint32_t i = 0; i < count; ++i)
+                    out[i].matrices[0] = (out[i].matrices[0] & ~0xFFu) | (data[size_t(i) * size + off] & 63u);
+                break;
+            case Step::kTexMtx: {
+                const unsigned slot = 1u + st.slot, word = slot / 4, shift = 8 * (slot % 4);
+                for (uint32_t i = 0; i < count; ++i)
+                    out[i].matrices[word] = (out[i].matrices[word] & ~(0xFFu << shift)) | ((data[size_t(i) * size + off] & 63u) << shift);
+                break;
+            }
+            case Step::kPos: {
+                const uint32_t bytes = st.cs * st.n;
+                if (st.fmt == 4) {
+                    for (uint32_t i = 0; i < count; ++i) {
+                        const uint8_t* d = element(st, off, 0, bytes, i);
+                        for (unsigned k = 0; k < st.n; ++k) out[i].pos[k] = as_float(be32(d + 4 * k));
+                    }
+                } else {
+                    for (uint32_t i = 0; i < count; ++i) {
+                        const uint8_t* d = element(st, off, 0, bytes, i);
+                        for (unsigned k = 0; k < st.n; ++k) out[i].pos[k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
+                    }
+                }
+                break;
+            }
+            case Step::kNormal: {
+                const uint32_t bytes = st.cs * 3u * st.n;
+                for (uint32_t i = 0; i < count; ++i) {
+                    const uint8_t* d = element(st, off, 1, bytes, i);
+                    float nbt[3][3];
+                    for (unsigned k = 0; k < st.n; ++k)
+                        for (unsigned j = 0; j < 3; ++j)
+                            nbt[k][j] = st.fmt == 4 ? as_float(be32(d + 4 * (3 * k + j))) : normal_component(d + (3 * k + j) * st.cs, st.fmt);
+                    std::memcpy(out[i].normal, nbt[0], 12);
+                    if (st.n == 3) {
+                        if constexpr (kFull) std::memcpy(out[i].tangent, nbt[1], 12), std::memcpy(out[i].binormal, nbt[2], 12);
+                        if (i + 1 == count) std::memcpy(g_last_tangent, nbt[1], 12), std::memcpy(g_last_binormal, nbt[2], 12);
+                    }
+                }
+                std::memcpy(g_last_normal, out[count - 1].normal, 12);
+                break;
+            }
+            case Step::kColor:
+                for (uint32_t i = 0; i < count; ++i)
+                    read_color(element(st, off, 2u + st.slot, st.cs, i), st.fmt, st.slot ? out[i].color1 : out[i].color0);
+                break;
+            case Step::kUv: {
+                if (!kFull && st.slot >= kSmallUvs) [[unlikely]]
+                    rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
+                const uint32_t bytes = st.cs * st.n;
+                const unsigned a = 4u + st.slot;
+                if (st.fmt == 4) {
+                    for (uint32_t i = 0; i < count; ++i) {
+                        const uint8_t* d = element(st, off, a, bytes, i);
+                        for (unsigned k = 0; k < st.n; ++k) out[i].uv[st.slot][k] = as_float(be32(d + 4 * k));
+                    }
+                } else if (st.fmt == 3 && st.n == 2) {  // signed 16-bit pairs: the game's models
+                    for (uint32_t i = 0; i < count; ++i) {
+                        const uint8_t* d = element(st, off, a, bytes, i);
+                        out[i].uv[st.slot][0] = float(int16_t(be16(d))) * st.scale;
+                        out[i].uv[st.slot][1] = float(int16_t(be16(d + 2))) * st.scale;
+                    }
+                } else {
+                    for (uint32_t i = 0; i < count; ++i) {
+                        const uint8_t* d = element(st, off, a, bytes, i);
+                        for (unsigned k = 0; k < st.n; ++k) out[i].uv[st.slot][k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    // One colour given: both are it (decode_vertex's rule).
+    const bool c0 = pl.has & kHasColor0, c1 = pl.has & kHasColor1;
+    if (c0 != c1)
+        for (uint32_t i = 0; i < count; ++i)
+            c0 ? std::memcpy(out[i].color1, out[i].color0, 4) : std::memcpy(out[i].color0, out[i].color1, 4);
+    return size_t(size) * count;
+}
+
+// decode_columns, and with PUNCHOUT_CHECK_DECODE=1 checked against
+// decode_vertex vertex by vertex (byte for byte, the last normals too): a
+// fatal error at the first difference. For tests and after changing either.
+template <class V>
+size_t decode_checked(const Registers& r, const Format& f, const Plan& pl, const uint8_t* data, uint32_t count, V* out) {
+    static const bool check = [] { const char* e = std::getenv("PUNCHOUT_CHECK_DECODE"); return e && *e && *e != '0'; }();
+    if (!check) [[likely]] return decode_columns(r, f, pl, data, count, out);
+    float last[3][3];
+    std::memcpy(last[0], g_last_normal, 12), std::memcpy(last[1], g_last_tangent, 12), std::memcpy(last[2], g_last_binormal, 12);
+    const size_t used = decode_columns(r, f, pl, data, count, out);
+    float after[3][3];
+    std::memcpy(after[0], g_last_normal, 12), std::memcpy(after[1], g_last_tangent, 12), std::memcpy(after[2], g_last_binormal, 12);
+    std::memcpy(g_last_normal, last[0], 12), std::memcpy(g_last_tangent, last[1], 12), std::memcpy(g_last_binormal, last[2], 12);
+    std::vector<V> ref(count);
+    size_t ref_used = 0;
+    for (uint32_t i = 0; i < count; ++i) ref_used += decode_vertex(r, f, pl, data + ref_used, ref[i]);
+    if (ref_used != used) rt::fatal(nullptr, "PUNCHOUT_CHECK_DECODE: %llu bytes by columns, %llu by vertex",
+                                    static_cast<unsigned long long>(used), static_cast<unsigned long long>(ref_used));
+    for (uint32_t i = 0; i < count; ++i)
+        if (std::memcmp(&ref[i], &out[i], sizeof(V)) != 0)
+            rt::fatal(nullptr, "PUNCHOUT_CHECK_DECODE: vertex %u of %u differs", i, count);
+    if (std::memcmp(after[0], g_last_normal, 12) || std::memcmp(after[1], g_last_tangent, 12) || std::memcmp(after[2], g_last_binormal, 12))
+        rt::fatal(nullptr, "PUNCHOUT_CHECK_DECODE: the last normals differ");
+    return used;
 }
 
 // ---- state
@@ -726,9 +888,9 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         std::fill(std::begin(g_use_lo), std::end(g_use_lo), ~0u), std::fill(std::begin(g_use_hi), std::end(g_use_hi), 0u);
     // The compact layout when nothing needs the rest: no tangents or binormals
     // in the format, and none sent before (emboss texgen reads the last ones),
-    // and no texture coordinates past the second. Decoding can't change the
+    // and no texture coordinates past the fourth. Decoding can't change the
     // answer: the last tangents only change in a format that has them.
-    constexpr uint32_t kBig = kHasTangent | kHasBinormal | (0x3Fu * (kHasUv0 << 2));
+    constexpr uint32_t kBig = kHasTangent | kHasBinormal | (((1u << (8 - kSmallUvs)) - 1) * (kHasUv0 << kSmallUvs));
     static constexpr float kZero3[3] = {};
     static const bool force_full = [] {  // PUNCHOUT_FULL_VERTICES=1: always the full layout (tests both)
         const char* e = std::getenv("PUNCHOUT_FULL_VERTICES");
@@ -743,13 +905,11 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         if (small) {
             first = uint32_t(f.small.size());
             f.small.resize(first + count);
-            SmallVertex* out = f.small.data() + first;
-            for (uint32_t i = 0; i < count; ++i) data += decode_vertex(r, fmt, plan, data, out[i]);
+            data += decode_checked(r, fmt, plan, data, count, f.small.data() + first);
         } else {
             first = uint32_t(f.vertices.size());
             f.vertices.resize(first + count);
-            Vertex* out = f.vertices.data() + first;
-            for (uint32_t i = 0; i < count; ++i) data += decode_vertex(r, fmt, plan, data, out[i]);
+            data += decode_checked(r, fmt, plan, data, count, f.vertices.data() + first);
         }
     } else {  // the general reader (rare formats), then the layout
         thread_local std::vector<Vertex> decoded;
@@ -767,7 +927,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
                 std::memcpy(o.normal, v.normal, 12);
                 std::memcpy(o.color0, v.color0, 4);
                 std::memcpy(o.color1, v.color1, 4);
-                std::memcpy(o.uv, v.uv, 16);
+                std::memcpy(o.uv, v.uv, sizeof o.uv);
                 std::memcpy(o.matrices, v.matrices, 12);
             }
         } else {
@@ -870,8 +1030,9 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     f.draws.push_back(d);
 }
 
-void bp_written(uint32_t reg, uint32_t value) {
+void bp_written(uint32_t reg, uint32_t value, bool changed) {
     if (reg == 0x66) textures_invalidated();
+    if (!changed) return;  // the state is what it was (commands are acted on by gpu.cpp either way)
     if (reg >= 0xE0 && reg <= 0xE7) {  // TEV colour registers and konstants: 11-bit signed, the type bit says which
         const unsigned i = (reg - 0xE0) / 2;
         const bool konst = (value >> 23) & 1;
