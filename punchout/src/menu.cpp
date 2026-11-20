@@ -1,6 +1,8 @@
 // The settings menu (menu.hpp). Runtime code: no std::format.
 #include "menu.hpp"
 
+#include <cmath>
+
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -297,6 +299,18 @@ void Menu::draw_frame_times() {
         ImGui::Text("%.1f fps  %.2f ms", s.fps, s.average_ms);
         ImGui::Text("1%% low %.1f  0.1%% low %.1f", s.low1_fps, s.low01_fps);
         ImGui::Text("worst %.1f ms", s.worst_ms);
+        // The game draws 60 frames a second, as on the Wii; a faster display
+        // shows each one more than once, with less wait before it's seen.
+        const double hz = punchout::g_display_hz.load(std::memory_order_relaxed);
+        if (hz > 0) {
+            const double k = hz / 60.0;
+            if (std::fabs(k - std::round(k)) * 60.0 <= 0.3 && std::round(k) >= 2)
+                ImGui::Text("display %.0f Hz: each frame shown %d times", hz, int(std::round(k)));
+            else if (std::fabs(k - std::round(k)) * 60.0 > 0.3)
+                ImGui::Text("display %.1f Hz: not a multiple of 60 (uneven)", hz);
+            else
+                ImGui::Text("display %.0f Hz", hz);
+        }
         const std::vector<float> recent = t.recent(240);
         ImGui::PlotLines("##ft", recent.data(), int(recent.size()), 0, nullptr, 0.0f, 50.0f, ImVec2(240.0f, 48.0f));
     }

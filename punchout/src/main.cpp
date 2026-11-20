@@ -101,6 +101,55 @@ std::vector<Press> scripted_input(const char* text) {
 }  // namespace
 
 namespace {
+bool g_display_locked = false;  // the retraces run at the display's refresh (or a whole fraction of it)
+
+// Vblank steering (Beat the Beat's, Windows): with the retraces locked to the
+// display, nudge their speed (within 0.2%) so each frame is presented a few
+// ms before a vblank, every frame alike: shown as soon after it's drawn as the
+// display allows, without the slow drift between the two clocks bringing
+// spells where a frame waits most of a refresh. A PI loop on the time from
+// the present to the next vblank (the slack), against a target of 1 ms plus
+// four standard deviations of its spread, at least 3 ms.
+struct VblankSteer {
+    double mean = 0, var = 0, integral = 0, delta = 0;
+    uint64_t last = 0, frames = 0, late = 0, slack_count = 0;
+    double slack_sum = 0, target = 0;
+} g_vbl;
+void steer_to_vblank() {
+    uint64_t vblank = 0, period = 0;
+    if (!g_display_locked || !punchout::display_vblank(vblank, period)) return;
+    const auto now = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    const double dt = g_vbl.last ? double(now - g_vbl.last) : 0;
+    g_vbl.last = now;
+    if (dt <= 0 || dt > 4.0 * 1e9 / 59.0) {  // a long gap (loading, the menu): start the averages again
+        g_vbl.frames = 0;
+        return;
+    }
+    const double p = double(period);
+    double since = std::fmod(double(int64_t(now - vblank)), p);
+    if (since < 0) since += p;
+    const double slack = p - since;  // to the next vblank
+    g_vbl.target = std::clamp(1e6 + 4.0 * std::sqrt(g_vbl.var), 3.0e6, p / 2);
+    double e = slack - g_vbl.target;
+    if (e > p / 2) e -= p;
+    if (e < -p / 2) e += p;
+    if (g_vbl.frames >= 16 && std::abs(g_vbl.mean) < 0.5e6 && slack > p - 0.5e6) ++g_vbl.late;  // just missed one
+    ++g_vbl.frames;
+    constexpr double a = 1.0 / 16;  // about a quarter of a second
+    if (g_vbl.frames == 1) g_vbl.mean = e, g_vbl.var = 0;
+    const double d = e - g_vbl.mean;
+    g_vbl.mean += a * d;
+    g_vbl.var = (1 - a) * (g_vbl.var + a * d * d);
+    if (g_vbl.frames < 16) return;
+    g_vbl.slack_sum += slack, ++g_vbl.slack_count;
+    // Presenting early (slack above the target) slows the game a little. Kp 1/s, Ki 0.25/s^2.
+    const double es = g_vbl.mean / 1e9, dts = dt / 1e9;
+    g_vbl.integral = std::clamp(g_vbl.integral + 0.25 * es * dts, -0.001, 0.001);
+    g_vbl.delta = std::clamp(-(1.0 * es + g_vbl.integral), -0.002, 0.002);
+    if (g_vbl.frames % 4 == 0) punchout::set_retrace_speed(1.0 + g_vbl.delta);
+}
+
 // The retrace rate for the display the window is on (video.hpp's
 // set_retrace_rate): its refresh, or a whole fraction of it, when that is
 // within 0.3 Hz of 60; otherwise, and without vsync, a free 60 Hz (a VRR
@@ -110,6 +159,7 @@ void match_retrace_to_display(qilin::host::Display& display) {
     static uint64_t chosen = 0;  // num << 32 | den
     uint32_t num = 60, den = 1;
     double display_hz = 0;
+    bool matched = false;
     if (display.picture().vsync && !display.picture().variable_refresh) {  // variable refresh follows the game's own 60 Hz
         auto* window = static_cast<SDL_Window*>(display.sdl_window());
         const SDL_DisplayMode* m = window ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)) : nullptr;
@@ -120,10 +170,13 @@ void match_retrace_to_display(qilin::host::Display& display) {
             for (uint32_t k = 1; k <= 4 && n && d; ++k)
                 if (std::fabs(display_hz / k - 60.0) <= 0.3) {
                     num = n, den = d * k;
+                    matched = true;
                     break;
                 }
         }
     }
+    g_display_locked = matched;
+    punchout::g_display_hz.store(display_hz > 0 ? display_hz : 0, std::memory_order_relaxed);
     const uint64_t key = uint64_t(num) << 32 | den;
     if (key == chosen) return;
     chosen = key;
@@ -217,6 +270,12 @@ static void report_timing(qilin::host::Display& display, punchout::Menu* menu, q
     if (ft.frames)
         rt::log("  frame times (last %.0f s): %.1f fps (%.2f ms), 1%% low %.1f fps, 0.1%% low %.1f fps, worst %.1f ms; waiting to present %.2f ms a frame",
                 ft.average_ms * double(ft.frames) / 1000.0, ft.fps, ft.average_ms, ft.low1_fps, ft.low01_fps, ft.worst_ms, present_wait);
+    if (g_vbl.slack_count) {
+        rt::log("  vblank steering: presented %.2f ms before the vblank on average (target %.2f), %llu just missed; game clock %+.3f%%",
+                g_vbl.slack_sum / double(g_vbl.slack_count) / 1e6, g_vbl.target / 1e6, static_cast<unsigned long long>(g_vbl.late),
+                g_vbl.delta * 100.0);
+        g_vbl.slack_sum = 0, g_vbl.slack_count = 0, g_vbl.late = 0;
+    }
     if (audio && sound_pushes) {
         rt::log("  sound: %.1f ms queued on average, %.1f at most, played at %.4fx; ran dry %u times, dropped %u times",
                 sound_sum / double(sound_pushes), sound.max_ms, sound.ratio, sound.empty, sound.dropped);
@@ -233,6 +292,7 @@ int main(int argc, char** argv) {
     // sleep to a retrace could end a whole frame late. Ended with the process.
     timeBeginPeriod(1);
 #endif
+    punchout::tune_process();  // Windows 11: no throttling when the window is hidden or covered
     // The main loop presents frames: ahead of shader compiles and cache saves.
     punchout::set_this_thread_priority(punchout::Priority::high);
     bool headless = false, offscreen = false;
@@ -505,6 +565,7 @@ int main(int argc, char** argv) {
         if (!punchout::take_xfb(&sequence, 0, xfb, w, h)) continue;
         if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {
             display->present_image(x->image, x->view, x->width, x->height, aspect, h);
+            steer_to_vblank();
         } else {
             uint64_t s2 = sequence - 1;
             if (punchout::take_frame(&s2, 0, rgba, w, h)) display->present(w, h, rgba.data(), aspect, h);

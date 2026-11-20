@@ -33,5 +33,8 @@ uint32_t frame_count();
 // second one...) instead of drifting against it, which repeats or drops a
 // frame every few seconds. 0 for either: back to 60 Hz.
 void set_retrace_rate(uint32_t num, uint32_t den);
+// From the main thread: run the retraces this much faster (or slower, below 1;
+// held within 1%), on top of the rate: vblank steering nudges the phase with it.
+void set_retrace_speed(double speed);
 
 }  // namespace punchout

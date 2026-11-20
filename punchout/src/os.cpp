@@ -2,6 +2,15 @@
 // interrupts, caches, time. Arguments arrive in r3..., results go in r3 (and
 // r4 for 64-bit values), as the EABI passes them.
 #include "os.hpp"
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include "audio.hpp"
 
 #include <algorithm>
@@ -416,17 +425,63 @@ void add_timer_source(std::function<void()> poll, std::function<uint64_t()> dead
 }
 void on_wpar_write(void (*reset)()) { g_wpar_reset = reset; }
 
+#if defined(_WIN32)
+// Windows: an event for wakes and, per thread, a high-resolution waitable
+// timer (Windows 10 1803 and later) for the deadline: it ends within about
+// half a millisecond of the time asked, where a condition variable's wait
+// ends on the 1 ms timer tick, up to 2 ms late. So the yielding before a
+// retrace is 0.5 ms of a core instead of 1.5.
+namespace {
+std::atomic<bool> g_idle_woken{false};
+HANDLE idle_event() {
+    static const HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // auto-reset
+    return e;
+}
+struct IdleTimer {
+    HANDLE h = nullptr;
+    bool fine = false;
+    IdleTimer() {
+        h = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        fine = h != nullptr;
+        if (!h) h = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);  // older Windows: the 1 ms tick's
+    }
+};
+}  // namespace
+void idle_sleep(uint64_t ns, bool on_time) {
+    using clock = std::chrono::steady_clock;
+    const auto end = clock::now() + std::chrono::nanoseconds(ns);
+    if (g_idle_woken.exchange(false, std::memory_order_acq_rel)) return;
+    thread_local IdleTimer timer;
+    const auto slack = timer.fine ? std::chrono::microseconds(500) : std::chrono::microseconds(1500);
+    const auto os_end = on_time ? end - slack : end;
+    const HANDLE event = idle_event();
+    for (auto now = clock::now(); now < os_end && timer.h && event; now = clock::now()) {
+        LARGE_INTEGER due;
+        due.QuadPart = -std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::nanoseconds>(os_end - now).count() / 100);
+        if (!SetWaitableTimer(timer.h, &due, 0, nullptr, nullptr, FALSE)) break;
+        const HANDLE both[2] = {event, timer.h};
+        const DWORD r = WaitForMultipleObjects(2, both, FALSE, INFINITE);
+        if (g_idle_woken.exchange(false, std::memory_order_acq_rel)) return;
+        if (r != WAIT_OBJECT_0) break;  // the timer (or a failure): on to the last stretch
+        // The event without the flag: a wake already taken. Wait on.
+    }
+    if (!on_time) return;
+    while (clock::now() < end) {  // the last stretch, as below
+        if (g_idle_woken.exchange(false, std::memory_order_acq_rel)) return;
+        std::this_thread::yield();
+    }
+}
+void wake_idle() {
+    g_idle_woken.store(true, std::memory_order_release);
+    if (const HANDLE e = idle_event()) SetEvent(e);
+}
+#else
 namespace {
 std::mutex g_idle_lock;
 std::condition_variable g_idle_cv;
 std::atomic<bool> g_idle_woken{false};  // written under g_idle_lock; read without it while yielding
-// How early an OS sleep may end up late: Windows wakes on its 1 ms timer tick
-// (main.cpp asks for 1 ms, not the default 15.6), others within ~100 us.
-#ifdef _WIN32
-constexpr auto kSleepSlack = std::chrono::microseconds(1500);
-#else
+// How early an OS sleep may end up late: within ~100 us.
 constexpr auto kSleepSlack = std::chrono::microseconds(250);
-#endif
 }  // namespace
 void idle_sleep(uint64_t ns, bool on_time) {
     using clock = std::chrono::steady_clock;
@@ -457,6 +512,7 @@ void wake_idle() {
     }
     g_idle_cv.notify_all();
 }
+#endif
 
 uint64_t next_timer_deadline() {
     uint64_t t = UINT64_MAX;

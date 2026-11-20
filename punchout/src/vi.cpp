@@ -198,9 +198,23 @@ std::span<const rt::Provided> vi_replacements() { return kReplacements; }
 
 uint32_t frame_count() { return g_frames_seen.load(std::memory_order_relaxed); }
 
+namespace {
+std::atomic<double> g_base_period{double(kRetraceTicks)};  // the rate's period, before set_retrace_speed
+std::atomic<double> g_speed{1.0};
+void apply_period() {
+    g_period.store(uint64_t(g_base_period.load(std::memory_order_relaxed) / g_speed.load(std::memory_order_relaxed) + 0.5),
+                   std::memory_order_relaxed);
+}
+}  // namespace
+
 void set_retrace_rate(uint32_t num, uint32_t den) {
     if (num == 0 || den == 0) num = 60, den = 1;
-    g_period.store((kTimerHz * den + num / 2) / num, std::memory_order_relaxed);
+    g_base_period.store(double(kTimerHz) * double(den) / double(num), std::memory_order_relaxed);
+    apply_period();
+}
+void set_retrace_speed(double speed) {
+    g_speed.store(std::clamp(speed, 0.99, 1.01), std::memory_order_relaxed);
+    apply_period();
 }
 
 }  // namespace punchout

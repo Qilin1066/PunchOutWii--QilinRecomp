@@ -1168,6 +1168,30 @@ struct Renderer::Impl {
         begin_efb(cmd);
         if (c.clear && (c.clear_color || c.clear_alpha || c.clear_depth)) {
             const unsigned mask = (c.clear_color ? 7u : 0u) | (c.clear_alpha ? 8u : 0u);
+            if (mask == 15u || mask == 0u) {
+                // All of the colour, or none, and the depth: the GPU's own clear (no
+                // pixel shader; a GPU can clear a whole surface without writing it
+                // pixel by pixel). Exactly the values the clear pipeline writes.
+                VkRect2D cs{{c.src[0] * int(scale), c.src[1] * int(scale)}, {uint32_t(c.src[2]) * scale, uint32_t(c.src[3]) * scale}};
+                clamp_rect(cs);
+                if (cs.extent.width && cs.extent.height) {
+                    VkClearAttachment a[2];
+                    uint32_t n = 0;
+                    if (mask == 15u) {
+                        a[n] = {VK_IMAGE_ASPECT_COLOR_BIT, 0, {}};
+                        for (int i = 0; i < 4; ++i) a[n].clearValue.color.float32[i] = float(c.clear_rgba[i]) / 255.0f;
+                        ++n;
+                    }
+                    if (c.clear_depth) {
+                        a[n] = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, {}};
+                        a[n].clearValue.depthStencil = {float(c.clear_z) / 16777216.0f, 0};
+                        ++n;
+                    }
+                    const VkClearRect r{cs, 0, 1};
+                    if (n) vkCmdClearAttachments(cmd, n, a, 1, &r);
+                }
+                return;
+            }
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, clear_pipeline(mask, c.clear_depth));
             vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
             vkCmdSetDepthTestEnable(cmd, c.clear_depth);

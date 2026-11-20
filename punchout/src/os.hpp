@@ -9,6 +9,7 @@
 // same as an interrupt arriving at that instruction.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -23,6 +24,10 @@ inline void (*g_before_exit)() = nullptr;
 inline void before_exit() {
     if (g_before_exit) g_before_exit();
 }
+
+// The refresh of the display the window is on, in Hz (0 when unknown or
+// without vsync), and whether the retraces are locked to it: for the F3 overlay.
+inline std::atomic<double> g_display_hz{0};
 
 // Queue an interrupt's work; it runs with interrupts off, at the next safe point.
 void post_interrupt(std::function<void(qilin::rt::Cpu&)> work);
