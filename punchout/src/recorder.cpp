@@ -419,6 +419,41 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
     return size_t(p - start);
 }
 
+// Each of `count` vertices' element of an attribute (`size` bytes a vertex,
+// the attribute at `off`): inline (How 1) or by an 8- or 16-bit index (2, 3)
+// into array `a`, given to body(i, element). The way of fetching is a template
+// argument so each loop has none of the others' branches.
+template <unsigned How, class Body>
+void each_at(const Registers& r, const Array& a, unsigned array, uint32_t bytes, const uint8_t* data, unsigned size, unsigned off,
+             uint32_t count, Body& body) {
+    const bool dff = g_dff_use;
+    const uint8_t* const host = a.host;
+    const uint32_t stride = a.stride, last = a.any ? a.last : 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t* p = data + size_t(i) * size + off;
+        if constexpr (How == 1) {
+            body(i, p);
+        } else {
+            const uint32_t index = How == 2 ? p[0] : be16(p);
+            if (a.any && index <= last) [[likely]] {
+                if (dff) [[unlikely]] note_array(array, index * stride, bytes);
+                body(i, host + size_t(index) * stride);
+            } else {
+                body(i, array_data(r, array, index, bytes));  // reports it
+            }
+        }
+    }
+}
+template <class Body>
+void each_element(unsigned how, const Registers& r, const Array& a, unsigned array, uint32_t bytes, const uint8_t* data, unsigned size,
+                  unsigned off, uint32_t count, Body& body) {
+    switch (how) {
+        case 1: each_at<1>(r, a, array, bytes, data, size, off, count, body); break;
+        case 2: each_at<2>(r, a, array, bytes, data, size, off, count, body); break;
+        default: each_at<3>(r, a, array, bytes, data, size, off, count, body); break;
+    }
+}
+
 // A primitive's vertices by its plan, an attribute at a time across all of
 // them (decode_vertex's results, the same bytes): each inner loop has one
 // format and one way of fetching, rather than a switch per attribute per
@@ -450,21 +485,13 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
         std::memset(v.color0, 255, 4), std::memset(v.color1, 255, 4);
         v.matrices[0] = m0, v.matrices[1] = m1, v.matrices[2] = pl.mtx[8];
     }
-    // Where vertex i's element of the step's array is: inline, or by index.
-    const auto element = [&](const Step& st, unsigned off, unsigned array, uint32_t bytes, uint32_t i) -> const uint8_t* {
-        const uint8_t* p = data + size_t(i) * size + off;
-        if (st.how == 1) return p;
-        const uint32_t index = st.how == 2 ? p[0] : be16(p);
-        const Array& a = f.arrays[array];
-        if (a.any && index <= a.last) [[likely]] {
-            if (g_dff_use) [[unlikely]] note_array(array, index * a.stride, bytes);
-            return a.host + size_t(index) * a.stride;
-        }
-        return array_data(r, array, index, bytes);  // reports it
-    };
     for (unsigned s = 0; s < pl.count; ++s) {
         const Step& st = pl.steps[s];
         const unsigned off = at[s];
+        // Each vertex's element of the step's array, inline or by index, given to `body`.
+        const auto each = [&](unsigned array, uint32_t bytes, auto&& body) {
+            each_element(st.how, r, f.arrays[array], array, bytes, data, size, off, count, body);
+        };
         switch (st.kind) {
             case Step::kPosMtx:
                 for (uint32_t i = 0; i < count; ++i)
@@ -478,61 +505,64 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
             }
             case Step::kPos: {
                 const uint32_t bytes = st.cs * st.n;
-                if (st.fmt == 4) {
-                    for (uint32_t i = 0; i < count; ++i) {
-                        const uint8_t* d = element(st, off, 0, bytes, i);
-                        for (unsigned k = 0; k < st.n; ++k) out[i].pos[k] = as_float(be32(d + 4 * k));
-                    }
+                if (st.fmt == 4 && st.n == 3) {
+                    each(0, bytes, [&](uint32_t i, const uint8_t* d) {
+                        out[i].pos[0] = as_float(be32(d)), out[i].pos[1] = as_float(be32(d + 4)), out[i].pos[2] = as_float(be32(d + 8));
+                    });
                 } else {
-                    for (uint32_t i = 0; i < count; ++i) {
-                        const uint8_t* d = element(st, off, 0, bytes, i);
+                    each(0, bytes, [&](uint32_t i, const uint8_t* d) {
                         for (unsigned k = 0; k < st.n; ++k) out[i].pos[k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
-                    }
+                    });
                 }
                 break;
             }
             case Step::kNormal: {
                 const uint32_t bytes = st.cs * 3u * st.n;
-                for (uint32_t i = 0; i < count; ++i) {
-                    const uint8_t* d = element(st, off, 1, bytes, i);
-                    float nbt[3][3];
-                    for (unsigned k = 0; k < st.n; ++k)
-                        for (unsigned j = 0; j < 3; ++j)
-                            nbt[k][j] = st.fmt == 4 ? as_float(be32(d + 4 * (3 * k + j))) : normal_component(d + (3 * k + j) * st.cs, st.fmt);
-                    std::memcpy(out[i].normal, nbt[0], 12);
-                    if (st.n == 3) {
+                if (st.n == 1) {
+                    if (st.fmt == 4) {
+                        each(1, bytes, [&](uint32_t i, const uint8_t* d) {
+                            for (unsigned j = 0; j < 3; ++j) out[i].normal[j] = as_float(be32(d + 4 * j));
+                        });
+                    } else {
+                        each(1, bytes, [&](uint32_t i, const uint8_t* d) {
+                            for (unsigned j = 0; j < 3; ++j) out[i].normal[j] = normal_component(d + j * st.cs, st.fmt);
+                        });
+                    }
+                } else {  // normal, tangent, binormal
+                    each(1, bytes, [&](uint32_t i, const uint8_t* d) {
+                        float nbt[3][3];
+                        for (unsigned k = 0; k < 3; ++k)
+                            for (unsigned j = 0; j < 3; ++j) nbt[k][j] = normal_component(d + (3 * k + j) * st.cs, st.fmt);
+                        std::memcpy(out[i].normal, nbt[0], 12);
                         if constexpr (kFull) std::memcpy(out[i].tangent, nbt[1], 12), std::memcpy(out[i].binormal, nbt[2], 12);
                         if (i + 1 == count) std::memcpy(g_last_tangent, nbt[1], 12), std::memcpy(g_last_binormal, nbt[2], 12);
-                    }
+                    });
                 }
                 std::memcpy(g_last_normal, out[count - 1].normal, 12);
                 break;
             }
             case Step::kColor:
-                for (uint32_t i = 0; i < count; ++i)
-                    read_color(element(st, off, 2u + st.slot, st.cs, i), st.fmt, st.slot ? out[i].color1 : out[i].color0);
+                each(2u + st.slot, st.cs, [&](uint32_t i, const uint8_t* d) { read_color(d, st.fmt, st.slot ? out[i].color1 : out[i].color0); });
                 break;
             case Step::kUv: {
                 if (!kFull && st.slot >= kSmallUvs) [[unlikely]]
                     rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
                 const uint32_t bytes = st.cs * st.n;
-                const unsigned a = 4u + st.slot;
-                if (st.fmt == 4) {
-                    for (uint32_t i = 0; i < count; ++i) {
-                        const uint8_t* d = element(st, off, a, bytes, i);
-                        for (unsigned k = 0; k < st.n; ++k) out[i].uv[st.slot][k] = as_float(be32(d + 4 * k));
-                    }
+                const unsigned a = 4u + st.slot, slot = st.slot;
+                const float scale = st.scale;
+                if (st.fmt == 4 && st.n == 2) {
+                    each(a, bytes, [&](uint32_t i, const uint8_t* d) {
+                        out[i].uv[slot][0] = as_float(be32(d)), out[i].uv[slot][1] = as_float(be32(d + 4));
+                    });
                 } else if (st.fmt == 3 && st.n == 2) {  // signed 16-bit pairs: the game's models
-                    for (uint32_t i = 0; i < count; ++i) {
-                        const uint8_t* d = element(st, off, a, bytes, i);
-                        out[i].uv[st.slot][0] = float(int16_t(be16(d))) * st.scale;
-                        out[i].uv[st.slot][1] = float(int16_t(be16(d + 2))) * st.scale;
-                    }
+                    each(a, bytes, [&](uint32_t i, const uint8_t* d) {
+                        out[i].uv[slot][0] = float(int16_t(be16(d))) * scale;
+                        out[i].uv[slot][1] = float(int16_t(be16(d + 2))) * scale;
+                    });
                 } else {
-                    for (uint32_t i = 0; i < count; ++i) {
-                        const uint8_t* d = element(st, off, a, bytes, i);
-                        for (unsigned k = 0; k < st.n; ++k) out[i].uv[st.slot][k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
-                    }
+                    each(a, bytes, [&](uint32_t i, const uint8_t* d) {
+                        for (unsigned k = 0; k < st.n; ++k) out[i].uv[slot][k] = component(d + k * st.cs, st.fmt, scale, f.dequant);
+                    });
                 }
                 break;
             }
@@ -574,13 +604,39 @@ size_t decode_checked(const Registers& r, const Format& f, const Plan& pl, const
 
 // ---- state
 
-void build_state(const Registers& r, State& s) {
-    std::memset(&s, 0, sizeof s);
+// The parts of a State, by what they're made from: a new state copies the one
+// before and redoes only the parts whose registers changed since (most draws
+// change a matrix or two, not 5 KB of state).
+enum : uint32_t {
+    kPartPos = 1,       // XF 0x000-0x0FF
+    kPartNormal = 2,    // XF 0x400-0x45F
+    kPartPost = 4,      // XF 0x500-0x5FF
+    kPartLights = 8,    // XF 0x600-0x67F
+    kPartXfRegs = 16,   // XF 0x1000 on (and the fog, which reads the viewport)
+    kPartBp = 32,       // BP, the TEV colour registers and konstants
+    kPartAll = 63,
+};
+uint32_t g_parts = kPartAll;  // changed since the last state was built
+void build_lights(const uint32_t* xf, State& s);
+void build_xf_regs(const uint32_t* xf, State& s);
+void build_bp(const Registers& r, State& s);
+
+void build_state(const Registers& r, State& s, uint32_t parts) {
+    if (parts == kPartAll) std::memset(&s, 0, sizeof s);
     const uint32_t* xf = r.xf;
-    for (int i = 0; i < 256; ++i) s.posmtx[i / 4][i % 4] = as_float(xf[i]);
-    for (int i = 0; i < 32; ++i)
-        for (int j = 0; j < 3; ++j) s.nrmmtx[i][j] = as_float(xf[0x400 + 3 * i + j]);
-    for (int i = 0; i < 256; ++i) s.postmtx[i / 4][i % 4] = as_float(xf[0x500 + i]);
+    if (parts & kPartPos)
+        for (int i = 0; i < 256; ++i) s.posmtx[i / 4][i % 4] = as_float(xf[i]);
+    if (parts & kPartNormal)
+        for (int i = 0; i < 32; ++i)
+            for (int j = 0; j < 3; ++j) s.nrmmtx[i][j] = as_float(xf[0x400 + 3 * i + j]);
+    if (parts & kPartPost)
+        for (int i = 0; i < 256; ++i) s.postmtx[i / 4][i % 4] = as_float(xf[0x500 + i]);
+    if (parts & kPartLights) build_lights(xf, s);
+    if (parts & kPartXfRegs) build_xf_regs(xf, s);
+    if (parts & (kPartBp | kPartXfRegs)) build_bp(r, s);
+}
+
+void build_lights(const uint32_t* xf, State& s) {
     for (int l = 0; l < 8; ++l) {
         const uint32_t* L = xf + 0x600 + 16 * l;
         auto& d = s.lights[l];
@@ -598,6 +654,9 @@ void build_state(const Registers& r, State& s) {
             d.dir[k] = std::isfinite(x) ? x : 0.0f;
         }
     }
+}
+
+void build_xf_regs(const uint32_t* xf, State& s) {
     // Projection.
     const float* p = reinterpret_cast<const float*>(xf + 0x1020);
     float m[16] = {};
@@ -633,6 +692,10 @@ void build_state(const Registers& r, State& s) {
     s.xf[1][2] = xf[0x103F] & 15;
     for (int i = 0; i < 8; ++i) s.xf[2 + i / 4][i % 4] = xf[0x1040 + i];
     for (int i = 0; i < 8; ++i) s.xf[4 + i / 4][i % 4] = xf[0x1050 + i];
+}
+
+void build_bp(const Registers& r, State& s) {
+    const uint32_t* xf = r.xf;
     // Pixel side.
     for (int i = 0; i < 256; ++i) s.bp[i / 4][i % 4] = r.bp[i];
     for (unsigned m2 = 0; m2 < 8; ++m2) {
@@ -855,7 +918,18 @@ std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
     return f;
 }
 
-void state_changed() { g_dirty = true; }
+void state_changed() { g_dirty = true, g_parts = kPartAll; }
+void xf_changed(uint32_t address, uint32_t count) {
+    const uint32_t end = address + count;
+    const auto overlaps = [&](uint32_t lo, uint32_t hi) { return address < hi && end > lo; };
+    uint32_t parts = 0;
+    if (overlaps(0x000, 0x100)) parts |= kPartPos;
+    if (overlaps(0x400, 0x460)) parts |= kPartNormal;
+    if (overlaps(0x500, 0x600)) parts |= kPartPost;
+    if (overlaps(0x600, 0x680)) parts |= kPartLights;
+    if (overlaps(0x1000, 0x1060)) parts |= kPartXfRegs;
+    if (parts) g_dirty = true, g_parts |= parts;  // the rest of XF memory isn't in the state
+}
 
 static void record_primitive_timed(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count);
 static bool g_capture_next = false;
@@ -939,10 +1013,20 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
         for (unsigned a = 0; a < 16; ++a)
             if (g_use_lo[a] < g_use_hi[a]) dff_use_memory(r.cp[0xA0 + a] + g_use_lo[a], g_use_hi[a] - g_use_lo[a]);
     if (g_dirty) {
-        f.states.emplace_back();
-        build_state(r, f.states.back());
+        // From the frame's last state where there is one, redoing what changed.
+        static const bool check = [] { const char* e = std::getenv("PUNCHOUT_CHECK_DECODE"); return e && *e && *e != '0'; }();
+        const uint32_t parts = f.states.empty() ? uint32_t(kPartAll) : g_parts;
+        if (f.states.empty()) f.states.emplace_back();
+        else f.states.push_back(f.states.back());
+        build_state(r, f.states.back(), parts);
+        if (check && parts != kPartAll) [[unlikely]] {  // PUNCHOUT_CHECK_DECODE: the same as built whole
+            State whole;
+            build_state(r, whole, kPartAll);
+            if (std::memcmp(&whole, &f.states.back(), sizeof whole) != 0)
+                rt::fatal(nullptr, "PUNCHOUT_CHECK_DECODE: a state built from the one before differs (parts %X)", parts);
+        }
         g_state = uint32_t(f.states.size() - 1);
-        g_dirty = false;
+        g_dirty = false, g_parts = 0;
     }
     Draw d{};
     d.state = g_state;
@@ -965,45 +1049,23 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
             }
             break;
         }
-        case 2: {  // triangles
-            uint32_t* o = grow(size_t(count / 3) * 3);
-            for (uint32_t i = 0; i + 2 < count; i += 3, o += 3) o[0] = first + i, o[1] = first + i + 1, o[2] = first + i + 2;
-            break;
-        }
-        case 3: {  // strip: alternate triangles keep the winding
-            if (count < 3) break;
-            uint32_t* o = grow(size_t(count - 2) * 3);
-            for (uint32_t i = 0; i + 2 < count; ++i, o += 3) {
-                const uint32_t v = first + i;
-                if (i & 1) o[0] = v + 1, o[1] = v, o[2] = v + 2;
-                else o[0] = v, o[1] = v + 1, o[2] = v + 2;
-            }
-            break;
-        }
+        // Lists and strips draw the vertices as they are, in order: no indices.
+        // Vulkan's strips wind alternate triangles as GX's do (each odd
+        // triangle's vertices are a rotation of GX's), and the shaders have no
+        // flat inputs, so the provoking vertex doesn't matter.
+        case 2: d.direct = 1, d.first_index = first, d.index_count = count / 3 * 3; break;    // triangles
+        case 3: d.direct = 2, d.first_index = first, d.index_count = count >= 3 ? count : 0; break;  // strip
         case 4: {  // fan
             if (count < 3) break;
             uint32_t* o = grow(size_t(count - 2) * 3);
             for (uint32_t i = 1; i + 1 < count; ++i, o += 3) o[0] = first, o[1] = first + i, o[2] = first + i + 1;
             break;
         }
-        case 5: {  // lines
-            uint32_t* o = grow(size_t(count / 2) * 2);
-            for (uint32_t i = 0; i + 1 < count; i += 2, o += 2) o[0] = first + i, o[1] = first + i + 1;
-            break;
-        }
-        case 6: {  // line strip
-            if (count < 2) break;
-            uint32_t* o = grow(size_t(count - 1) * 2);
-            for (uint32_t i = 0; i + 1 < count; ++i, o += 2) o[0] = first + i, o[1] = first + i + 1;
-            break;
-        }
-        default: {  // points
-            uint32_t* o = grow(count);
-            for (uint32_t i = 0; i < count; ++i) o[i] = first + i;
-            break;
-        }
+        case 5: d.direct = 1, d.first_index = first, d.index_count = count / 2 * 2; break;            // lines
+        case 6: d.direct = 2, d.first_index = first, d.index_count = count >= 2 ? count : 0; break;  // line strip
+        default: d.direct = 1, d.first_index = first, d.index_count = count; break;                  // points
     }
-    d.index_count = uint32_t(ix.size()) - d.first_index;
+    if (!d.direct) d.index_count = uint32_t(ix.size()) - d.first_index;
     if (d.index_count == 0) return;
     bool alpha_target;
     d.pipeline = pipeline_key(r.bp, alpha_target);
@@ -1033,6 +1095,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
 void bp_written(uint32_t reg, uint32_t value, bool changed) {
     if (reg == 0x66) textures_invalidated();
     if (!changed) return;  // the state is what it was (commands are acted on by gpu.cpp either way)
+    g_parts |= kPartBp;
     if (reg >= 0xE0 && reg <= 0xE7) {  // TEV colour registers and konstants: 11-bit signed, the type bit says which
         const unsigned i = (reg - 0xE0) / 2;
         const bool konst = (value >> 23) & 1;

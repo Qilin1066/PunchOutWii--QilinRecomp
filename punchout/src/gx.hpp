@@ -136,7 +136,8 @@ struct Sampler {
 struct Draw {
     uint32_t state;        // index into the frame's states
     uint32_t has;          // Has bits
-    uint32_t first_index, index_count;
+    uint32_t first_index, index_count;  // indexed draws; direct ones: the first vertex, and how many
+    uint8_t direct = 0;    // 0 indexed; 1 the vertices in order, as a list; 2 as a strip (no indices to write or upload)
     PipelineKey pipeline;
     uint32_t shape;        // shape id (shape_words)
     uint8_t cull;          // Vulkan cull mode

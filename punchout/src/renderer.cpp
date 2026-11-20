@@ -130,6 +130,10 @@ struct SamplerKey {
     gx::Sampler s;
     bool operator<(const SamplerKey& o) const { return std::memcmp(&s, &o.s, sizeof s) < 0; }
 };
+// GX's three kinds of primitive as Vulkan lists (a pipeline's class).
+constexpr VkPrimitiveTopology kTopologyLists[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+                                                   VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
+
 // A draw's eight (view, sampler) pairs: its texture descriptor set's key.
 struct TextureSetKey {
     std::array<uint64_t, 16> v;
@@ -506,9 +510,10 @@ struct Renderer::Impl {
                 dyn.push_back(VK_DYNAMIC_STATE_LOGIC_OP_EXT);
             }
         }
-        if (depth_dynamic) {
+        if (depth_dynamic) {  // the GX pipelines
             dyn.insert(dyn.end(), {VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
                                    VK_DYNAMIC_STATE_DEPTH_COMPARE_OP});
+            dyn.push_back(VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY);  // list or strip (Vulkan 1.3: within the class)
         }
         VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
         dy.dynamicStateCount = uint32_t(dyn.size());
@@ -1297,6 +1302,9 @@ struct Renderer::Impl {
         VkViewport last_viewport{};
         VkRect2D last_scissor{};
         uint8_t last_cull = 0, last_depth_test = 0, last_depth_write = 0, last_depth_func = 0;
+        // The topology, dynamic within its class: strips and lists share pipelines.
+        VkPrimitiveTopology last_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        bool topology_valid = false;
         bool need_bind = true;
         uint8_t bound_small = 0;
         // PUNCHOUT_PROBE=x,y (EFB pixels, at 1x): for the frame PUNCHOUT_DFF
@@ -1348,6 +1356,7 @@ struct Renderer::Impl {
                 bound = VK_NULL_HANDLE;
                 blend_set = false;
                 same_valid = false;
+                topology_valid = false;
                 bound_textures = VK_NULL_HANDLE;
                 need_bind = true;
                 continue;
@@ -1446,7 +1455,20 @@ struct Renderer::Impl {
             if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
             if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
             vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
-            vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
+            if (d.direct) {
+                // Lists and strips need no indices: the topology says which.
+                static constexpr VkPrimitiveTopology kList[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+                                                                 VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
+                static constexpr VkPrimitiveTopology kStrip[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+                                                                  VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
+                const VkPrimitiveTopology t = (d.direct == 2 ? kStrip : kList)[d.pipeline.topology];
+                if (!topology_valid || t != last_topology) vkCmdSetPrimitiveTopology(cmd, t), last_topology = t, topology_valid = true;
+                vkCmdDraw(cmd, d.index_count, 1, d.first_index, 0);
+            } else {
+                const VkPrimitiveTopology t = kTopologyLists[d.pipeline.topology];
+                if (!topology_valid || t != last_topology) vkCmdSetPrimitiveTopology(cmd, t), last_topology = t, topology_valid = true;
+                vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
+            }
             same_valid = true;
         }
         if (probing) probe(probe_i);

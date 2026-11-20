@@ -187,6 +187,7 @@ std::unordered_map<uint64_t, uint64_t> g_hashed;
 uint64_t hash_texture(uint32_t address, const uint8_t* src, uint32_t bytes) {
     const uint64_t key = uint64_t(address) << 32 | bytes;
     if (const auto it = g_hashed.find(key); it != g_hashed.end()) return it->second;
+    recorder_stats().hashed_bytes.fetch_add(bytes, std::memory_order_relaxed);
     const uint64_t h = hash_bytes(src, bytes);
     g_hashed.emplace(key, h);
     return h;

@@ -313,6 +313,33 @@ void lines_and_points(Target& t, Gx& g, bool wide, const char* how) {
     }
 }
 
+// Triangle strips and lists are drawn as Vulkan strips and lists, without
+// indices: a strip's alternate triangles must keep GX's winding (with culling
+// on, all of the strip shows, or none), and a list's triangles all show.
+void strips_and_lists(Target& t, Gx& g) {
+    const uint32_t genmode = g.bp[0x00];
+    int shown[3] = {};
+    for (unsigned cull = 0; cull < 3; ++cull) {  // none, back, front
+        g.BP(0x00, (genmode & ~(3u << 14)) | (cull << 14));
+        draw(g, 0x98, {{100, 100, -0.5f, 255, 255, 255, 255}, {100, 300, -0.5f, 255, 255, 255, 255},
+                       {200, 100, -0.5f, 255, 255, 255, 255}, {200, 300, -0.5f, 255, 255, 255, 255},
+                       {300, 100, -0.5f, 255, 255, 255, 255}, {300, 300, -0.5f, 255, 255, 255, 255}});
+        const auto px = t.finish(g);
+        shown[cull] = lit(px, 100, 100, 300, 300);
+    }
+    g.BP(0x00, genmode);
+    const int all = 200 * 200;
+    check(std::abs(shown[0] - all) <= 400, "a triangle strip covers its band: " + std::to_string(shown[0]) + " of " + std::to_string(all));
+    const bool one_way = (std::abs(shown[1] - all) <= 400 && shown[2] == 0) || (std::abs(shown[2] - all) <= 400 && shown[1] == 0);
+    check(one_way, "culling keeps or drops a whole strip (its triangles wind alike): back " + std::to_string(shown[1]) + ", front " +
+                       std::to_string(shown[2]));
+    draw(g, 0x90, {{100, 100, -0.5f, 255, 255, 255, 255}, {100, 300, -0.5f, 255, 255, 255, 255}, {300, 100, -0.5f, 255, 255, 255, 255},
+                   {300, 100, -0.5f, 255, 255, 255, 255}, {100, 300, -0.5f, 255, 255, 255, 255}, {300, 300, -0.5f, 255, 255, 255, 255}});
+    const auto px = t.finish(g);
+    const int list = lit(px, 100, 100, 300, 300);
+    check(std::abs(list - all) <= 400, "a triangle list covers its square: " + std::to_string(list) + " of " + std::to_string(all));
+}
+
 // A texture of one I8 value, 8x4 (one tile), in guest memory.
 void i8_texture(uint32_t phys, uint8_t value) { std::memset(rt::guest_ptr(0x80000000u | phys), value, 32); }
 
@@ -407,6 +434,7 @@ int main() {
         copy_filter(t, g);
         if (gpu.logic_op) logic_ops(t, g, false, "the GPU's");
         lines_and_points(t, g, gpu.wide_lines && gpu.large_points, "the GPU's");
+        strips_and_lists(t, g);
         z_textures(t, g);
         depth_copy(t, g);
         rg8_gb8(t, g);

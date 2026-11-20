@@ -325,8 +325,9 @@ int bench_recording(const char* dff_path, unsigned times) {
     Cpu c = rt::new_cpu();
     gx::set_rendering(true);  // frames are queued (and taken back below), as when drawing
     std::vector<double> ms;
-    uint64_t draws = 0, vertices = 0;
-    for (unsigned i = 0; i < times + 5; ++i) {  // five to warm the caches up, not counted
+    uint64_t draws = 0, vertices = 0, hashed_before = 0;
+    for (unsigned i = 0; i < times + 5; ++i) {
+        if (i == 5) hashed_before = gx::recorder_stats().hashed_bytes.load();  // five to warm the caches up, not counted
         for (int b = 0; b < 256; ++b) g_bp[size_t(b)] = u32(bp_at + 4ull * b), g_cpmem[size_t(b)] = u32(cp_at + 4ull * b);
         gx::state_changed();
         const uint64_t t0 = gx::now_ns();
@@ -343,9 +344,10 @@ int bench_recording(const char* dff_path, unsigned times) {
     double sum = 0;
     for (double v : ms) sum += v;
     std::printf("recording %s, %u times: median %.3f ms, fastest %.3f, slowest %.3f, mean %.3f; "
-                "%llu draws and %llu vertices a frame\n",
+                "%llu draws and %llu vertices a frame, %llu KB of textures checked\n",
                 dff_path, times, ms[ms.size() / 2], ms.front(), ms.back(), sum / double(ms.size()),
-                static_cast<unsigned long long>(draws / times), static_cast<unsigned long long>(vertices / times));
+                static_cast<unsigned long long>(draws / times), static_cast<unsigned long long>(vertices / times),
+                static_cast<unsigned long long>((gx::recorder_stats().hashed_bytes.load() - hashed_before) / times / 1024));
     return 0;
 }
 
@@ -440,7 +442,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
         } else if (op == 0x08) {  // LOAD_CP_REG: register, value
             if (left < 6) return;
             const uint32_t v = be32(p + 2);
-            if (g_cpmem[p[1]] != v) g_cpmem[p[1]] = v, gx::state_changed();  // the same value again changes nothing
+            g_cpmem[p[1]] = v;  // vertex formats and arrays: read by each primitive, not part of a draw's state
             g_cp_writes[g_cp_write_count++ % 8] = {p[1], v, in_display_list};
             n = 6;
         } else if (op == 0x10) {  // LOAD_XF_REG: (count - 1) << 16 | address, then the values
@@ -454,7 +456,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                     changed |= g_xf[addr + i] != v;
                     g_xf[addr + i] = v;
                 }
-            if (changed) gx::state_changed();  // the same values again change nothing
+            if (changed) gx::xf_changed(addr, count);  // the same values again change nothing
             n = 5 + 4 * count;
         } else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) {  // LOAD_INDX_A-D
             if (left < 5) return;
@@ -474,7 +476,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
                     changed |= g_xf[addr + i] != word;
                     g_xf[addr + i] = word;
                 }
-            if (changed) gx::state_changed();
+            if (changed) gx::xf_changed(addr, words);
             n = 5;
         } else if (op == 0x40) {  // CALL_DL: address, size
             if (left < 9) return;
