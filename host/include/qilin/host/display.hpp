@@ -68,6 +68,14 @@ public:
     // The intervals between new pictures presented (present and
     // present_image), over the last 20 s (frame_times.hpp).
     const FrameTimes& frame_times() const;
+    // Since the last call: frames presented and the time spent waiting to
+    // present them (for the previous one to reach the screen, and for a
+    // swapchain image): with vsync, mostly the wait for the display.
+    struct PresentStats {
+        uint32_t presents = 0;
+        double wait_ms = 0;  // in all
+    };
+    PresentStats take_present_stats();
     Gpu& gpu();
     // Headless: the last frame presented, as RGBA8 at the target's size.
     std::vector<uint8_t> read_back();

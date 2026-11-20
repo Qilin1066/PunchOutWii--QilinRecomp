@@ -121,7 +121,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
 - **NAND** (`nand.cpp`, v0.11.0): the Wii's flash file system as a folder, `<user folder>/nand/...`. The user folder is the game's data folder, `qilin/punchout` in the platform's per-user application data (Windows: `%LOCALAPPDATA%\qilin\punchout`; until v0.18.0 SDL's `%APPDATA%\Qilin\PunchOut-QilinComp`, moved on the first run), or `PUNCHOUT_SAVE_DIR`.
   - **Paths:** absolute or relative to the current directory (the game's home, `/title/00010000/52375050/data`, to start with).
   - **Coverage:** create, delete, open, read, write, seek, length, move, type, change directory, the free-space check, and the asynchronous forms, whose callbacks run as interrupts. Errors are NAND's codes.
-  - **Not yet:** the "safe" open and close open the file itself, so a write cut short isn't rolled back.
+  - **Safe writes:** the "safe" open writes to a copy in `/tmp`; the close flushes it to the disk and renames it over the save, so a write cut short leaves the old save. Leftover copies are removed at start.
 - **Console settings** (`sc.cpp`): 16:9, EuRGB60, English, stereo, a European console. These will become settings.
 - **WPAD** (`wpad.cpp`, v0.10.0): one sideways Wii Remote on channel 0, buttons only (the port's decision: no motion, no Nunchuk, no Balance Board).
   - **What the game sees:** a bare core controller, resting flat, with nothing in its pointer's view; channels 1–3 are empty.
@@ -240,12 +240,15 @@ The main thread turns the pad, the keys and the mouse into the remote's buttons 
 - **Input while open:** the display's event hook gives every SDL event to the menu first; while it's up the game gets none (and no buttons). F11 and Alt+Enter are the display's, open or not.
 - **Binding by pressing:** *Add* takes the next key (by its SDL scancode name, as `key_code` reads it), or the next pad button or click not already held when it began (read from the display's buttons). Meanwhile ImGui's mouse and gamepad navigation are off, until the press is let go.
 
-## Frame pacing (`vi.cpp`, `os.cpp`, `priority.cpp`, `host/src/display.cpp`)
+## Frame pacing, sound, logs (`vi.cpp`, `os.cpp`, `priority.cpp`, `host/src/display.cpp`, `host/src/audio.cpp`, `runtime/src/report.cpp`)
 
 - **Retraces** come from the host clock, one at a time (`poll_retrace`). The period is 60 Hz until the main loop matches it to the display (`set_retrace_rate`, checked every second): the display's refresh, or a whole fraction of it, when that is within 0.3 Hz of 60; otherwise, and without vsync, a free 60 Hz. More than a frame late, the schedule restarts from now rather than posting the missed retraces in a burst.
 - **Idle waits** (`idle_sleep`) to a timer's deadline sleep on the condition variable until 1.5 ms (Windows, with `timeBeginPeriod(1)`) or 0.25 ms (elsewhere) before it, then yield until it; a wake (`wake_idle`) ends either part. A wait that is only an upper bound (the millisecond cap in `poll_loop`) just sleeps.
 - **Priorities** (`priority.cpp`): game threads, the GPU command thread and the main loop high; shader compilers and the cache saver background.
 - **Presenting**: with vsync and `VK_KHR_present_wait`, a frame waits for the previous one to reach the screen before acquiring an image (bounded at 50 ms), keeping one frame queued at most. `QILIN_NO_PRESENT_WAIT=1` disables it.
+- **Sound** (`host/src/audio.cpp`): the queue is steered to 40 ms with SDL's frequency ratio (±0.5%, `audio_rate_ratio`); a dry queue restarts with 40 ms of silence; over 200 ms is dropped.
+- **Where the time goes**: the renderer writes GPU timestamps at the start and end of each frame's command buffer (`RecorderStats::gpu_ns`); `Display::take_present_stats()` is the time spent waiting to present. `report_timing` in main.cpp puts them, the recording and drawing times and the sound queue under F3's graph each second and in the log each 5 s.
+- **Logs and crashes** (`runtime/include/qilin/rt/report.hpp`): rt::log and rt::fatal also write to `punchout.log` in the user folder (`punchout.old.log` the run before). The crash handler (signals; Windows' unhandled-exception filter; std::terminate) reports with the registers and back chain of the guest thread it happened on (`set_thread_cpu`, set by start_game and each guest thread's host thread). A watchdog thread in main.cpp logs a game that draws nothing for 10 s unpaused, or a main loop stopped for 5 s.
 - **Measuring**: `Display::frame_times()` keeps the intervals between new frames presented (`host/include/qilin/host/frame_times.hpp`, 1200 frames); F3 or `performance_overlay` shows them, and the log has them and the retraces' lateness every 5 s.
 
 ## Hardware registers (`hw.cpp`, v0.12.0)

@@ -16,6 +16,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 #include "qilin/host/display.hpp"
 #include "settings.hpp"
@@ -43,6 +45,9 @@ public:
     bool take_controls_changed();
     // The internal resolution the game runs at (a change waits for the next start).
     void set_running_scale(unsigned scale) { running_scale_ = scale; }
+    // Lines under the frame-time graph (where the time goes), from the main loop.
+    void set_frame_details(std::vector<std::string> lines) { frame_details_ = std::move(lines); }
+    bool frame_times_shown() const;
 
 private:
     bool handle(const void* sdl_event);
@@ -62,6 +67,7 @@ private:
     bool ok_ = false, opening_ = false, open_ = false, quit_ = false, close_asked_ = false;
     bool sdl_backend_ = false, vulkan_backend_ = false;
     bool hint_ = false, drawn_ = false, peek_ = false, controls_changed_ = false;
+    std::vector<std::string> frame_details_;
     uint64_t hint_until_ = 0;  // SDL ticks (ms)
     // Setting a control by pressing it.
     int capture_ = -1;          // the Control being set, or -1

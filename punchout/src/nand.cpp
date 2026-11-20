@@ -8,9 +8,15 @@
 // holds the user's data at +0 and, for an asynchronous call, its callback at
 // +4. Callbacks are cb(result, block), run as an interrupt.
 //
-// The "safe" open and close (which on the Wii write to a copy and swap it in
-// on close) open the file itself: a write that's cut short by a crash isn't
-// rolled back yet.
+// The "safe" open and close work as on the Wii: writes go to a copy in
+// /tmp, and the close swaps it in with one rename (after flushing it to the
+// disk), so a crash or power cut mid-save leaves the old save whole. Copies
+// left by such a stop are deleted at the next start.
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -36,6 +42,19 @@ constexpr const char* kHomeDir = "/title/00010000/52375050/data";
 fs::path g_root;
 std::string g_current = kHomeDir;
 std::vector<FILE*> g_files;  // by descriptor
+std::vector<fs::path> g_safe_targets;  // by descriptor: for a safe open's copy, the file it replaces on close
+constexpr const char* kSafeSuffix = ".safe";
+
+// Flush a file to the disk itself (not just the OS's cache): before a rename
+// makes it the save.
+bool sync_file(FILE* f) {
+    if (std::fflush(f) != 0) return false;
+#if defined(_WIN32)
+    return _commit(_fileno(f)) == 0;
+#else
+    return fsync(fileno(f)) == 0;
+#endif
+}
 
 std::string guest_string(uint32_t a) { return reinterpret_cast<const char*>(rt::guest_ptr(a)); }
 
@@ -71,6 +90,12 @@ void init_root() {
     fs::create_directories(g_root / std::string(kHomeDir).substr(1), ec);
     fs::create_directories(g_root / "tmp", ec);
     if (ec) rt::fatal(nullptr, "can't create the save folder %s: %s", g_root.string().c_str(), ec.message().c_str());
+    // A safe write cut short last time: its copy goes, the save it would have replaced stays.
+    for (const auto& e : fs::directory_iterator(g_root / "tmp", ec))
+        if (e.path().extension() == kSafeSuffix) {
+            rt::log("saves: a save was cut short last time (%s): the one before it is kept", e.path().filename().string().c_str());
+            fs::remove(e.path(), ec);
+        }
     rt::log("saves: %s", g_root.string().c_str());
 }
 
@@ -106,28 +131,52 @@ int32_t do_delete(const std::string& path) {
     fs::remove_all(p, ec);
     return ec ? kAccess : kOk;
 }
-int32_t do_open(const std::string& path, uint32_t info, uint32_t mode) {  // mode: 1 read, 2 write, 3 both
+// mode: 1 read, 2 write, 3 both. `safe` (and writing): through a copy, swapped in on close.
+int32_t do_open(const std::string& path, uint32_t info, uint32_t mode, bool safe = false) {
     const fs::path p = host_path(path);
     std::error_code ec;
     if (!fs::is_regular_file(p, ec)) return fs::exists(p, ec) ? kInvalid : kNoExists;
-    FILE* f = std::fopen(p.string().c_str(), mode == 1 ? "rb" : "r+b");
-    if (!f) return kAccess;
     size_t fd = 0;
     while (fd < g_files.size() && g_files[fd]) ++fd;
-    if (fd == g_files.size()) g_files.push_back(nullptr);
-    if (fd >= 15) {  // the Wii's limit on open files
-        std::fclose(f);
-        return kMaxFd;
+    if (fd >= 15) return kMaxFd;  // the Wii's limit on open files
+    if (fd == g_files.size()) g_files.push_back(nullptr), g_safe_targets.emplace_back();
+    safe = safe && mode != 1;
+    fs::path open_path = p;
+    if (safe) {
+        open_path = g_root / "tmp" / (p.filename().string() + "." + std::to_string(fd) + kSafeSuffix);
+        fs::copy_file(p, open_path, fs::copy_options::overwrite_existing, ec);
+        if (ec) return kAccess;
     }
+    FILE* f = std::fopen(open_path.string().c_str(), mode == 1 ? "rb" : "r+b");
+    if (!f) return kAccess;
     g_files[fd] = f;
+    g_safe_targets[fd] = safe ? p : fs::path{};
     rt::poke32(info, static_cast<uint32_t>(fd));
     return kOk;
 }
 int32_t do_close(Cpu& c, uint32_t info) {
     FILE* f = file_of(c, info);
-    std::fclose(f);
-    g_files[rt::peek32(info)] = nullptr;
+    const uint32_t fd = rt::peek32(info);
+    const fs::path target = std::move(g_safe_targets[fd]);
+    g_safe_targets[fd].clear();
+    g_files[fd] = nullptr;
     rt::poke32(info, 0xFFFFFFFFu);
+    if (target.empty()) {
+        std::fclose(f);
+        return kOk;
+    }
+    // A safe write: on the disk first, then one rename makes it the save.
+    const fs::path copy = g_root / "tmp" / (target.filename().string() + "." + std::to_string(fd) + kSafeSuffix);
+    const bool synced = sync_file(f);
+    std::fclose(f);
+    std::error_code ec;
+    if (synced) fs::rename(copy, target, ec);
+    if (!synced || ec) {
+        rt::log("saves: %s couldn't be written (%s): the one before it is kept", target.string().c_str(),
+                synced ? ec.message().c_str() : "flushing it to the disk failed");
+        fs::remove(copy, ec);
+        return kAccess;
+    }
     return kOk;
 }
 int32_t do_read(Cpu& c, uint32_t info, uint32_t buf, uint32_t len) {
@@ -193,7 +242,7 @@ void NANDOpenAsync(Cpu& c) { reply_async(c, do_open(guest_string(c.r[3]), c.r[4]
 void NANDClose(Cpu& c) { reply(c, do_close(c, c.r[3])); }
 void NANDCloseAsync(Cpu& c) { reply_async(c, do_close(c, c.r[3]), c.r[4], c.r[5]); }               // (info, cb, block)
 // (path, info, mode, buf, len, cb, block): see the note at the top on "safe".
-void NANDPrivateSafeOpenAsync(Cpu& c) { reply_async(c, do_open(guest_string(c.r[3]), c.r[4], c.r[5]), c.r[8], c.r[9]); }
+void NANDPrivateSafeOpenAsync(Cpu& c) { reply_async(c, do_open(guest_string(c.r[3]), c.r[4], c.r[5], true), c.r[8], c.r[9]); }
 void NANDSafeCloseAsync(Cpu& c) { reply_async(c, do_close(c, c.r[3]), c.r[4], c.r[5]); }
 void NANDGetHomeDir(Cpu& c) {
     std::strcpy(reinterpret_cast<char*>(rt::guest_ptr(c.r[3])), kHomeDir);

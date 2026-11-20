@@ -1,6 +1,7 @@
 // Booting the game: main.dol into MEM1, the boot information the disc loader
 // leaves in low memory, then what __start does, natively (the plan replaces
 // the start-up code: docs/code-analysis.md).
+#include "qilin/rt/report.hpp"
 #include "boot.hpp"
 
 #include <cstdio>
@@ -99,6 +100,7 @@ void load_game(const std::filesystem::path& folder) {
 [[noreturn]] void start_game() {
     namespace b = build;
     rt::Cpu c = rt::new_cpu();
+    rt::set_thread_cpu(&c);  // for a crash report's call stack
     init_threads(c);
     // __init_registers: the stack and the two small-data bases.
     c.r[1] = b::kStackTop;

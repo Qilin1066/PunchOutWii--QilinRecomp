@@ -1,5 +1,6 @@
-// FrameTimes: averages, lows and the rolling window.
+// FrameTimes (averages, lows, the rolling window) and the sound queue's steering.
 #include "qilin/host/frame_times.hpp"
+#include "qilin/host/audio.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -46,6 +47,14 @@ int main() {
     const auto r = t.recent(3);
     check(r.size() == 3 && r[0] == 10.0f && r[2] == 40.0f, "recent, oldest first");
     check(t.recent(100).size() == 10, "recent clamps");
+
+    // The sound queue's steering: on target plays at 1x; over plays faster,
+    // under slower; never beyond 0.5%.
+    using qilin::host::audio_rate_ratio;
+    check(near(audio_rate_ratio(40, 40), 1.0), "sound on target");
+    check(audio_rate_ratio(80, 40) > 1.0 && near(audio_rate_ratio(80, 40), 1.004), "sound over target");
+    check(audio_rate_ratio(0, 40) < 1.0 && near(audio_rate_ratio(0, 40), 0.996), "sound under target");
+    check(near(audio_rate_ratio(1000, 40), 1.005) && near(audio_rate_ratio(-1000, 40), 0.995), "sound speed bounded");
 
     if (failures) return EXIT_FAILURE;
     std::puts("frame_times_test: ok");

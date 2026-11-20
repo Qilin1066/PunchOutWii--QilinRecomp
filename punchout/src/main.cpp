@@ -17,6 +17,7 @@
 // PUNCHOUT_POINTER="x,y" holds the pointer there (-1 to 1, y up);
 // "x,y;x,y@40;x,y@52" moves it there at those many seconds.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -25,6 +26,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -40,7 +42,9 @@
 #include "profile.hpp"
 #include "settings.hpp"
 #include "qilin/host/paths.hpp"
+#include "qilin/rt/report.hpp"
 #include "renderer.hpp"
+#include "recorder.hpp"
 #include "qilin/host/audio.hpp"
 #include "qilin/host/display.hpp"
 #include <SDL3/SDL_timer.h>
@@ -131,6 +135,95 @@ void match_retrace_to_display(qilin::host::Display& display) {
 }
 }  // namespace
 
+// Passes of the main loop, for the watchdog.
+static std::atomic<uint64_t> g_main_passes{0};
+
+// A thread that only watches: says in the log when the game draws no new
+// frame for 10 s while not paused (stuck, or a long load), and when the main
+// loop (input, drawing, presenting) stops for 5 s, and when each goes again.
+// It changes nothing: the log is for working out what happened.
+static void start_watchdog() {
+    std::thread([] {
+        namespace rt = qilin::rt;
+        punchout::set_this_thread_priority(punchout::Priority::background);
+        uint32_t frames = punchout::frame_count();
+        uint64_t passes = g_main_passes.load(std::memory_order_relaxed);
+        unsigned game_still = 0, main_still = 0;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            const uint32_t f = punchout::frame_count();
+            if (f != frames || punchout::game_parked()) {
+                if (game_still >= 10) rt::log("watchdog: the game draws again, after %u s without a new frame", game_still);
+                frames = f, game_still = 0;
+            } else if (++game_still == 10) {
+                rt::log("watchdog: the game has drawn no new frame for 10 s (stuck, or a long load)");
+            }
+            const uint64_t p = g_main_passes.load(std::memory_order_relaxed);
+            if (p != passes) {
+                if (main_still >= 5) rt::log("watchdog: the main loop runs again, after %u s stopped", main_still);
+                passes = p, main_still = 0;
+            } else if (++main_still == 5) {
+                rt::log("watchdog: the main loop (input, drawing, presenting) has been stopped for 5 s");
+            }
+        }
+    }).detach();
+}
+
+// The F3 readout's details (each second) and the timing log (each 5 s).
+static void report_timing(qilin::host::Display& display, punchout::Menu* menu, qilin::host::AudioOut* audio) {
+    namespace rt = qilin::rt;
+    using clock = std::chrono::steady_clock;
+    static auto next = clock::now() + std::chrono::seconds(1);
+    static unsigned seconds = 0;
+    const auto t = clock::now();
+    if (t < next) return;
+    next = t + std::chrono::seconds(1);
+    // Per frame over the last second: the game's recording, the main thread's
+    // drawing, the GPU's own time, and waiting to present.
+    struct Totals {
+        uint64_t frames, record, rendered, render, gpu_ns, gpu_timed;
+    };
+    const punchout::gx::RecorderStats& g = punchout::gx::recorder_stats();
+    const auto rd = [](const std::atomic<uint64_t>& v) { return v.load(std::memory_order_relaxed); };
+    const Totals now{rd(g.frames), rd(g.record_ns), rd(g.rendered), rd(g.render_ns), rd(g.gpu_ns), rd(g.gpu_timed)};
+    static Totals last = now;
+    const auto per = [](uint64_t a, uint64_t b, uint64_t n) { return n ? double(a - b) / 1e6 / double(n) : 0.0; };
+    const double record = per(now.record, last.record, now.frames - last.frames);
+    const double draw = per(now.render, last.render, now.rendered - last.rendered);
+    const double gpu_ms = per(now.gpu_ns, last.gpu_ns, now.gpu_timed - last.gpu_timed);
+    last = now;
+    const auto ps = display.take_present_stats();
+    const double present_wait = ps.presents ? ps.wait_ms / ps.presents : 0.0;
+    // Sound: kept over the 5 s for the log.
+    static qilin::host::AudioOut::Stats sound{};
+    static uint64_t sound_pushes = 0;
+    static double sound_sum = 0;
+    double sound_now = 0;
+    if (audio) {
+        const auto a = audio->take_stats();
+        sound_now = a.average_ms;
+        sound_sum += a.average_ms * a.pushes, sound_pushes += a.pushes;
+        sound.max_ms = std::max(sound.max_ms, a.max_ms);
+        sound.empty += a.empty, sound.dropped += a.dropped, sound.ratio = a.ratio;
+    }
+    if (menu && menu->frame_times_shown()) {
+        char a[96], b[96];
+        std::snprintf(a, sizeof a, "game %.1f ms  draw %.1f ms  GPU %.1f ms", record, draw, gpu_ms);
+        std::snprintf(b, sizeof b, "present wait %.1f ms  sound %.0f ms queued", present_wait, sound_now);
+        menu->set_frame_details({a, b});
+    }
+    if (++seconds % 5) return;
+    const auto ft = display.frame_times().summary();
+    if (ft.frames)
+        rt::log("  frame times (last %.0f s): %.1f fps (%.2f ms), 1%% low %.1f fps, 0.1%% low %.1f fps, worst %.1f ms; waiting to present %.2f ms a frame",
+                ft.average_ms * double(ft.frames) / 1000.0, ft.fps, ft.average_ms, ft.low1_fps, ft.low01_fps, ft.worst_ms, present_wait);
+    if (audio && sound_pushes) {
+        rt::log("  sound: %.1f ms queued on average, %.1f at most, played at %.4fx; ran dry %u times, dropped %u times",
+                sound_sum / double(sound_pushes), sound.max_ms, sound.ratio, sound.empty, sound.dropped);
+        sound = {}, sound_sum = 0, sound_pushes = 0;
+    }
+}
+
 int main(int argc, char** argv) {
     namespace rt = qilin::rt;
     punchout::set_command_line(argc, argv);  // for the game's reset
@@ -153,6 +246,23 @@ int main(int argc, char** argv) {
     if (!folder) {
         std::fprintf(stderr, "usage: punchout [--headless | --offscreen] <folder with the extracted disc: sys/main.dol, sys/boot.bin, files/>\n");
         return 2;
+    }
+    // The log, beside the settings: punchout.log for this run, punchout.old.log
+    // the run before. On Windows the console closes with the game, so after
+    // a crash the file is what's left to read (or send).
+    rt::install_crash_handler();
+    {
+        const std::filesystem::path dir = qilin::host::user_folder(), log = dir / "punchout.log";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        std::filesystem::rename(log, dir / "punchout.old.log", ec);
+        static const std::string log_path = log.string();
+        if (std::FILE* f = std::fopen(log_path.c_str(), "w")) {
+            rt::set_log_file(f);  // open until the process ends
+            rt::set_log_path(log_path.c_str());
+        } else {
+            std::fprintf(stderr, "punchout: the log %s can't be written: only here\n", log_path.c_str());
+        }
     }
     rt::init({std::span(qilin::gen::kFunctions, qilin::gen::kFunctionCount),
               std::span(qilin::gen::kReplaced, qilin::gen::kReplacedCount)});
@@ -256,7 +366,9 @@ int main(int argc, char** argv) {
     auto last = t0;
     uint64_t sequence = 0, shown = 0;
     std::vector<uint8_t> rgba;
+    if (display) start_watchdog();
     for (;;) {
+        g_main_passes.fetch_add(1, std::memory_order_relaxed);
         if (display && !display->poll()) {
             rt::log("window closed");
             std::fflush(nullptr);
@@ -352,17 +464,9 @@ int main(int argc, char** argv) {
                 match_retrace_to_display(*display);
             }
         }
-        // Every 5 s: how evenly new pictures reached the screen (last 20 s).
-        if (display) {
-            static auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            if (const auto t = std::chrono::steady_clock::now(); t >= next_report) {
-                next_report = t + std::chrono::seconds(5);
-                const auto ft = display->frame_times().summary();
-                if (ft.frames)
-                    rt::log("  frame times (last %.0f s): %.1f fps (%.2f ms), 1%% low %.1f fps, 0.1%% low %.1f fps, worst %.1f ms",
-                            ft.average_ms * double(ft.frames) / 1000.0, ft.fps, ft.average_ms, ft.low1_fps, ft.low01_fps, ft.worst_ms);
-            }
-        }
+        // Every second: where a frame's time goes, for the F3 readout; every
+        // 5 s, the log has it with how evenly frames reached the screen.
+        if (display) report_timing(*display, menu.get(), audio.get());
         uint32_t xfb, w, h;
         if (!punchout::take_xfb(&sequence, 0, xfb, w, h)) continue;
         if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {

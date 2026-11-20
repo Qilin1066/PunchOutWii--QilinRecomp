@@ -160,6 +160,11 @@ struct Renderer::Impl {
     Image efb, efb_depth, white;
     Slot slots[2];
     unsigned slot = 0;
+    // GPU time per frame: two timestamps a slot, where the queue has them.
+    VkQueryPool timestamps = VK_NULL_HANDLE;
+    double ns_per_tick = 0;
+    uint64_t tick_mask = 0;
+    bool timed[2] = {};
     uint64_t frames = 0;
 
     VkShaderModule gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag;
@@ -295,6 +300,21 @@ struct Renderer::Impl {
         efb_depth = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, depth_format,
                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         white = Image::create(gpu, 1, 1, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        {
+            uint32_t qn = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(gpu.physical, &qn, nullptr);
+            std::vector<VkQueueFamilyProperties> qs(qn);
+            vkGetPhysicalDeviceQueueFamilyProperties(gpu.physical, &qn, qs.data());
+            const uint32_t bits = gpu.family < qn ? qs[gpu.family].timestampValidBits : 0;
+            if (bits && gpu.properties.limits.timestampPeriod > 0) {
+                VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                qi.queryCount = 4;
+                check(vkCreateQueryPool(gpu.device, &qi, nullptr, &timestamps), "vkCreateQueryPool");
+                ns_per_tick = gpu.properties.limits.timestampPeriod;
+                tick_mask = bits >= 64 ? ~uint64_t{0} : (uint64_t{1} << bits) - 1;
+            }
+        }
         for (Slot& s : slots) {
             VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -1110,6 +1130,16 @@ struct Renderer::Impl {
         const uint64_t w0 = gx::now_ns();  // the GPU finishing the frame before last
         check(vkWaitForFences(gpu.device, 1, &s.fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
         gx::recorder_stats().gpu_wait_ns.fetch_add(gx::now_ns() - w0, std::memory_order_relaxed);
+        if (timed[slot]) {  // the frame this slot drew last: done (its fence passed)
+            uint64_t t[2];
+            if (vkGetQueryPoolResults(gpu.device, timestamps, slot * 2, 2, sizeof t, t, sizeof t[0], VK_QUERY_RESULT_64_BIT) ==
+                VK_SUCCESS) {
+                gx::recorder_stats().gpu_ns.fetch_add(static_cast<uint64_t>(double((t[1] - t[0]) & tick_mask) * ns_per_tick),
+                                                      std::memory_order_relaxed);
+                gx::recorder_stats().gpu_timed.fetch_add(1, std::memory_order_relaxed);
+            }
+            timed[slot] = false;
+        }
         recycle(s);
         check(vkResetDescriptorPool(gpu.device, s.descriptors, 0), "vkResetDescriptorPool");
         // One buffer: the full vertices, the compact ones, then zeros for the
@@ -1132,6 +1162,10 @@ struct Renderer::Impl {
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         VkCommandBuffer cmd = s.cmd;
         check(vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
+        if (timestamps) {
+            vkCmdResetQueryPool(cmd, timestamps, slot * 2, 2);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, timestamps, slot * 2);
+        }
         upload(cmd, s, f.textures);
         barrier(cmd);
 
@@ -1282,6 +1316,10 @@ struct Renderer::Impl {
         }
         if (probing) probe(probe_i);
         vkCmdEndRendering(cmd);
+        if (timestamps) {
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, timestamps, slot * 2 + 1);
+            timed[slot] = true;
+        }
         check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
         submit(s);
         if (probing) {
@@ -1346,6 +1384,7 @@ struct Renderer::Impl {
         for (VkDescriptorSetLayout l : {states_layout, textures_layout, copy_set_layout}) vkDestroyDescriptorSetLayout(gpu.device, l, nullptr);
         for (VkShaderModule m : {gx_vert, gx_frag, gx_frag_depth, fs_vert, clear_frag, copy_frag}) vkDestroyShaderModule(gpu.device, m, nullptr);
         for (VkShaderModule m : gx_frag_stages) vkDestroyShaderModule(gpu.device, m, nullptr);
+        if (timestamps) vkDestroyQueryPool(gpu.device, timestamps, nullptr);
         efb.destroy(gpu);
         efb_depth.destroy(gpu);
         white.destroy(gpu);

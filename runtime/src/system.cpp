@@ -1,17 +1,54 @@
 // The guest machine: memory, dispatcher, replacement registry, fatal errors.
 // Runtime code: no std::format (macOS 10.15, see CMakeLists.txt).
 #include "qilin/rt/system.hpp"
+#include "qilin/rt/report.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 #include "qilin/rt/memory.hpp"
 
 namespace qilin::rt {
 namespace {
+
+std::atomic<std::FILE*> g_log_file{nullptr};
+thread_local Cpu* tl_cpu = nullptr;
+std::string g_log_path;
+
+// One line (or more) to stderr and the log file.
+void vemit(const char* format, va_list args) {
+    char small[1024];
+    va_list again;
+    va_copy(again, args);
+    const int n = std::vsnprintf(small, sizeof small, format, args);
+    std::string big;
+    const char* text = small;
+    if (n >= static_cast<int>(sizeof small)) {
+        big.resize(static_cast<size_t>(n) + 1);
+        std::vsnprintf(big.data(), big.size(), format, again);
+        text = big.c_str();
+    }
+    va_end(again);
+    if (n < 0) text = format;
+    std::fputs(text, stderr);
+    if (std::FILE* f = g_log_file.load(std::memory_order_acquire)) std::fputs(text, f);
+}
+void emit(const char* format, ...) QILIN_PRINTF(1, 2);
+void emit(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vemit(format, args);
+    va_end(args);
+}
+void flush_all() {
+    std::fflush(stderr);
+    if (std::FILE* f = g_log_file.load(std::memory_order_acquire)) std::fflush(f);
+}
 
 constexpr uint32_t kMem1 = 0x80000000u, kMem1Size = 24u << 20;
 constexpr uint32_t kMem2 = 0x90000000u, kMem2Size = 64u << 20;
@@ -68,7 +105,7 @@ void on_replaced(Cpu& c, uint32_t f) {
                                      [](const Registered& r, uint32_t a) { return r.address < a; });
     if (it != g->registered.end() && it->address == f) [[likely]] {
         if (g->trace) [[unlikely]]
-            std::fprintf(stderr, "trace: %s (r3=%08X r4=%08X) from %08X\n", it->name, c.r[3], c.r[4], c.lr);
+            emit("trace: %s (r3=%08X r4=%08X) from %08X\n", it->name, c.r[3], c.r[4], c.lr);
         it->fn(c);
         return;
     }
@@ -94,24 +131,25 @@ bool in_ram(uint32_t a, uint32_t n) {
 // The guest's call stack from its back chain: each frame's first word points
 // to the caller's frame, whose second word holds the saved LR.
 void backtrace(const Cpu& c) {
-    std::fprintf(stderr, "  r1=%08X lr=%08X (in %08X) r3=%08X r4=%08X r5=%08X\n", c.r[1], c.lr,
+    emit("  r1=%08X lr=%08X (in %08X) r3=%08X r4=%08X r5=%08X\n", c.r[1], c.lr,
                  function_containing(c.lr), c.r[3], c.r[4], c.r[5]);
     uint32_t sp = c.r[1];
     for (int depth = 0; depth < 48 && in_ram(sp, 8); ++depth) {
         const uint32_t back = peek32(sp);
         if (back == 0xFFFFFFFFu || back == 0 || !in_ram(back, 8) || back <= sp) break;
         const uint32_t lr = peek32(back + 4);
-        std::fprintf(stderr, "  #%-2d %08X (in %08X)\n", depth, lr, function_containing(lr));
+        emit("  #%-2d %08X (in %08X)\n", depth, lr, function_containing(lr));
         sp = back;
     }
 }
 
 void vreport(Cpu* c, const char* format, va_list args) {
-    std::fputs("punchout: ", stderr);
-    std::vfprintf(stderr, format, args);
-    std::fputc('\n', stderr);
+    std::string line = "punchout: ";
+    line += format;
+    line += '\n';
+    vemit(line.c_str(), args);
     if (c) backtrace(*c);
-    std::fflush(stderr);
+    flush_all();
 }
 
 }  // namespace
@@ -176,11 +214,29 @@ uint32_t function_containing(uint32_t address) {
     return it == f.begin() ? 0 : std::prev(it)->address;
 }
 
+void set_log_file(std::FILE* file) { g_log_file.store(file, std::memory_order_release); }
+void set_thread_cpu(Cpu* c) { tl_cpu = c; }
+Cpu* thread_cpu() { return tl_cpu; }
+void set_log_path(const char* path) { g_log_path = path ? path : ""; }
+
+void report_crash(const char* what) {
+    emit("punchout: crashed: %s\n", what);
+    if (tl_cpu && g) {
+        emit("  the guest's thread here:\n");
+        backtrace(*tl_cpu);
+    } else {
+        emit("  (not on a guest thread)\n");
+    }
+    if (!g_log_path.empty()) emit("  this is in the log: %s\n", g_log_path.c_str());
+    flush_all();
+}
+
 void fatal(Cpu* c, const char* format, ...) {
     va_list args;
     va_start(args, format);
     vreport(c, format, args);
     va_end(args);
+    if (!g_log_path.empty()) emit("  this is in the log: %s\n", g_log_path.c_str());
     std::fflush(nullptr);
     std::_Exit(70);  // EX_SOFTWARE; other guest threads may be parked: no static destructors
 }

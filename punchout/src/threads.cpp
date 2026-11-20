@@ -40,6 +40,7 @@
 #include "os.hpp"
 #include "threads.hpp"
 #include "priority.hpp"
+#include "qilin/rt/report.hpp"
 
 namespace punchout {
 namespace rt = qilin::rt;
@@ -181,6 +182,7 @@ void host_main(Thread* t) {
         t->go = false;
     }
     set_interrupts_enabled(true);  // a new thread's context has interrupts on
+    rt::set_thread_cpu(t->cpu);    // for a crash report's call stack
     uint32_t value;
     try {
         rt::call(*t->cpu, t->entry);

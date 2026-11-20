@@ -90,7 +90,7 @@ qilin_tool(qilin)
 target_compile_definitions(qilin PRIVATE QILIN_VERSION="${PROJECT_VERSION}")
 
 # ---- Runtime (what players run: no std::format) ----
-add_library(qilin_rt STATIC runtime/src/memory.cpp runtime/src/system.cpp)
+add_library(qilin_rt STATIC runtime/src/memory.cpp runtime/src/system.cpp runtime/src/report.cpp)
 target_include_directories(qilin_rt PUBLIC runtime/include)
 target_link_libraries(qilin_rt PRIVATE qilin_warnings)
 

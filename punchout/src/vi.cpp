@@ -72,12 +72,13 @@ void report() {
     }
     // Drawing: per frame, the guest thread's recording and the main thread's drawing.
     struct Drawing {
-        uint64_t frames, record, wait, lookups, hash, decoded, bytes, decode, rendered, render, gpu, made;
+        uint64_t frames, record, wait, lookups, hash, decoded, bytes, decode, rendered, render, gpu, made, gpu_ns, gpu_timed;
     };
     const gx::RecorderStats& g = gx::recorder_stats();
     const auto rd = [](const std::atomic<uint64_t>& v) { return v.load(std::memory_order_relaxed); };
     const Drawing now{rd(g.frames),   rd(g.record_ns), rd(g.wait_ns), rd(g.texture_lookups), rd(g.hash_ns),
-                      rd(g.textures_decoded), rd(g.texture_bytes), rd(g.decode_ns), rd(g.rendered), rd(g.render_ns), rd(g.gpu_wait_ns), rd(g.images_made)};
+                      rd(g.textures_decoded), rd(g.texture_bytes), rd(g.decode_ns), rd(g.rendered), rd(g.render_ns), rd(g.gpu_wait_ns), rd(g.images_made),
+                      rd(g.gpu_ns), rd(g.gpu_timed)};
     static Drawing d_last{};
     if (now.frames != d_last.frames) {
         const double frames = double(now.frames - d_last.frames), rendered = double(std::max<uint64_t>(1, now.rendered - d_last.rendered));
@@ -90,6 +91,9 @@ void report() {
                 ms(now.render, d_last.render, rendered), ms(now.gpu, d_last.gpu, rendered), static_cast<unsigned long long>((now.bytes - d_last.bytes) / 1024),
                 static_cast<unsigned long long>(rd(g.gpu_textures)), static_cast<unsigned long long>(rd(g.gpu_spares)),
                 static_cast<unsigned long long>(now.made - d_last.made));
+        if (now.gpu_timed != d_last.gpu_timed)
+            rt::log("  the GPU's own time per frame: %.2f ms",
+                    ms(now.gpu_ns, d_last.gpu_ns, double(now.gpu_timed - d_last.gpu_timed)));
     }
     d_last = now;
 }

@@ -121,6 +121,7 @@ struct Display::Impl {
     // the queue (a frame less latency than a full FIFO queue). 0: none yet on
     // this swapchain.
     uint64_t present_id = 0, waitable_id = 0;
+    PresentStats present_stats;
     uint32_t buttons = 0;
     SDL_Gamepad* pad = nullptr;
     bool rumbling = false;
@@ -618,6 +619,7 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
     if (d.window) {
         if (d.need_rebuild || d.vsync_built != d.picture.vsync) d.build_swapchain();
         if (d.extent.width == 0) return;  // minimised
+        const auto waited_from = std::chrono::steady_clock::now();
         if (d.gpu.present_wait && d.vsync_built && d.waitable_id) {
             // Bounded: a display that stops refreshing (asleep, covered) only costs 50 ms.
             const VkResult w = vkWaitForPresentKHR(d.gpu.device, d.swapchain, d.waitable_id, 50'000'000);
@@ -633,6 +635,8 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
             return;
         }
         if (r != VK_SUBOPTIMAL_KHR) check(r, "vkAcquireNextImageKHR");
+        ++d.present_stats.presents;
+        d.present_stats.wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waited_from).count();
         dst = d.swap_images[index];
         dst_view = d.swap_views[index];
         dst_size = d.extent;
@@ -721,6 +725,11 @@ void Display::present_image(VkImage image, VkImageView view, uint32_t width, uin
     d.count_new();
 }
 
+Display::PresentStats Display::take_present_stats() {
+    const PresentStats s = impl_->present_stats;
+    impl_->present_stats = {};
+    return s;
+}
 const FrameTimes& Display::frame_times() const { return impl_->times; }
 
 void Display::present_again() {

@@ -39,6 +39,7 @@ struct RecorderStats {
     std::atomic<uint64_t> textures_decoded{0}, texture_bytes{0}, decode_ns{0};  // decoding new ones (bytes of guest data)
     std::atomic<uint64_t> rendered{0}, render_ns{0};  // the main thread drawing frames
     std::atomic<uint64_t> gpu_wait_ns{0};             // ... of which waiting for the GPU to finish an older frame
+    std::atomic<uint64_t> gpu_ns{0}, gpu_timed{0};    // the GPU's own time on frames (timestamps), and how many were timed
     std::atomic<uint64_t> gpu_textures{0}, gpu_spares{0};  // images the renderer holds now: in use, and kept to reuse
     std::atomic<uint64_t> images_made{0};             // images created since boot (the rest are reused)
 };

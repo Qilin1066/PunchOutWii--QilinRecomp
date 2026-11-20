@@ -278,6 +278,8 @@ void Menu::tick() {
     drawn_ = false;
 }
 
+bool Menu::frame_times_shown() const { return s_.performance_overlay; }
+
 // F3: how evenly frames reach the screen, top left. The lows are the frame
 // rates of the slowest 1% and 0.1% of frames over the last 20 s.
 void Menu::draw_frame_times() {
@@ -298,6 +300,7 @@ void Menu::draw_frame_times() {
         const std::vector<float> recent = t.recent(240);
         ImGui::PlotLines("##ft", recent.data(), int(recent.size()), 0, nullptr, 0.0f, 50.0f, ImVec2(240.0f, 48.0f));
     }
+    for (const std::string& line : frame_details_) ImGui::TextUnformatted(line.c_str());
     ImGui::End();
 }
 
