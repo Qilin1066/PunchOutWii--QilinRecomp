@@ -123,6 +123,7 @@ struct Sampler {
     uint8_t mag_linear, min_linear, mip;  // mip: 0 none, 1 point, 2 linear
     int8_t lod_bias;   // in 1/32
     uint8_t min_lod, max_lod;  // in 1/16
+    uint8_t max_aniso;  // the hardware's own anisotropic filtering: 0 none, 1 2x, 2 4x (TEXMODE0 bits 19-20)
     bool operator==(const Sampler&) const = default;
 };
 
@@ -186,14 +187,18 @@ struct Frame {
     std::vector<Texture> textures;  // new this frame
     std::vector<int32_t> released;  // texture ids no longer used
     bool alpha_target = true;       // the EFB has alpha (RGBA6_Z24)
+    bool captured = false;          // the frame PUNCHOUT_DFF captured (main.cpp saves our picture of it)
     // Empty again, keeping the vectors' capacity (recycle_frame). A new
     // member must be reset here too.
     void clear() {
         vertices.clear(), small.clear(), indices.clear(), states.clear(), draws.clear(), copies.clear(), packets.clear();
         textures.clear(), released.clear();
         alpha_target = true;
+        captured = false;
     }
 };
+// PUNCHOUT_DFF: the frame the next XFB copy ends is the captured one.
+void mark_captured_frame();
 
 // Hand a recorded frame to the renderer (it may wait while the renderer is
 // two frames behind, as the console's CPU waits on a full FIFO).

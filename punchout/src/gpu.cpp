@@ -21,17 +21,22 @@
 #include "hw.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <bit>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "os.hpp"
+#include "gx.hpp"
 #include "recorder.hpp"
+#include "video.hpp"
 
 namespace punchout {
 namespace rt = qilin::rt;
@@ -48,6 +53,9 @@ bool g_finish_pending = false, g_token_pending = false;
 
 constexpr unsigned kPeCtrl = 0x0A / 2, kPeToken = 0x0E / 2;
 constexpr unsigned kPiFifoBase = 0x0C / 4, kPiFifoEnd = 0x10 / 4, kPiFifoWrite = 0x14 / 4;
+// The PI's FIFO pointers are physical addresses (MEM2 from 0x10000000); bit 26
+// of the write pointer is its wrap flag (GXGetFifoWrap), never an address bit.
+constexpr uint32_t kFifoAddress = 0x1FFFFFE0u & ~0x04000000u;
 
 // ---- the decoder's state
 std::array<uint32_t, 256> g_cpmem{};  // CP registers set by LOAD_CP_REG (VCD at 0x50/0x60, VAT at 0x70/0x80/0x90 + n)
@@ -56,6 +64,8 @@ std::vector<uint32_t> g_xf(0x1058);   // XF memory and registers
 Stats g_stats;
 
 gx::Registers regs() { return {g_cpmem.data(), g_xf.data(), g_bp.data()}; }
+bool g_xfb_copied = false;  // set by the XFB copy just decoded (PUNCHOUT_DFF)
+bool g_dff_recording = false;  // PUNCHOUT_DFF is recording a frame
 
 std::vector<uint8_t> g_fifo;  // bytes written to the pipe, not yet a whole command
 size_t g_fifo_at = 0;
@@ -168,7 +178,10 @@ void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
     case 0x47: pe_token(static_cast<uint16_t>(value), false); break;  // token
     case 0x48: pe_token(static_cast<uint16_t>(value), true); break;   // token with interrupt
     case 0x52:                                                      // EFB copy
-        if (value & (1u << 14)) ++g_stats.xfb_copies;
+        if (value & (1u << 14)) {
+            ++g_stats.xfb_copies, g_xfb_copied = true;
+            if (g_dff_recording) gx::mark_captured_frame();  // this copy ends the captured frame
+        }
         else ++g_stats.texture_copies;
         gx::record_copy(regs(), value);
         break;
@@ -233,6 +246,87 @@ unsigned g_cp_write_count = 0;
 uint32_t be32(const uint8_t* p) { return uint32_t{p[0]} << 24 | uint32_t{p[1]} << 16 | uint32_t{p[2]} << 8 | p[3]; }
 
 // Decode whole commands from data[used..size); stop at one that isn't complete.
+// ---- PUNCHOUT_DFF=<file>@<seconds>: the first whole frame after that much
+// game time, as a Dolphin FIFO log (.dff, version 6), for Dolphin's FIFO
+// player to render as the hardware would: a reference to compare our
+// renderer's picture with. It holds the registers at the frame's start, the
+// frame's commands from one XFB copy to the next, and the console's RAM
+// (MEM1 and MEM2, as it is at the frame's end) as two memory updates before
+// the first command. Best with PUNCHOUT_GPU_THREAD=0, so RAM is as the
+// commands left it.
+struct DffCapture {
+    std::string path;
+    double at = 0;
+    int state = 0;  // 0 waiting, 1 recording the frame, 2 written
+    std::vector<uint8_t> bytes;
+    std::array<uint32_t, 256> bp{}, cp{};
+    std::vector<uint32_t> xf;
+};
+DffCapture* g_dff = [] () -> DffCapture* {
+    const char* e = std::getenv("PUNCHOUT_DFF");
+    if (!e || !*e) return nullptr;
+    auto* d = new DffCapture;
+    const std::string spec = e;
+    const size_t atsign = spec.rfind('@');
+    d->path = spec.substr(0, atsign);
+    if (atsign != std::string::npos) d->at = std::atof(spec.c_str() + atsign + 1);
+    return d;
+}();
+
+void dff_write(const DffCapture& d) {
+    FILE* f = std::fopen(d.path.c_str(), "wb");
+    if (!f) rt::fatal(nullptr, "PUNCHOUT_DFF: can't write %s", d.path.c_str());
+    auto u32le = [&](uint32_t v) { std::fwrite(&v, 4, 1, f); };
+    auto u64le = [&](uint64_t v) { std::fwrite(&v, 8, 1, f); };
+    auto u8s = [&](uint8_t v, int n) { for (int i = 0; i < n; ++i) std::fputc(v, f); };
+    constexpr uint32_t kMem1 = 0x01800000u, kMem2 = 0x04000000u, kTex = 1u << 20;
+    // Layout: header (128), the frame (64), BP, CP, XF memory, XF registers,
+    // TMEM, the commands, the two updates (24 each), MEM1, MEM2.
+    const uint64_t frame_at = 128, bp_at = frame_at + 64, cp_at = bp_at + 1024, xfm_at = cp_at + 1024,
+                   xfr_at = xfm_at + 4096 * 4, tex_at = xfr_at + 88 * 4, fifo_at = tex_at + kTex,
+                   upd_at = fifo_at + d.bytes.size(), mem1_at = upd_at + 48, mem2_at = mem1_at + kMem1;
+    u32le(0x0d01f1f0), u32le(6), u32le(1);                    // id, version, loader version
+    u64le(bp_at), u32le(256), u64le(cp_at), u32le(256);
+    u64le(xfm_at), u32le(4096), u64le(xfr_at), u32le(88);
+    u64le(frame_at), u32le(1), u32le(1);                      // one frame; flags: Wii
+    u64le(tex_at), u32le(kTex), u32le(kMem1), u32le(kMem2);
+    std::fwrite("R7PP01\0\0", 1, 8, f);
+    u8s(0, 24);
+    // The FIFO the player streams the commands through: the game's own (PI's base and end).
+    const uint32_t fifo_base = g_pi[kPiFifoBase] & kFifoAddress, fifo_end = g_pi[kPiFifoEnd] & kFifoAddress;
+    u64le(fifo_at), u32le(uint32_t(d.bytes.size())), u32le(fifo_base), u32le(fifo_end), u64le(upd_at), u32le(2), u8s(0, 32);
+    for (uint32_t v : d.bp) u32le(v);
+    for (uint32_t v : d.cp) u32le(v);
+    for (int i = 0; i < 4096; ++i) u32le(d.xf[size_t(i)]);
+    for (int i = 0; i < 88; ++i) u32le(d.xf[0x1000 + size_t(i)]);
+    u8s(0, int(kTex));
+    std::fwrite(d.bytes.data(), 1, d.bytes.size(), f);
+    u32le(0), u32le(0x00000000u), u64le(mem1_at), u32le(kMem1), std::fputc(4, f), u8s(0, 3);  // MEM1, at the first command
+    u32le(0), u32le(0x10000000u), u64le(mem2_at), u32le(kMem2), std::fputc(4, f), u8s(0, 3);  // MEM2
+    std::fwrite(rt::guest_ptr(0x80000000u), 1, kMem1, f);
+    std::fwrite(rt::guest_ptr(0x90000000u), 1, kMem2, f);
+    std::fclose(f);
+    rt::log("PUNCHOUT_DFF: wrote %s (%zu bytes of commands)", d.path.c_str(), d.bytes.size());
+}
+
+// After each top-level command: record it while the frame is being captured;
+// at an XFB copy, start or finish.
+void dff_after(const uint8_t* p, size_t n) {
+    DffCapture& d = *g_dff;
+    if (d.state == 1) d.bytes.insert(d.bytes.end(), p, p + n);
+    if (!g_xfb_copied) return;
+    g_xfb_copied = false;
+    if (d.state == 0 && frame_count() / 60.0 >= d.at) {
+        d.bp = g_bp, d.cp = g_cpmem, d.xf = g_xf;
+        d.state = 1;
+        g_dff_recording = true;
+    } else if (d.state == 1) {
+        dff_write(d);
+        d.state = 2;
+        g_dff_recording = false;
+    }
+}
+
 void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_display_list) {
     while (used < size) {
         const uint8_t* p = data + used;
@@ -299,6 +393,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             bad_command(c, data, used, left, in_display_list);
         }
         used += n;
+        if (g_dff && !in_display_list && g_dff->state < 2) dff_after(p, n);
     }
 }
 
@@ -344,7 +439,7 @@ void pipe_write(Cpu& c, uint32_t value, unsigned size) {
 
 // The PI's FIFO pointers are physical addresses (MEM2 from 0x10000000); bit 26
 // of the write pointer is its wrap flag (GXGetFifoWrap), never an address bit.
-constexpr uint32_t kFifoAddress = 0x1FFFFFE0u & ~0x04000000u, kFifoWrapped = 0x04000000u;
+constexpr uint32_t kFifoWrapped = 0x04000000u;  // (kFifoAddress is with the PI's registers)
 constexpr unsigned kCpControl = 0x02 / 2, kCpWriteLo = 0x34 / 2, kCpWriteHi = 0x36 / 2;
 
 // CP control bit 4 links the command processor to the CPU's FIFO: then the

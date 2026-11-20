@@ -612,6 +612,7 @@ void bind_textures(const Registers& r, Draw& d) {
         s.lod_bias = int8_t((mode0 >> 9) & 0xFF);
         s.min_lod = uint8_t(mode1 & 0xFF);
         s.max_lod = uint8_t((mode1 >> 8) & 0xFF);
+        s.max_aniso = uint8_t(std::min<uint32_t>((mode0 >> 19) & 3, 2));
         if (s.wrap_s == 3) s.wrap_s = 0;
         if (s.wrap_t == 3) s.wrap_t = 0;
     }
@@ -811,6 +812,9 @@ void record_tlut_load(const Registers& r, uint32_t command) {
     load_tlut(source, tmem, bytes);
 }
 
+static bool g_capture_next = false;
+void mark_captured_frame() { g_capture_next = true; }
+
 static void record_copy_timed(const Registers& r, uint32_t command) {
     Frame& f = *g_frame;
     Copy c{};
@@ -865,6 +869,8 @@ static void record_copy_timed(const Registers& r, uint32_t command) {
     f.packets.push_back({Packet::kCopy, uint32_t(f.copies.size())});
     f.copies.push_back(c);
     if (c.to_xfb) {
+        f.captured = g_capture_next;
+        g_capture_next = false;
         textures_end_frame(f);
         g_stats.frames.fetch_add(1, std::memory_order_relaxed);
         submit(std::move(g_frame));

@@ -15,4 +15,5 @@ void init_gpu();
 // What the decoder has seen, as of its last batch.
 Stats gpu_stats();
 
+
 }  // namespace punchout

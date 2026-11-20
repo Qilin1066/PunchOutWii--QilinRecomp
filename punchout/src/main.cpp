@@ -32,6 +32,7 @@
 #include "audio.hpp"
 #include "hw.hpp"
 #include "gx.hpp"
+#include "gpu.hpp"
 #include "input.hpp"
 #include "menu.hpp"
 #include "os.hpp"
@@ -118,6 +119,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<qilin::host::Display> display;
     std::unique_ptr<punchout::Renderer> renderer;
     std::unique_ptr<punchout::Menu> menu;
+    unsigned renderer_scale = 1;
     if (!headless) {
         qilin::host::Gpu::prefer(settings.gpu);
         qilin::host::Display::Options o;
@@ -132,6 +134,7 @@ int main(int argc, char** argv) {
         renderer = std::make_unique<punchout::Renderer>(display->gpu(), scale, settings.anisotropy);
         punchout::gx::set_rendering(true);
         rt::log("drawing with %s, the EFB at %ux", display->device_name().c_str(), scale);
+        renderer_scale = scale;
         if (!offscreen) {
             menu = std::make_unique<punchout::Menu>(*display, settings, data);
             menu->set_running_scale(scale);
@@ -269,6 +272,21 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 2; ++i)  // what's queued (two at most), then on to showing
             if (auto f = punchout::gx::next_frame(i == 0 ? 4 : 0)) {
                 renderer->render(*f);
+                if (f->captured && display) {  // PUNCHOUT_DFF: our picture of the captured frame, beside it
+                    for (const auto& c : f->copies)
+                        if (const qilin::host::Image* x = c.to_xfb ? renderer->xfb(c.dest) : nullptr) {
+                            display->present_image(x->image, x->view, x->width, x->height, aspect, x->height / renderer_scale);
+                            const std::vector<uint8_t> px = display->read_back();
+                            std::string name = std::getenv("PUNCHOUT_DFF");
+                            name = name.substr(0, name.rfind('@')) + ".ppm";
+                            if (FILE* fp = std::fopen(name.c_str(), "wb")) {
+                                std::fprintf(fp, "P6\n1280 720\n255\n");
+                                for (size_t k = 0; k + 3 < px.size(); k += 4) std::fwrite(&px[k], 1, 3, fp);
+                                std::fclose(fp);
+                                rt::log("PUNCHOUT_DFF: our picture of the frame: %s", name.c_str());
+                            }
+                        }
+                }
                 punchout::gx::recycle_frame(std::move(f));
             }
             else break;

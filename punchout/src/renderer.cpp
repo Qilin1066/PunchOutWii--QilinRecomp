@@ -643,11 +643,21 @@ struct Renderer::Impl {
         sci.addressModeU = kWrap[std::min<unsigned>(s.wrap_s, 2)];
         sci.addressModeV = kWrap[std::min<unsigned>(s.wrap_t, 2)];
         sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sci.minLod = s.mip ? float(s.min_lod) / 16.0f : 0.0f;
+        // The LOD as the hardware's (and Dolphin's) rules: with mipmaps, the
+        // game's bias (1/32 steps) and range, a minimum above the maximum
+        // taking the maximum; without, level 0 only.
         sci.maxLod = s.mip ? float(s.max_lod) / 16.0f : 0.0f;
-        if (anisotropy > 1.0f && s.min_linear) {  // an enhancement: the console filters with none
+        sci.minLod = s.mip ? float(std::min(s.min_lod, s.max_lod)) / 16.0f : 0.0f;
+        sci.mipLodBias = s.mip ? float(s.lod_bias) / 32.0f : 0.0f;
+        // Anisotropic filtering: the game's own (GX filters up to 4x, a floor
+        // at a grazing angle relies on it), or more as an enhancement. Linear
+        // filtering throughout while it's on, as Dolphin has it.
+        const float wanted = std::max(float(1u << s.max_aniso), anisotropy);
+        if (wanted > 1.0f && gpu.max_anisotropy > 1.0f) {
             sci.anisotropyEnable = VK_TRUE;
-            sci.maxAnisotropy = anisotropy;
+            sci.maxAnisotropy = std::min(wanted, gpu.max_anisotropy);
+            sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+            if (s.mip) sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
         }
         check(vkCreateSampler(gpu.device, &sci, nullptr, &v), "vkCreateSampler");
         return v;
