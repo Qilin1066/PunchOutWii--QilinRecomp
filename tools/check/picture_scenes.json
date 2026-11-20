@@ -19,7 +19,7 @@
     {
       "name": "main_menu",
       "needs_save": true,
-      "seconds": 37,
+      "seconds": 40,
       "env": {
         "PUNCHOUT_POINTER": "0,-0.55;-0.38,0.28@24;0,-0.2@29;0.9,-0.9@33",
         "PUNCHOUT_INPUT": "Y@11,Y@15,Y@19,Y@27,Y@31"
