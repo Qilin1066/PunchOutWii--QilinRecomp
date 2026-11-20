@@ -226,6 +226,7 @@ uint64_t ram_hash(uint32_t address, uint32_t w, uint32_t h) {
 void load_tlut(uint32_t source, uint32_t tmem_address, uint32_t bytes) {
     if (tmem_address + bytes > sizeof g_tmem) rt::fatal(nullptr, "a palette load runs past TMEM (%u bytes at %X)", bytes, tmem_address);
     std::memcpy(g_tmem + tmem_address, guest(source, bytes), bytes);
+    if (g_dff_use) [[unlikely]] dff_use_memory(source, bytes);
 }
 
 int32_t texture_for(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w, uint32_t& h) {
@@ -255,6 +256,7 @@ int32_t texture_for(const uint32_t* bp, unsigned map, Frame& frame, uint32_t& w,
     for (uint32_t l = 0, lw = w, lh = h; l < levels; ++l, lw = std::max(1u, lw / 2), lh = std::max(1u, lh / 2))
         bytes += texture_bytes(format, lw, lh);
     const uint8_t* src = guest(address, bytes);
+    if (g_dff_use) [[unlikely]] dff_use_memory(address, bytes);
     const uint8_t* palette = nullptr;
     uint64_t palette_hash = 0;
     const unsigned tf = (tlut >> 10) & 3;

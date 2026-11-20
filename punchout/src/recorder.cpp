@@ -78,8 +78,16 @@ float normal_component(const uint8_t* p, unsigned fmt) {
     }
 }
 
+// PUNCHOUT_DFF: the span of each vertex array the primitive being recorded reads.
+uint32_t g_use_lo[16], g_use_hi[16];
+void note_array(unsigned array, uint32_t offset, uint32_t bytes) {
+    g_use_lo[array] = std::min(g_use_lo[array], offset);
+    g_use_hi[array] = std::max(g_use_hi[array], offset + bytes);
+}
+
 const uint8_t* array_data(const Registers& r, unsigned array, uint32_t index, uint32_t bytes) {
     const uint32_t base = r.cp[0xA0 + array], stride = r.cp[0xB0 + array];
+    if (g_dff_use) [[unlikely]] note_array(array, index * stride, bytes);
     const uint32_t a = (base + index * stride) & 0x1FFFFFFFu;
     if ((a < 0x01800000u && a + bytes <= 0x01800000u) || (a >= 0x10000000u && a + bytes <= 0x14000000u))
         return rt::guest_ptr(0x80000000u | a);
@@ -209,8 +217,10 @@ size_t read_vertex(const Registers& r, const Format& f, const uint8_t* p, Vertex
         if (how == 2) index = *p++;
         else index = be16(p), p += 2;
         const Array& a = f.arrays[array];
-        if (a.any && index <= a.last) [[likely]]
+        if (a.any && index <= a.last) [[likely]] {
+            if (g_dff_use) [[unlikely]] note_array(array, index * a.stride, bytes);
             return a.host + size_t(index) * a.stride;
+        }
         return array_data(r, array, index, bytes);  // reports it
     };
     // Position.
@@ -337,8 +347,10 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
         if (how == 2) index = *p++;
         else index = be16(p), p += 2;
         const Array& a = f.arrays[array];
-        if (a.any && index <= a.last) [[likely]]
+        if (a.any && index <= a.last) [[likely]] {
+            if (g_dff_use) [[unlikely]] note_array(array, index * a.stride, bytes);
             return a.host + size_t(index) * a.stride;
+        }
         return array_data(r, array, index, bytes);  // reports it
     };
     bool normal = false;
@@ -672,6 +684,12 @@ std::unique_ptr<Frame> next_frame(unsigned timeout_ms) {
 void state_changed() { g_dirty = true; }
 
 static void record_primitive_timed(const Registers& r, uint8_t opcode, const uint8_t* data, uint32_t count);
+static bool g_capture_next = false;
+void mark_captured_frame() { g_capture_next = true; }
+static uint32_t g_primitive_serial = 0;
+void set_primitive_serial(uint32_t n) { g_primitive_serial = n; }
+bool g_dff_use = false;
+void (*g_dff_use_hook)(uint32_t, uint32_t) = nullptr;
 static void record_copy_timed(const Registers& r, uint32_t command);
 
 // Time spent recording, less any wait for the main thread inside.
@@ -694,12 +712,17 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     thread_local std::vector<Vertex> decoded;
     decoded.resize(count);
     const Plan plan = plan_of(r, fmt);
+    if (g_dff_use) [[unlikely]]
+        std::fill(std::begin(g_use_lo), std::end(g_use_lo), ~0u), std::fill(std::begin(g_use_hi), std::end(g_use_hi), 0u);
     if (plan.usable) {
         has = plan.has;
         for (uint32_t i = 0; i < count; ++i) data += decode_vertex(r, fmt, plan, data, decoded[i]);
     } else {
         for (uint32_t i = 0; i < count; ++i) data += read_vertex(r, fmt, data, decoded[i], has);
     }
+    if (g_dff_use) [[unlikely]]
+        for (unsigned a = 0; a < 16; ++a)
+            if (g_use_lo[a] < g_use_hi[a]) dff_use_memory(r.cp[0xA0 + a] + g_use_lo[a], g_use_hi[a] - g_use_lo[a]);
     // The compact layout when nothing needs the rest: no tangents or binormals
     // in the format, and none sent before (emboss texgen reads the last ones),
     // and no texture coordinates past the second.
@@ -789,6 +812,7 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     if (((r.bp[0xF5] >> 2) & 3) != 0 && d.depth_test && !((r.bp[0x43] >> 6) & 1)) d.pipeline.depth_out = 1;
     viewport_and_scissor(r, d);
     bind_textures(r, d);
+    d.primitive = g_primitive_serial;
     f.packets.push_back({Packet::kDraw, uint32_t(f.draws.size())});
     f.draws.push_back(d);
 }
@@ -812,8 +836,7 @@ void record_tlut_load(const Registers& r, uint32_t command) {
     load_tlut(source, tmem, bytes);
 }
 
-static bool g_capture_next = false;
-void mark_captured_frame() { g_capture_next = true; }
+
 
 static void record_copy_timed(const Registers& r, uint32_t command) {
     Frame& f = *g_frame;

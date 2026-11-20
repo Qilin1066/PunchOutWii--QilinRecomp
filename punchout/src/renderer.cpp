@@ -110,7 +110,7 @@ struct Spare {
     uint64_t since = 0;  // the frame it became spare
 };
 constexpr VkImageUsageFlags kUploaded = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-constexpr VkImageUsageFlags kCopied = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+constexpr VkImageUsageFlags kCopied = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;  // read back by PUNCHOUT_PROBE
 constexpr VkImageUsageFlags kXfb = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;  // sampled: the window draws it through a look
 constexpr uint64_t kSpareFrames = 120;  // spares unused for two seconds are destroyed
 constexpr size_t kMaxSpares = 64;
@@ -147,6 +147,12 @@ VkShaderModule module(VkDevice dev, const uint32_t* code, size_t bytes) {
 struct Renderer::Impl {
     host::Gpu& gpu;
     unsigned scale;
+    // PUNCHOUT_PROBE: the captured frame's texture copies, read back as they're made.
+    struct CopyDump {
+        Buffer buf;
+        uint32_t w, h, format;
+    };
+    std::vector<CopyDump>* copy_dumps = nullptr;
     float anisotropy = 1.0f;  // for filtered textures (set_anisotropy)
     VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
     Image efb, efb_depth, white;
@@ -807,6 +813,16 @@ struct Renderer::Impl {
         vkCmdEndRendering(cmd);
         host::transition(cmd, target->image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                          c.to_xfb ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (copy_dumps && !c.to_xfb) {  // PUNCHOUT_PROBE: this copy's texture, as the draws after it sample it
+            CopyDump dmp{Buffer::host_visible(gpu, VkDeviceSize(w) * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT), w, h, c.format};
+            host::transition(cmd, target->image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkBufferImageCopy r{};
+            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            r.imageExtent = {w, h, 1};
+            vkCmdCopyImageToBuffer(cmd, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dmp.buf.buffer, 1, &r);
+            host::transition(cmd, target->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            copy_dumps->push_back(std::move(dmp));
+        }
         barrier(cmd);
         begin_efb(cmd);
         if (c.clear && (c.clear_color || c.clear_alpha || c.clear_depth)) {
@@ -835,6 +851,64 @@ struct Renderer::Impl {
         int32_t x0 = std::clamp(r.offset.x, 0, W), y0 = std::clamp(r.offset.y, 0, H);
         int32_t x1 = std::clamp(r.offset.x + int32_t(r.extent.width), 0, W), y1 = std::clamp(r.offset.y + int32_t(r.extent.height), 0, H);
         r = {{x0, y0}, {uint32_t(std::max(0, x1 - x0)), uint32_t(std::max(0, y1 - y0))}};
+    }
+
+    // PUNCHOUT_PROBE's log: every packet that changed the pixel (slot i+1 is
+    // after packet i), with the draw's blend, depth, TEV and texture state.
+    void report_probe(const gx::Frame& f, const uint8_t* data, size_t count) {
+        const auto at = [&](size_t i) { return data + i * 8; };
+        for (size_t i = 0; i < f.copies.size(); ++i) {
+            const gx::Copy& c = f.copies[i];
+            rt::log("copy %llu: %s src %d,%d %dx%d -> %ux%u format %X%s gamma %.1f filter %u/%u/%u%s%s texture %d", static_cast<unsigned long long>(i),
+                    c.to_xfb ? "XFB" : "texture", c.src[0], c.src[1], c.src[2], c.src[3], c.dest_width, c.dest_height, c.format,
+                    c.half_scale ? " half" : "", c.gamma, c.filter[0], c.filter[1], c.filter[2], c.from_depth ? " depth" : "",
+                    c.efb_alpha ? " alpha" : "", c.texture);
+        }
+        for (size_t i = 0; i + 1 <= count && i < f.packets.size(); ++i) {
+            const uint8_t *a = at(i), *b = at(i + 1);
+            if (std::memcmp(a, b, 8) == 0) continue;
+            float za, zb;
+            std::memcpy(&za, a + 4, 4), std::memcpy(&zb, b + 4, 4);
+            const gx::Packet& pk = f.packets[i];
+            if (pk.kind == gx::Packet::kCopy) {
+                const gx::Copy& c = f.copies[pk.index];
+                rt::log("probe #%llu copy%s: rgba %u,%u,%u,%u -> %u,%u,%u,%u  z %.7f -> %.7f", static_cast<unsigned long long>(i), c.clear ? " (clears)" : "",
+                        a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], za, zb);
+                continue;
+            }
+            const gx::Draw& d = f.draws[pk.index];
+            const auto& bp = f.states[d.state].bp;
+            const auto reg = [&](unsigned r) { return bp[r / 4][r % 4]; };
+            const unsigned stages = ((reg(0x00) >> 10) & 15) + 1;
+            rt::log("probe #%llu draw %u (primitive %u): rgba %u,%u,%u,%u -> %u,%u,%u,%u  z %.7f -> %.7f", static_cast<unsigned long long>(i), pk.index, d.primitive, a[0], a[1], a[2], a[3], b[0], b[1],
+                    b[2], b[3], za, zb);
+            rt::log("    blend %u src %u dst %u op %u mask %X logic %u | z test %u write %u func %u | %u vertices, cull %u, has %X",
+                    d.pipeline.blend, d.pipeline.src, d.pipeline.dst, d.pipeline.op, d.pipeline.write_mask, d.pipeline.logic,
+                    d.depth_test, d.depth_write, d.depth_func, d.index_count, d.cull, d.has);
+            rt::log("    genmode %06X zmode(40) %06X blend(41) %06X dstalpha(42) %06X pe(43) %06X alphacmp(F3) %06X fog(EE-F2) %06X %06X",
+                    reg(0x00), reg(0x40), reg(0x41), reg(0x42), reg(0x43), reg(0xF3), reg(0xEE), reg(0xF2));
+            const auto& st = f.states[d.state];
+            for (int k = 0; k < 4; ++k)
+                rt::log("    konst %d: %d,%d,%d,%d  reg %d: %d,%d,%d,%d", k, st.konst[k][0], st.konst[k][1], st.konst[k][2],
+                        st.konst[k][3], k, st.tev_regs[k][0], st.tev_regs[k][1], st.tev_regs[k][2], st.tev_regs[k][3]);
+            rt::log("    channels %u: color0 %06X alpha0 %06X color1 %06X alpha1 %06X  amb0 %d,%d,%d,%d mat0 %d,%d,%d,%d",
+                    st.xf[0][0], st.xf[0][1], st.xf[0][3], st.xf[0][2], st.xf[1][0], st.materials[0][0], st.materials[0][1],
+                    st.materials[0][2], st.materials[0][3], st.materials[2][0], st.materials[2][1], st.materials[2][2], st.materials[2][3]);
+            for (int l = 0; l < 8; ++l) {
+                const auto& L = st.lights[l];
+                rt::log("    light %d: color %g,%g,%g,%g cosatt %g,%g,%g distatt %g,%g,%g pos %g,%g,%g dir %g,%g,%g", l, L.color[0],
+                        L.color[1], L.color[2], L.color[3], L.cosatt[0], L.cosatt[1], L.cosatt[2], L.distatt[0], L.distatt[1],
+                        L.distatt[2], L.pos[0], L.pos[1], L.pos[2], L.dir[0], L.dir[1], L.dir[2]);
+            }
+            for (unsigned t = 0; t < stages; ++t)
+                rt::log("    stage %u: order %06X color %06X alpha %06X ind %06X ksel %06X", t,
+                        (reg(0x28 + t / 2) >> (t % 2 ? 12 : 0)) & 0xFFF, reg(0xC0 + 2 * t), reg(0xC1 + 2 * t), reg(0x10 + t),
+                        reg(0xF6 + t / 2));
+            for (int m = 0; m < 8; ++m)
+                if (d.textures[m] >= 0)
+                    rt::log("    texmap %d: id %d, image0 %06X mode0 %06X mode1 %06X", m, d.textures[m], reg((m < 4 ? 0x88 : 0xA8) + m % 4),
+                            reg((m < 4 ? 0x80 : 0xA0) + m % 4), reg((m < 4 ? 0x84 : 0xA4) + m % 4));
+        }
     }
 
     void render(gx::Frame& f) {
@@ -884,7 +958,50 @@ struct Renderer::Impl {
         VkDescriptorSet bound_textures = VK_NULL_HANDLE;
         bool need_bind = true;
         uint8_t bound_small = 0;
+        // PUNCHOUT_PROBE=x,y (EFB pixels, at 1x): for the frame PUNCHOUT_DFF
+        // captured, read that pixel's colour and depth after every packet and
+        // log the packets that change it, with their state. For finding which
+        // draw makes a pixel differ from a reference render.
+        static const int probe_x = [] { const char* e = std::getenv("PUNCHOUT_PROBE"); return e ? std::atoi(e) : -1; }();
+        static const int probe_y = [] { const char* e = std::getenv("PUNCHOUT_PROBE"); const char* c = e ? std::strchr(e, ',') : nullptr; return c ? std::atoi(c + 1) : -1; }();
+        const bool probing = f.captured && probe_x >= 0 && probe_y >= 0;
+        // PUNCHOUT_PROBE_SOLO=<draw>: that draw of the captured frame unblended,
+        // writing RGBA, so the probe shows what its pixel shader gives.
+        static const int solo = [] { const char* e = std::getenv("PUNCHOUT_PROBE_SOLO"); return e ? std::atoi(e) : -1; }();
+        if (probing && solo >= 0 && size_t(solo) < f.draws.size()) {
+            f.draws[size_t(solo)].pipeline.blend = 0;
+            f.draws[size_t(solo)].pipeline.write_mask = 0xF;
+            f.draws[size_t(solo)].pipeline.logic = 0;
+            // PUNCHOUT_PROBE_SOLO_MODE: z = depth test ALWAYS (the last triangle on the pixel wins);
+            // c adds culling off.
+            if (const char* m = std::getenv("PUNCHOUT_PROBE_SOLO_MODE")) {
+                if (std::strchr(m, 'z')) f.draws[size_t(solo)].depth_func = VK_COMPARE_OP_ALWAYS;
+                if (std::strchr(m, 'c')) f.draws[size_t(solo)].cull = VK_CULL_MODE_NONE;
+            }
+        }
+        Buffer probe_buf;
+        if (probing) probe_buf = Buffer::host_visible(gpu, VkDeviceSize(f.packets.size() + 1) * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        size_t probe_i = 0;
+        const auto probe = [&](size_t at_slot) {
+            vkCmdEndRendering(cmd);
+            barrier(cmd);
+            VkBufferImageCopy r{};
+            r.bufferOffset = VkDeviceSize(at_slot) * 8;
+            r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            r.imageOffset = {probe_x * int32_t(scale), probe_y * int32_t(scale), 0};
+            r.imageExtent = {1, 1, 1};
+            vkCmdCopyImageToBuffer(cmd, efb.image, VK_IMAGE_LAYOUT_GENERAL, probe_buf.buffer, 1, &r);
+            r.bufferOffset += 4;
+            r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            vkCmdCopyImageToBuffer(cmd, efb_depth.image, VK_IMAGE_LAYOUT_GENERAL, probe_buf.buffer, 1, &r);
+            barrier(cmd);
+            begin_efb(cmd);
+        };
+        std::vector<CopyDump> dumps;
+        if (probing) probe(probe_i), copy_dumps = &dumps;
         for (const gx::Packet& pk : f.packets) {
+            if (probing && probe_i > 0) probe(probe_i);
+            if (probing) ++probe_i;
             if (pk.kind == gx::Packet::kCopy) {
                 copy(cmd, s, f.copies[pk.index]);
                 bound = VK_NULL_HANDLE;
@@ -971,9 +1088,32 @@ struct Renderer::Impl {
             vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
             vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, 0, 0);
         }
+        if (probing) probe(probe_i);
         vkCmdEndRendering(cmd);
         check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
         submit(s);
+        if (probing) {
+            vkDeviceWaitIdle(gpu.device);
+            report_probe(f, static_cast<const uint8_t*>(probe_buf.mapped), probe_i);
+            probe_buf.destroy(gpu);
+            copy_dumps = nullptr;
+            // The texture copies as PAM files (RGBA), numbered in order as Dolphin's DumpEFBTarget numbers its.
+            const char* dir = std::getenv("PUNCHOUT_PROBE_DIR");
+            for (size_t i = 0; i < dumps.size(); ++i) {
+                CopyDump& dmp = dumps[i];
+                if (dir) {
+                    char name[512];
+                    std::snprintf(name, sizeof name, "%s/copy_n%06u_%ux%u_%u.pam", dir, unsigned(i), dmp.w, dmp.h, dmp.format & 0xFF);
+                    if (FILE* fp = std::fopen(name, "wb")) {
+                        std::fprintf(fp, "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", dmp.w, dmp.h);
+                        std::fwrite(dmp.buf.mapped, 1, size_t(dmp.w) * dmp.h * 4, fp);
+                        std::fclose(fp);
+                    }
+                }
+                dmp.buf.destroy(gpu);
+            }
+            rt::log("probe: %llu texture copies in the frame%s", static_cast<unsigned long long>(dumps.size()), dir ? " (saved)" : "");
+        }
         // What the frame released, after drawing it: a texture can be made and
         // released in the same frame (two copies to one address), and draws
         // before the release still use it. Spare once this frame's fence passes.

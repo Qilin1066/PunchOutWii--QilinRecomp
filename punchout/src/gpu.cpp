@@ -66,6 +66,9 @@ Stats g_stats;
 gx::Registers regs() { return {g_cpmem.data(), g_xf.data(), g_bp.data()}; }
 bool g_xfb_copied = false;  // set by the XFB copy just decoded (PUNCHOUT_DFF)
 bool g_dff_recording = false;  // PUNCHOUT_DFF is recording a frame
+uint32_t g_primitive_serial = 0;  // every primitive decoded
+uint32_t g_dl_address = 0;        // the display list being decoded (physical), or 0
+size_t g_dl_call_at = 0;          // PUNCHOUT_DFF: where in the commands the call to it is
 
 std::vector<uint8_t> g_fifo;  // bytes written to the pipe, not yet a whole command
 size_t g_fifo_at = 0;
@@ -206,7 +209,9 @@ void call_display_list(Cpu& c, uint32_t address, uint32_t size) {
         rt::fatal(&c, "GX display list at %08X (%u bytes) is outside MEM1 and MEM2", address, size);
     ++g_stats.display_lists;
     size_t used = 0;
+    g_dl_address = va & 0x1FFFFFFFu;
     decode(c, rt::guest_ptr(va), size, used, true);
+    g_dl_address = 0;
 }
 
 // The last primitive decoded, for bad_command: a wrong vertex size is the
@@ -250,10 +255,13 @@ uint32_t be32(const uint8_t* p) { return uint32_t{p[0]} << 24 | uint32_t{p[1]} <
 // game time, as a Dolphin FIFO log (.dff, version 6), for Dolphin's FIFO
 // player to render as the hardware would: a reference to compare our
 // renderer's picture with. It holds the registers at the frame's start, the
-// frame's commands from one XFB copy to the next, and the console's RAM
-// (MEM1 and MEM2, as it is at the frame's end) as two memory updates before
-// the first command. Best with PUNCHOUT_GPU_THREAD=0, so RAM is as the
-// commands left it.
+// frame's commands from one XFB copy to the next, the console's RAM (MEM1 and
+// MEM2) as the frame starts, and, as Dolphin's recorder does, each piece of
+// memory the GPU reads (vertex arrays, textures, palettes, display lists,
+// indexed loads) that changed since, at the place in the commands where it
+// was read. With <file>.prims, tools/analysis/dff_cut.py cuts the frame short
+// after any primitive, to see the EFB part way through.
+void dff_note_memory(uint32_t physical, uint32_t size);
 struct DffCapture {
     std::string path;
     double at = 0;
@@ -261,6 +269,14 @@ struct DffCapture {
     std::vector<uint8_t> bytes;
     std::array<uint32_t, 256> bp{}, cp{};
     std::vector<uint32_t> xf;
+    std::vector<uint8_t> mem1, mem2;  // MEM1 and MEM2 as the frame starts
+    std::vector<uint8_t> seen1, seen2;  // as the GPU last read them (the updates applied)
+    struct Update {
+        uint32_t at, address;  // where in the commands; physical
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<Update> updates;
+    std::string prims;  // <file>.prims: each primitive's serial and where it is, for tools/analysis/dff_cut.py
 };
 DffCapture* g_dff = [] () -> DffCapture* {
     const char* e = std::getenv("PUNCHOUT_DFF");
@@ -284,7 +300,7 @@ void dff_write(const DffCapture& d) {
     // TMEM, the commands, the two updates (24 each), MEM1, MEM2.
     const uint64_t frame_at = 128, bp_at = frame_at + 64, cp_at = bp_at + 1024, xfm_at = cp_at + 1024,
                    xfr_at = xfm_at + 4096 * 4, tex_at = xfr_at + 88 * 4, fifo_at = tex_at + kTex,
-                   upd_at = fifo_at + d.bytes.size(), mem1_at = upd_at + 48, mem2_at = mem1_at + kMem1;
+                   upd_at = fifo_at + d.bytes.size(), mem1_at = upd_at + 24 * (2 + d.updates.size()), mem2_at = mem1_at + kMem1;
     u32le(0x0d01f1f0), u32le(6), u32le(1);                    // id, version, loader version
     u64le(bp_at), u32le(256), u64le(cp_at), u32le(256);
     u64le(xfm_at), u32le(4096), u64le(xfr_at), u32le(88);
@@ -294,7 +310,8 @@ void dff_write(const DffCapture& d) {
     u8s(0, 24);
     // The FIFO the player streams the commands through: the game's own (PI's base and end).
     const uint32_t fifo_base = g_pi[kPiFifoBase] & kFifoAddress, fifo_end = g_pi[kPiFifoEnd] & kFifoAddress;
-    u64le(fifo_at), u32le(uint32_t(d.bytes.size())), u32le(fifo_base), u32le(fifo_end), u64le(upd_at), u32le(2), u8s(0, 32);
+    u64le(fifo_at), u32le(uint32_t(d.bytes.size())), u32le(fifo_base), u32le(fifo_end), u64le(upd_at),
+        u32le(uint32_t(2 + d.updates.size())), u8s(0, 32);
     for (uint32_t v : d.bp) u32le(v);
     for (uint32_t v : d.cp) u32le(v);
     for (int i = 0; i < 4096; ++i) u32le(d.xf[size_t(i)]);
@@ -303,10 +320,26 @@ void dff_write(const DffCapture& d) {
     std::fwrite(d.bytes.data(), 1, d.bytes.size(), f);
     u32le(0), u32le(0x00000000u), u64le(mem1_at), u32le(kMem1), std::fputc(4, f), u8s(0, 3);  // MEM1, at the first command
     u32le(0), u32le(0x10000000u), u64le(mem2_at), u32le(kMem2), std::fputc(4, f), u8s(0, 3);  // MEM2
-    std::fwrite(rt::guest_ptr(0x80000000u), 1, kMem1, f);
-    std::fwrite(rt::guest_ptr(0x90000000u), 1, kMem2, f);
+    uint64_t data_at = mem2_at + kMem2;
+    for (const auto& u : d.updates) {  // what the GPU read that had changed: type 4, "vertex array"
+        u32le(u.at), u32le(u.address), u64le(data_at), u32le(uint32_t(u.bytes.size())), std::fputc(4, f), u8s(0, 3);
+        data_at += u.bytes.size();
+    }
+    std::fwrite(d.mem1.data(), 1, kMem1, f);
+    std::fwrite(d.mem2.data(), 1, kMem2, f);
+    for (const auto& u : d.updates) std::fwrite(u.bytes.data(), 1, u.bytes.size(), f);
     std::fclose(f);
-    rt::log("PUNCHOUT_DFF: wrote %s (%llu bytes of commands)", d.path.c_str(), static_cast<unsigned long long>(d.bytes.size()));
+    size_t updated = 0;
+    for (const auto& u : d.updates) updated += u.bytes.size();
+    rt::log("PUNCHOUT_DFF: wrote %s (%llu bytes of commands; %llu memory updates, %llu bytes)", d.path.c_str(),
+            static_cast<unsigned long long>(d.bytes.size()), static_cast<unsigned long long>(d.updates.size()),
+            static_cast<unsigned long long>(updated));
+    // The primitives' places, and the frame's last XFB copy (the registers a cut log ends with).
+    if (FILE* pf = std::fopen((d.path + ".prims").c_str(), "w")) {
+        std::fprintf(pf, "# serial kind(fifo: offset in the commands; dl: physical address) location size\n%s", d.prims.c_str());
+        std::fprintf(pf, "xfb %06X %06X %06X %06X %06X %06X\n", g_bp[0x49], g_bp[0x4A], g_bp[0x4B], g_bp[0x4D], g_bp[0x4E], g_bp[0x52]);
+        std::fclose(pf);
+    }
 }
 
 // After each top-level command: record it while the frame is being captured;
@@ -318,12 +351,19 @@ void dff_after(const uint8_t* p, size_t n) {
     g_xfb_copied = false;
     if (d.state == 0 && frame_count() / 60.0 >= d.at) {
         d.bp = g_bp, d.cp = g_cpmem, d.xf = g_xf;
+        const auto* m1 = static_cast<const uint8_t*>(rt::guest_ptr(0x80000000u));
+        const auto* m2 = static_cast<const uint8_t*>(rt::guest_ptr(0x90000000u));
+        d.mem1.assign(m1, m1 + 0x01800000u), d.mem2.assign(m2, m2 + 0x04000000u);
+        d.seen1 = d.mem1, d.seen2 = d.mem2;
         d.state = 1;
-        g_dff_recording = true;
+        g_dff_recording = gx::g_dff_use = true;
+        gx::g_dff_use_hook = dff_note_memory;
     } else if (d.state == 1) {
         dff_write(d);
         d.state = 2;
-        g_dff_recording = false;
+        g_dff_recording = gx::g_dff_use = false;
+        gx::g_dff_use_hook = nullptr;
+        d.mem1 = d.mem2 = d.seen1 = d.seen2 = {};
     }
 }
 
@@ -358,6 +398,7 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             const uint32_t src = (g_cpmem[0xA0 + array] + index * g_cpmem[0xB0 + array]) & 0x1FFFFFFFu;
             if (!((src < 0x01800000u && src + 4 * words <= 0x01800000u) || (src >= 0x10000000u && src + 4 * words <= 0x14000000u)))
                 rt::fatal(&c, "GX indexed load from %08X is outside MEM1 and MEM2", src);
+            if (g_dff_recording) gx::dff_use_memory(src, 4 * words);
             const uint8_t* m = rt::guest_ptr(0x80000000u | src);
             for (uint32_t i = 0; i < words; ++i)
                 if (addr + i < g_xf.size()) g_xf[addr + i] = be32(m + 4 * i);
@@ -366,6 +407,14 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
         } else if (op == 0x40) {  // CALL_DL: address, size
             if (left < 9) return;
             if (in_display_list) rt::fatal(&c, "GX display list calls another display list");
+            if (g_dff_recording) {
+                char line[96];
+                g_dl_call_at = g_dff->bytes.size();
+                std::snprintf(line, sizeof line, "call fifo %llu %08X %u\n", static_cast<unsigned long long>(g_dff->bytes.size()),
+                              unsigned(be32(p + 1) & 0x1FFFFFE0u), unsigned(be32(p + 5) & ~31u));
+                g_dff->prims += line;
+                gx::dff_use_memory(be32(p + 1) & 0x1FFFFFE0u, be32(p + 5) & ~31u);
+            }
             call_display_list(c, be32(p + 1), be32(p + 5));
             n = 9;
         } else if (op == 0x44 || op == 0x48) {  // metrics; invalidate the vertex cache
@@ -385,6 +434,18 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
             if (left < 3 + bytes) return;
             g_last_primitive = {op, count, vertex_size(op & 7), g_cpmem[0x50], g_cpmem[0x60],
                                 {g_cpmem[0x70 + (op & 7)], g_cpmem[0x80 + (op & 7)], g_cpmem[0x90 + (op & 7)]}};
+            ++g_primitive_serial;
+            if (g_dff_recording) {
+                char line[96];
+                if (in_display_list)
+                    std::snprintf(line, sizeof line, "%u dl %08X %llu %llu\n", g_primitive_serial, unsigned(g_dl_address + used),
+                                  static_cast<unsigned long long>(3 + bytes), static_cast<unsigned long long>(g_dl_call_at));
+                else
+                    std::snprintf(line, sizeof line, "%u fifo %llu %llu\n", g_primitive_serial,
+                                  static_cast<unsigned long long>(g_dff->bytes.size()), static_cast<unsigned long long>(3 + bytes));
+                g_dff->prims += line;
+            }
+            gx::set_primitive_serial(g_primitive_serial);
             gx::record_primitive(regs(), op, p + 3, count);
             ++g_stats.draws;
             g_stats.vertices += count;
@@ -442,6 +503,20 @@ void pipe_write(Cpu& c, uint32_t value, unsigned size) {
 constexpr uint32_t kFifoWrapped = 0x04000000u;  // (kFifoAddress is with the PI's registers)
 constexpr unsigned kCpControl = 0x02 / 2, kCpWriteLo = 0x34 / 2, kCpWriteHi = 0x36 / 2;
 
+// The CPU FIFO's write pointer after a burst at `pointer`: it wraps after the
+// block at the end pointer, and only there (as Dolphin's GPFifo).
+// GXRedirectWriteGatherPipe sets base 0, end 0x04000000 and the pointer to its
+// buffer, often in MEM2, past that end: the pipe streams on into the buffer.
+constexpr uint32_t next_write_pointer(uint32_t pointer, uint32_t base, uint32_t end) {
+    const uint32_t w = pointer & kFifoAddress;
+    return w == end ? base | kFifoWrapped : (w + 32) | (pointer & kFifoWrapped);
+}
+static_assert(next_write_pointer(0x00100000u, 0x00100000u, 0x00100FE0u) == 0x00100020u);
+static_assert(next_write_pointer(0x00100FC0u | kFifoWrapped, 0x00100000u, 0x00100FE0u) == (0x00100FE0u | kFifoWrapped));
+static_assert(next_write_pointer(0x00100FE0u, 0x00100000u, 0x00100FE0u) == (0x00100000u | kFifoWrapped));  // the end block, then wrap
+static_assert(next_write_pointer(0x10184020u, 0u, 0x04000000u) == 0x10184040u);  // redirected into MEM2
+static_assert(next_write_pointer(0x003FFFE0u, 0u, 0x04000000u) == 0x00400000u);   // redirected into MEM1
+
 // CP control bit 4 links the command processor to the CPU's FIFO: then the
 // GPU reads what the pipe writes. GXBeginDisplayList points the CPU's FIFO at
 // the list's buffer and unlinks, so the commands it gathers go to memory only.
@@ -450,14 +525,15 @@ bool linked() { return (g_cp[kCpControl] & 0x10) != 0; }
 void send_burst(Cpu& c) {
     g_gathered = 0;
     // The burst goes to memory at the PI's write pointer, which wraps at the end.
-    const uint32_t base = g_pi[kPiFifoBase] & kFifoAddress, end = g_pi[kPiFifoEnd] & kFifoAddress;
+    // Bit 26 is the write pointer's wrap flag, but an ordinary bit of the end
+    // pointer: GXRedirectWriteGatherPipe's end is 0x04000000.
+    const uint32_t base = g_pi[kPiFifoBase] & kFifoAddress, end = g_pi[kPiFifoEnd] & 0x1FFFFFE0u;
     if (end > base) {
         const uint32_t w = g_pi[kPiFifoWrite] & kFifoAddress;
         if (!((w < 0x01800000u && w + 32 <= 0x01800000u) || (w >= 0x10000000u && w + 32 <= 0x14000000u)))
             rt::fatal(&c, "the CPU's FIFO writes to %08X, outside MEM1 and MEM2", w);
         std::memcpy(rt::guest_ptr(0x80000000u | w), g_gather, 32);
-        const uint32_t next = w + 32;
-        g_pi[kPiFifoWrite] = next >= end ? base | kFifoWrapped : next | (g_pi[kPiFifoWrite] & kFifoWrapped);
+        g_pi[kPiFifoWrite] = next_write_pointer(g_pi[kPiFifoWrite], base, end);
     }
     if (!linked()) return;  // building a display list: the GPU doesn't see it
     // Linked, the GP FIFO's write pointer follows the CPU's.
@@ -552,6 +628,31 @@ void write_reg(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
     rt::fatal(&c, "store of %u bytes (%08X) to hardware register %08X: not handled", size, v, a);
 }
 
+}  // namespace
+
+namespace {
+// Save the bytes of [physical, +size) that changed since the GPU last read them,
+// to be written to memory before the command being decoded (a display list's
+// primitive: before the call to the list).
+void dff_note_memory(uint32_t physical, uint32_t size) {
+    if (!g_dff || g_dff->state != 1 || size == 0) return;
+    DffCapture& d = *g_dff;
+    uint32_t a = physical & 0x1FFFFFFFu;
+    std::vector<uint8_t>* seen;
+    uint32_t base;
+    if (a < 0x01800000u) seen = &d.seen1, base = 0, size = std::min(size, 0x01800000u - a);
+    else if (a >= 0x10000000u && a < 0x14000000u) seen = &d.seen2, base = 0x10000000u, size = std::min(size, 0x14000000u - a);
+    else return;
+    const uint8_t* now = rt::guest_ptr(0x80000000u | a);
+    uint8_t* old = seen->data() + (a - base);
+    if (std::memcmp(now, old, size) == 0) return;
+    uint32_t lo = 0, hi = size;
+    while (now[lo] == old[lo]) ++lo;
+    while (now[hi - 1] == old[hi - 1]) --hi;
+    std::memcpy(old + lo, now + lo, hi - lo);
+    const uint32_t at = uint32_t(g_dl_address != 0 ? g_dl_call_at : d.bytes.size());
+    d.updates.push_back({at, a + lo, std::vector<uint8_t>(now + lo, now + hi)});
+}
 }  // namespace
 
 void init_gpu() {

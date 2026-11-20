@@ -140,6 +140,7 @@ struct Draw {
     uint8_t line_width = 6, point_size = 6;  // lines and points: in sixths of an EFB pixel (BP 0x22)
     int32_t textures[8];   // texture ids (-1: none)
     Sampler samplers[8];
+    uint32_t primitive = 0;  // the decoder's serial number of the primitive it came from (PUNCHOUT_DFF's .prims)
 };
 
 // An EFB copy: to a texture in guest memory, or to an external frame buffer.
@@ -199,6 +200,18 @@ struct Frame {
 };
 // PUNCHOUT_DFF: the frame the next XFB copy ends is the captured one.
 void mark_captured_frame();
+// The decoder's serial number of the primitive about to be recorded (tags the Draw).
+void set_primitive_serial(uint32_t n);
+// PUNCHOUT_DFF: while a frame is captured, the GPU reading guest memory (vertex
+// arrays, textures, palettes, display lists, indexed loads); the capture saves
+// what changed since it last saw those bytes, at that point in the commands,
+// as Dolphin's recorder does (a game refills its vertex buffers during a frame).
+// (gpu.cpp sets the hook while it records; the recorder's tests run without it.)
+extern bool g_dff_use;
+extern void (*g_dff_use_hook)(uint32_t physical, uint32_t size);
+inline void dff_use_memory(uint32_t physical, uint32_t size) {
+    if (g_dff_use_hook) g_dff_use_hook(physical, size);
+}
 
 // Hand a recorded frame to the renderer (it may wait while the renderer is
 // two frames behind, as the console's CPU waits on a full FIFO).

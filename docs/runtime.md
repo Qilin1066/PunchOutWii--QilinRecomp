@@ -194,6 +194,11 @@ Two threads share the work. The game's thread records what the command stream as
   - `PUNCHOUT_GPU_THREAD=0` decodes the command stream on the guest's thread instead of the GPU thread (v0.17.0; gpu.cpp explains the 16 KB queue).
   - `PUNCHOUT_FULL_VERTICES=1` stores every vertex in the full 132-byte layout instead of the compact 60-byte one where it fits (v0.16.0).
   - `PUNCHOUT_PROFILE=<file>` (Linux): a SIGPROF sampler, 1 kHz of CPU time, needing no perf or ptrace; `tools/analysis/profile_report.py <exe> <file>` names the hot functions.
+  - `PUNCHOUT_SAVE_DIR=dir` keeps the settings and save there instead of the per-user folder.
+- **Comparing a frame with Dolphin:**
+  - `PUNCHOUT_DFF=<file>@<seconds>` writes the first whole frame after that much game time as a Dolphin FIFO log (`.dff`, version 6): the registers as it starts, its commands, RAM as it starts, and each piece of memory the GPU reads that changed since, where it read it (as Dolphin's own recorder does). It also writes our picture of that frame (`<file>.ppm`) and `<file>.prims`, every primitive's place in the commands. Dolphin's FIFO player renders the log (`dolphin-emu-nogui -e <file>` with frame dumping on) as a reference.
+  - `tools/analysis/dff_cut.py <file> <primitive> <out.dff> [writes]` cuts the log after one primitive (then copies the EFB to the screen), to see Dolphin's picture part way through the frame; `writes` (`E0=8FF0FF,xf100E=0000060B`) changes BP or XF registers just before it, to test what a register does.
+  - `PUNCHOUT_PROBE=x,y` (EFB pixels at 1x) logs, for the captured frame, every draw and copy that changes that pixel's colour or depth: before and after, with the draw's primitive number and its state (blending, depth, TEV stages, konstants, lighting channels and lights, textures); `PUNCHOUT_PROBE_DIR=dir` saves the frame's texture copies. `PUNCHOUT_PROBE_SOLO=<draw>` draws that one unblended, so the probe shows what its pixel shader gives; `PUNCHOUT_PROBE_SOLO_MODE=z` (and `c`) also sets its depth test to always (and culling off).
 
 ## Input (`wpad.cpp`)
 
