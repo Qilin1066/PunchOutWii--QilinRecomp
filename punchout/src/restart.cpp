@@ -35,6 +35,7 @@ void set_command_line(int argc, char** argv) {
 }
 
 void restart_program() {
+    before_exit();  // the pipeline cache, for the program started next
 #if defined(_WIN32)
     // The command line exactly as this process got it: arguments with spaces
     // (game folders often have them) stay quoted as the user quoted them.

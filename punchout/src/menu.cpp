@@ -323,8 +323,13 @@ void Menu::draw_menu() {
     ImGui::SetNextWindowBgAlpha(0.88f);
     ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
     ImGui::TextUnformatted("Punch-Out!! - settings (the game is paused)");
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Close (Esc)").x);
+    // Close and Quit, top right on every page (Quit was at the bottom of the Game page, easy to miss).
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float buttons = ImGui::CalcTextSize("Close (Esc)").x + ImGui::CalcTextSize("Quit the game").x + 4 * st.FramePadding.x + st.ItemSpacing.x;
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - buttons + ImGui::GetCursorPosX());
     if (ImGui::Button("Close (Esc)")) close_asked_ = true;  // tick() closes it, once the frame is built
+    ImGui::SameLine();
+    if (ImGui::Button("Quit the game")) quit_ = true;
     ImGui::Separator();
     if (ImGui::BeginTabBar("pages")) {
         if (ImGui::BeginTabItem("Controls")) {
@@ -467,6 +472,15 @@ void Menu::display_page() {
     }
     ImGui::Checkbox("Vsync", &s_.vsync);
     ImGui::Checkbox("Frame times (F3)", &s_.performance_overlay);
+    ImGui::SeparatorText("Refresh rate");
+    const bool was_match = s_.match_refresh, was_vrr = s_.variable_refresh;
+    ImGui::Checkbox("Fullscreen at a multiple of 60 Hz (120 Hz on a 144 Hz monitor)", &s_.match_refresh);
+    ImGui::Checkbox("Variable refresh (G-Sync, FreeSync: on in the driver too)", &s_.variable_refresh);
+    if ((was_match != s_.match_refresh || was_vrr != s_.variable_refresh) && display_.fullscreen()) {
+        display_.set_picture(picture_of(s_));
+        display_.set_fullscreen(true);  // the mode for the new choice
+    }
+    if (!display_.mode_note().empty()) ImGui::TextWrapped("%s", display_.mode_note().c_str());
     if (ImGui::Button("Look at the picture")) peek_ = true;
     ImGui::SameLine();
     ImGui::TextDisabled("(any key or button comes back)");
@@ -480,9 +494,12 @@ void Menu::display_page() {
     }
     int scale = int(s_.scale);
     char label[96];
-    std::snprintf(label, sizeof label, "%dx (%dx%d)", scale, 640 * scale, 528 * scale);
-    if (ImGui::SliderInt("Internal resolution", &scale, 1, 8, label, ImGuiSliderFlags_AlwaysClamp)) s_.scale = unsigned(scale);
-    if (s_.scale != running_scale_) ImGui::TextDisabled("The game runs at %ux now: %ux from the next start.", running_scale_, s_.scale);
+    if (scale == 0) std::snprintf(label, sizeof label, "Auto (the screen's height: %ux now)", running_scale_);
+    else std::snprintf(label, sizeof label, "%dx (%dx%d)", scale, 640 * scale, 528 * scale);
+    if (ImGui::SliderInt("Internal resolution", &scale, 0, 8, label, ImGuiSliderFlags_AlwaysClamp)) s_.scale = unsigned(scale);
+    ImGui::TextDisabled("The GPU's work grows with the square: 8x is 64 times the pixels of 1x, 4x 16 times.");
+    if (s_.scale != 0 && s_.scale != running_scale_)
+        ImGui::TextDisabled("The game runs at %ux now: %ux from the next start.", running_scale_, s_.scale);
     const float limit = display_.gpu().max_anisotropy;
     ImGui::BeginDisabled(limit <= 1.0f);
     static constexpr unsigned kAniso[] = {1, 2, 4, 8, 16};
@@ -528,8 +545,6 @@ void Menu::game_page() {
     ImGui::TextWrapped("Graphics: Vulkan. Window, sound and input: SDL3 (zlib). Menu: Dear ImGui (MIT).");
     ImGui::TextWrapped("Settings file: %s", settings_file(folder_).string().c_str());
     ImGui::TextWrapped("Saves and the pipeline cache: %s", folder_.string().c_str());
-    ImGui::Spacing();
-    if (ImGui::Button("Quit the game")) quit_ = true;
 }
 
 }  // namespace punchout

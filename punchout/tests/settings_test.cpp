@@ -87,6 +87,13 @@ int main() {
     check(error_of("[controls]\none = Z\n").rfind("line 2: 'Z' isn't an input", 0) == 0, "an input without its kind");
     check(error_of("[display]\ninternal_scale = 9\n").rfind("line 2: internal_scale is a whole number from 1 to 8", 0) == 0,
           "a scale out of range");
+    {
+        punchout::Settings s;
+        std::string e;
+        check(punchout::parse_settings("[display]\ninternal_scale = auto\nmatch_refresh = false\nvariable_refresh = true\n", s, e) &&
+                  s.scale == 0 && !s.match_refresh && s.variable_refresh,
+              "auto scale and the refresh switches");
+    }
     check(error_of("[video]\nscale = 2\n").rfind("line 1: there's no section [video]", 0) == 0, "v0.17.0's [video] only in the old file");
     {
         punchout::Settings s;
@@ -102,7 +109,7 @@ int main() {
         punchout::Settings s;
         std::string e;
         const bool ok = punchout::parse_settings("[display]\npreset = desktop\nanisotropy = 4\n", s, e);
-        check(ok && s.scale == 3 && s.anisotropy == 4 && s.preset == "desktop", "a preset, then a key that overrides it");
+        check(ok && s.scale == 0 && s.anisotropy == 4 && s.preset == "desktop", "a preset, then a key that overrides it");
         check(!punchout::parse_settings("[display]\npreset = huge\n", s, e) && e.find("presets are") != std::string::npos,
               "an unknown preset");
         check(error_of("[display]\nanisotropy = 3\n").find("1, 2, 4, 8 or 16") != std::string::npos, "anisotropy is a power of two");

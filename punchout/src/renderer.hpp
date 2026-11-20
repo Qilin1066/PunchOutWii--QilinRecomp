@@ -26,6 +26,9 @@ public:
     // Anisotropic filtering for the game's textures: 1 (the console's), 2, 4,
     // 8 or 16, up to what the GPU allows. Waits for the GPU.
     void set_anisotropy(unsigned level);
+    // Write the pipeline cache and the keys met since the last save, now (the
+    // program is about to end without its destructors).
+    void save_now();
     // Whether draws may use pipelines specialised to their shape (on unless
     // PUNCHOUT_UBERSHADER is set); off, everything draws with the ubershader.
     void set_specialization(bool on);

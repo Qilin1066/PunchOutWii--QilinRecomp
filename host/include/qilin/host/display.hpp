@@ -68,6 +68,9 @@ public:
     // The intervals between new pictures presented (present and
     // present_image), over the last 20 s (frame_times.hpp).
     const FrameTimes& frame_times() const;
+    // Fullscreen's mode, when it isn't the desktop's (or why it couldn't be
+    // even): for the log. Empty otherwise.
+    const std::string& mode_note() const;
     // Since the last call: frames presented and the time spent waiting to
     // present them (for the previous one to reach the screen, and for a
     // swapchain image): with vsync, mostly the wait for the display.

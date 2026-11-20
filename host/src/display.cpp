@@ -172,6 +172,7 @@ struct Display::Impl {
     float last_aspect = 16.0f / 9.0f;
     bool shown_any = false;
     FrameTimes times;
+    std::string mode_note;  // what fullscreen chose, and why (even_mode)
     std::chrono::steady_clock::time_point last_new{};  // when the last new picture was presented
     bool counting = false;                            // last_new is set
     void count_new() {  // a new picture was presented
@@ -472,6 +473,7 @@ Display::Display(const Options& options) : impl_(std::make_unique<Impl>()) {
     VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     check(vkCreateFence(d.gpu.device, &fi, nullptr, &d.done), "vkCreateFence");
+    if (d.window && options.fullscreen) set_fullscreen(true);  // created borderless: now the mode that shows frames evenly
 }
 
 Display::~Display() {
@@ -779,11 +781,52 @@ void Display::set_picture(const Picture& p) { impl_->picture = p; }
 const Picture& Display::picture() const { return impl_->picture; }
 
 bool Display::fullscreen() const { return impl_->window && (SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_FULLSCREEN) != 0; }
+// The fullscreen mode for even frames: the desktop's (borderless) when its
+// refresh is a whole multiple of 60 Hz (or of 59.94) within 0.5%, or with
+// variable refresh; else the highest mode at the same size that is, if any.
+static const SDL_DisplayMode* even_mode(SDL_Window* w, const Picture& p, std::string& why) {
+    const SDL_DisplayID id = SDL_GetDisplayForWindow(w);
+    const SDL_DisplayMode* desk = SDL_GetDesktopDisplayMode(id);
+    if (!desk || p.variable_refresh || !p.match_refresh || !p.vsync) return nullptr;
+    const auto even = [](const SDL_DisplayMode& m) {
+        const double hz = m.refresh_rate_numerator && m.refresh_rate_denominator
+                              ? double(m.refresh_rate_numerator) / double(m.refresh_rate_denominator) : double(m.refresh_rate);
+        for (int k = 1; k <= 8; ++k)
+            if (std::fabs(hz / k - 60.0) <= 0.3 || std::fabs(hz / k - 59.94) <= 0.3) return true;
+        return false;
+    };
+    if (even(*desk)) return nullptr;
+    int n = 0;
+    SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(id, &n);
+    const SDL_DisplayMode* best = nullptr;
+    for (int i = 0; modes && i < n; ++i)
+        if (modes[i]->w == desk->w && modes[i]->h == desk->h && even(*modes[i]) &&
+            (!best || modes[i]->refresh_rate > best->refresh_rate))
+            best = modes[i];
+    char line[320];
+    if (best)
+        std::snprintf(line, sizeof line, "fullscreen at %dx%d %.2f Hz: the desktop's %.2f Hz isn't a multiple of 60 Hz (frames would be uneven)",
+                      best->w, best->h, double(best->refresh_rate), double(desk->refresh_rate));
+    else
+        std::snprintf(line, sizeof line, "the desktop's %.2f Hz isn't a multiple of 60 Hz and the display has no mode at %dx%d that is: "
+                      "frames are uneven (variable refresh, if the display has it, shows them evenly)",
+                      double(desk->refresh_rate), desk->w, desk->h);
+    why = line;
+    static SDL_DisplayMode chosen;  // SDL keeps a pointer to the mode it's given only for the call
+    if (best) chosen = *best;
+    SDL_free(modes);
+    return best ? &chosen : nullptr;
+}
+
 void Display::set_fullscreen(bool on) {
     if (!impl_->window) return;
-    SDL_SetWindowFullscreenMode(impl_->window, nullptr);  // borderless, at the desktop's mode
+    std::string why;
+    const SDL_DisplayMode* mode = on ? even_mode(impl_->window, impl_->picture, why) : nullptr;
+    impl_->mode_note = why;
+    SDL_SetWindowFullscreenMode(impl_->window, mode);  // nullptr: borderless, at the desktop's mode
     SDL_SetWindowFullscreen(impl_->window, on);
 }
+const std::string& Display::mode_note() const { return impl_->mode_note; }
 
 std::vector<std::string> Display::monitors() const {
     std::vector<std::string> out;

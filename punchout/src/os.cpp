@@ -101,6 +101,7 @@ uint32_t g_hid2 = 0xA0000000u;  // load/store quantised and paired singles on (_
 void PPCSync(Cpu&) {}
 void PPCHalt(Cpu&) {  // where exit() ends
     rt::log("the game exited");
+    before_exit();
     std::fflush(nullptr);
     std::_Exit(0);  // other guest threads are parked on host threads: no static destructors
 }
@@ -235,6 +236,7 @@ void OSTicksToCalendarTime(Cpu& c) {
 // management and power off close the program; reset starts it again.
 [[noreturn]] void leave(const char* why) {
     rt::log("the game chose %s: closing", why);
+    before_exit();
     std::fflush(nullptr);
     std::_Exit(0);  // guest threads are parked on host threads: no static destructors
 }

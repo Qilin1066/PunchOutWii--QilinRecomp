@@ -54,11 +54,13 @@ struct Settings {
     qilin::host::Look look = qilin::host::Look::plain;
     unsigned scanlines = 60;          // CRT: the gaps between raster lines, 0-100 (percent dark)
     unsigned mask = 30;               // CRT: the phosphor stripes, 0-100
-    unsigned scale = 1;               // internal_scale: the EFB at 1-8x the console's 640x528
+    unsigned scale = 1;               // internal_scale: the EFB at 1-8x the console's 640x528; 0: auto (main.cpp)
     unsigned anisotropy = 1;          // texture filtering: 1 (the console's), 2, 4, 8 or 16
     bool vsync = true;                // at the display's refresh (no tearing); off: the lowest latency
     std::string gpu;                  // the graphics device's name (empty: the best one)
     bool performance_overlay = false; // frame rate, 1% and 0.1% lows and frame times in a corner (F3 switches it)
+    bool match_refresh = true;        // fullscreen: a refresh that's a multiple of 60 Hz when the desktop's isn't
+    bool variable_refresh = false;    // a G-Sync/FreeSync/VRR display: no mode switch, no locking to the refresh
     // [controls]
     bool rumble = true;  // the Wii Remote's rumble on the controller
     std::vector<Binding> controls[kControlCount];

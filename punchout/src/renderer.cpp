@@ -221,6 +221,13 @@ struct Renderer::Impl {
         SpecKey key;
     };
     std::deque<Job> spec_queue;                                     // to compile
+    // Shapes a draw is waiting for (drawn by the ubershader meanwhile): the
+    // workers take these before the rest of the queue, so what's on screen now
+    // (a new effect, the first time) is specialised first, not after the
+    // remembered ones queued at start. A job taken from either is done once.
+    std::deque<SpecKey> spec_urgent;
+    std::set<SpecKey> spec_started;                                 // taken by a worker (under spec_lock)
+    std::set<SpecKey> promoted;                                     // already sent to spec_urgent (main thread)
     std::vector<std::pair<SpecKey, VkPipeline>> spec_done;          // compiled, not yet taken
     std::vector<std::pair<PipelineKey, VkPipeline>> uber_done;      // the same, the ubershader's
     std::set<PipelineKey> uber_requested;                           // queued or built (main thread)
@@ -772,7 +779,12 @@ struct Renderer::Impl {
             if (requested.insert(key).second) {
                 remember(false, raw, shape);
                 std::lock_guard lock(spec_lock);
-                spec_queue.push_back({false, key});
+                spec_urgent.push_back(key);  // new and on screen now: ahead of the queue
+                promoted.insert(key);
+                spec_wake.notify_one();
+            } else if (promoted.insert(key).second) {  // queued (remembered), not ready yet: needed now
+                std::lock_guard lock(spec_lock);
+                spec_urgent.push_back(key);
                 spec_wake.notify_one();
             }
         }
@@ -800,10 +812,19 @@ struct Renderer::Impl {
             Job job;
             {
                 std::unique_lock lock(spec_lock);
-                spec_wake.wait(lock, [&] { return spec_quit || !spec_queue.empty(); });
-                if (spec_quit) return;
-                job = spec_queue.front();
-                spec_queue.pop_front();
+                bool found = false;
+                while (!found) {
+                    spec_wake.wait(lock, [&] { return spec_quit || !spec_queue.empty() || !spec_urgent.empty(); });
+                    if (spec_quit) return;
+                    if (!spec_urgent.empty()) {
+                        job = {false, spec_urgent.front()};
+                        spec_urgent.pop_front();
+                    } else {
+                        job = spec_queue.front();
+                        spec_queue.pop_front();
+                    }
+                    found = job.uber || spec_started.insert(job.key).second;  // the other copy of a promoted one: skip
+                }
             }
             const auto t0 = std::chrono::steady_clock::now();
             VkPipeline p;
@@ -925,9 +946,9 @@ struct Renderer::Impl {
             check(vkCreatePipelineCache(gpu.device, &ci, nullptr, &pipeline_cache), "vkCreatePipelineCache");
         }
         if (specialize == Specialize::kAsync) {
-            // Leave a core each for the game and the drawing thread; at most 4.
+            // Leave a core each for the game and the drawing thread; at most 8.
             const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-            const unsigned n = std::clamp(cores > 2 ? cores - 2 : 1u, 1u, 4u);
+            const unsigned n = std::clamp(cores > 2 ? cores - 2 : 1u, 1u, 8u);
             for (unsigned i = 0; i < n; ++i) spec_workers.emplace_back([this] { compile_specialized(); });
         }
         if (specialize != Specialize::kOff) saver = std::thread([this] { save_loop(); });
@@ -936,7 +957,7 @@ struct Renderer::Impl {
         {
             std::lock_guard lock(spec_lock);
             spec_quit = true;
-            spec_queue.clear();
+            spec_queue.clear(), spec_urgent.clear();
             keys_to_write.insert(keys_to_write.end(), keys_new.begin(), keys_new.end());
             keys_new.clear();
         }
@@ -1554,6 +1575,14 @@ Renderer::Renderer(host::Gpu& gpu, unsigned scale, unsigned anisotropy) : impl_(
     impl_->set_anisotropy(anisotropy);
 }
 void Renderer::set_anisotropy(unsigned level) { impl_->set_anisotropy(level); }
+void Renderer::save_now() {
+    std::vector<uint8_t> keys;
+    {
+        std::lock_guard lock(impl_->spec_lock);
+        keys.swap(impl_->keys_to_write);
+    }
+    impl_->save_now(keys);
+}
 Renderer::~Renderer() { impl_->destroy(); }
 void Renderer::render(gx::Frame& frame) {
     const uint64_t t0 = gx::now_ns();

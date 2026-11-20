@@ -17,6 +17,13 @@
 
 namespace punchout {
 
+// Run just before the program ends without destructors (the game leaving,
+// a reset, the window closing): main.cpp saves the pipeline cache there.
+inline void (*g_before_exit)() = nullptr;
+inline void before_exit() {
+    if (g_before_exit) g_before_exit();
+}
+
 // Queue an interrupt's work; it runs with interrupts off, at the next safe point.
 void post_interrupt(std::function<void(qilin::rt::Cpu&)> work);
 // A source of timed interrupts (the retrace, alarms): `poll` is called at

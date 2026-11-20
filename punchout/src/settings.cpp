@@ -149,7 +149,7 @@ bool apply_preset(Settings& s, const std::string& name) {
     if (name == "original" || name == "low-end") {  // the console's picture: 1x, its filtering (a Pi 4 does exactly this)
         s.scale = 1, s.anisotropy = 1, s.vsync = true;
     } else if (name == "desktop") {  // a desktop GPU: 3x (1920x1584 frame buffer), 16x anisotropic
-        s.scale = 3, s.anisotropy = 16, s.vsync = true;
+        s.scale = 0, s.anisotropy = 16, s.vsync = true;  // scale: auto (the screen's height)
     } else {
         return false;
     }
@@ -165,6 +165,8 @@ host::Picture picture_of(const Settings& s) {
     p.scanlines = float(s.scanlines) / 100.0f;
     p.mask = float(s.mask) / 100.0f;
     p.vsync = s.vsync;
+    p.match_refresh = s.match_refresh;
+    p.variable_refresh = s.variable_refresh;
     return p;
 }
 
@@ -236,7 +238,8 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
             } else if (name == "mask") {
                 if (!number(s.mask, 0, 100)) return false;
             } else if (name == "internal_scale") {
-                if (!number(s.scale, 1, 8)) return false;
+                if (value == "auto" || value == "0") s.scale = 0;  // auto
+                else if (!number(s.scale, 1, 8)) return false;
             } else if (name == "anisotropy") {
                 if (!number(s.anisotropy, 1, 16)) return false;
                 if (s.anisotropy & (s.anisotropy - 1)) return fail("anisotropy is 1, 2, 4, 8 or 16");
@@ -246,10 +249,14 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
                 s.gpu = value;
             } else if (name == "performance_overlay") {
                 if (!boolean(s.performance_overlay)) return false;
+            } else if (name == "match_refresh") {
+                if (!boolean(s.match_refresh)) return false;
+            } else if (name == "variable_refresh") {
+                if (!boolean(s.variable_refresh)) return false;
             } else {
                 return fail("[display] has no '" + name +
                             "' (preset fullscreen monitor scaling smooth look scanlines mask internal_scale anisotropy vsync gpu "
-                            "performance_overlay)");
+                            "performance_overlay match_refresh variable_refresh)");
             }
             continue;
         }
@@ -316,9 +323,10 @@ std::string settings_text(const Settings& s) {
         "look = " + (s.look == host::Look::crt ? "crt" : "plain") + "\n"
         "scanlines = " + std::to_string(s.scanlines) + "\n"
         "mask = " + std::to_string(s.mask) + "\n"
-        "# The game's resolution, as a multiple of the Wii's 640x528: 1 to 8. Higher is sharper and needs a\n"
-        "# faster GPU. PUNCHOUT_SCALE in the environment overrides it.\n"
-        "internal_scale = " + std::to_string(s.scale) + "\n"
+        "# The game's resolution, as a multiple of the Wii's 640x528: 1 to 8, or auto (the smallest that fills\n"
+        "# the screen line for line). Higher is sharper and needs a faster GPU: the GPU's work grows with the\n"
+        "# square (8x is 64 times 1x's pixels). PUNCHOUT_SCALE in the environment overrides it.\n"
+        "internal_scale = " + (s.scale ? std::to_string(s.scale) : std::string("auto")) + "\n"
         "# Texture filtering at an angle: 1 (the console's), 2, 4, 8 or 16.\n"
         "anisotropy = " + std::to_string(s.anisotropy) + "\n"
         "# vsync: true, no tearing; false, the lowest latency.\n"
@@ -327,6 +335,12 @@ std::string settings_text(const Settings& s) {
         "gpu = " + s.gpu + "\n"
         "# Frame rate, 1% and 0.1% lows and recent frame times in a corner (F3 switches it).\n"
         "performance_overlay = " + b(s.performance_overlay) + "\n"
+        "# Fullscreen on a display whose refresh isn't a multiple of 60 Hz (75, 144, 165 Hz): switch to the\n"
+        "# highest refresh at the same resolution that is (120 Hz on a 144 Hz monitor), so frames are even.\n"
+        "match_refresh = " + b(s.match_refresh) + "\n"
+        "# A G-Sync, FreeSync or VRR display with it on in its driver: no switch and no locking to the\n"
+        "# refresh; the display follows the game's 60 frames a second.\n"
+        "variable_refresh = " + b(s.variable_refresh) + "\n"
         "\n"
         "[controls]\n"
         "# The Wii Remote's rumble, on the controller.\n"

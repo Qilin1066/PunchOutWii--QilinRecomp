@@ -20,6 +20,14 @@ struct Picture {
     float scanlines = 0.6f;   // CRT: how dark the gaps between raster lines are, 0..1
     float mask = 0.3f;        // CRT: the phosphor stripes' strength, 0..1
     bool vsync = true;        // at the display's refresh, no tearing; off: the lowest latency
+    // Fullscreen on a display whose refresh isn't a whole multiple of 60 Hz
+    // (75, 144, 165 Hz): switch to the highest mode at the same resolution
+    // that is (120 Hz on a 144 Hz monitor), so every frame is shown alike.
+    bool match_refresh = true;
+    // A G-Sync, FreeSync or VRR display with it on in the driver: no mode
+    // switch and no locking to the refresh; the display follows the game's
+    // 60 Hz. (No program can see the driver's setting, so it's a switch.)
+    bool variable_refresh = false;
 };
 
 }  // namespace qilin::host

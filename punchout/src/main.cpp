@@ -110,7 +110,7 @@ void match_retrace_to_display(qilin::host::Display& display) {
     static uint64_t chosen = 0;  // num << 32 | den
     uint32_t num = 60, den = 1;
     double display_hz = 0;
-    if (display.picture().vsync) {
+    if (display.picture().vsync && !display.picture().variable_refresh) {  // variable refresh follows the game's own 60 Hz
         auto* window = static_cast<SDL_Window*>(display.sdl_window());
         const SDL_DisplayMode* m = window ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)) : nullptr;
         if (m) {
@@ -307,9 +307,25 @@ int main(int argc, char** argv) {
         o.monitor = settings.monitor;
         o.picture = punchout::picture_of(settings);
         display = std::make_unique<qilin::host::Display>(o);
+        if (!display->mode_note().empty()) rt::log("%s", display->mode_note().c_str());
+        if (auto* w = static_cast<SDL_Window*>(display->sdl_window()))
+            if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(w)))
+                rt::log("display: %dx%d at %.2f Hz%s", m->w, m->h, double(m->refresh_rate), settings.variable_refresh ? " (variable refresh)" : "");
         unsigned scale = settings.scale;
+        if (scale == 0) {  // auto: the smallest whole multiple whose 480 picture lines fill the screen's height
+            int h = 0;
+            if (auto* w = static_cast<SDL_Window*>(display->sdl_window())) {
+                if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(w)))
+                    h = int(float(m->h) * (m->pixel_density > 0 ? m->pixel_density : 1.0f));
+            }
+            scale = h > 0 ? unsigned(std::clamp((h + 479) / 480, 1, 8)) : 3u;
+            rt::log("internal resolution auto: %ux for a screen %d pixels high", scale, h);
+        }
         if (const char* e = std::getenv("PUNCHOUT_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
         renderer = std::make_unique<punchout::Renderer>(display->gpu(), scale, settings.anisotropy);
+        static punchout::Renderer* saving = nullptr;  // what was compiled since the last save, kept for next time
+        saving = renderer.get();
+        punchout::g_before_exit = [] { saving->save_now(); };
         punchout::gx::set_rendering(true);
         rt::log("drawing with %s, the EFB at %ux%s%s", display->device_name().c_str(), scale,
                 display->gpu().dynamic_blend ? "; blend state set per draw (no pipeline to build for a new one)" : "",
@@ -387,6 +403,7 @@ int main(int argc, char** argv) {
         g_main_passes.fetch_add(1, std::memory_order_relaxed);
         if (display && !display->poll()) {
             rt::log("window closed");
+            punchout::before_exit();
             std::fflush(nullptr);
             std::_Exit(0);  // guest threads are parked on host threads: no static destructors
         }
@@ -394,6 +411,7 @@ int main(int argc, char** argv) {
             menu->tick();
             if (menu->quit_requested()) {
                 rt::log("quit from the settings menu");
+                punchout::before_exit();
                 std::fflush(nullptr);
                 std::_Exit(0);
             }
