@@ -57,44 +57,87 @@ struct Cpu {
 };
 
 // Cached MEM1 (0x80000000, 24 MB) and MEM2 (0x90000000, 64 MB) are plain host
-// memory at mem + address, kept in the guest's byte order. Everything at
-// 0xC0000000 and above goes to the hooks.
+// memory at mem + address, kept in the guest's byte order. Accesses at
+// 0xC0000000 and above take the slow branch: the uncached RAM mirrors, the
+// locked cache and the write-gather pipe are handled there, the rest by the
+// hooks.
 constexpr uint32_t kSlowFrom = 0xC0000000u;
 
+// The write-gather pipe (0xCC008000-0xCC00801F), if the game's runtime set
+// one: stores there go straight to it instead of through the hooks and the
+// hardware-register table. A game streams megabytes a second through it, four
+// bytes at a time. Only the stores' slow branch looks at it.
+using PipeWrite = void (*)(Cpu&, uint32_t value, unsigned size);
+inline PipeWrite g_pipe_write = nullptr;
+inline bool is_pipe(uint32_t a) { return (a & ~31u) == 0xCC008000u; }
+
+// Plain memory past kSlowFrom, for an access wholly inside it: the uncached
+// mirrors of MEM1 (0xC0000000) and MEM2 (0xD0000000), the same memory as
+// 0x80000000 and 0x90000000, and the 16 KB locked cache (0xE0000000, its own
+// memory at mem + address; the game does its paired-single work there). The
+// address in mem, else 0 (the hooks take it: hardware).
+inline uint32_t plain_memory(uint32_t a, unsigned size) {
+    if (a - 0xC0000000u <= 0x01800000u - size) return a - 0x40000000u;
+    if (a - 0xD0000000u <= 0x04000000u - size) return a - 0x40000000u;
+    if (a - 0xE0000000u <= 0x00004000u - size) return a;
+    return 0;
+}
+
 inline uint32_t read8(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]]
-        return c.hooks->read(c, a, 1);
+    if (a >= kSlowFrom) [[unlikely]] {
+        const uint32_t m = plain_memory(a, 1);
+        if (!m) return c.hooks->read(c, a, 1);
+        a = m;
+    }
     return c.mem[a];
 }
 inline uint32_t read16(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]]
-        return c.hooks->read(c, a, 2);
+    if (a >= kSlowFrom) [[unlikely]] {
+        const uint32_t m = plain_memory(a, 2);
+        if (!m) return c.hooks->read(c, a, 2);
+        a = m;
+    }
     uint16_t v;
     std::memcpy(&v, c.mem + a, 2);
     return std::byteswap(v);
 }
 inline uint32_t read32(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]]
-        return c.hooks->read(c, a, 4);
+    if (a >= kSlowFrom) [[unlikely]] {
+        const uint32_t m = plain_memory(a, 4);
+        if (!m) return c.hooks->read(c, a, 4);
+        a = m;
+    }
     uint32_t v;
     std::memcpy(&v, c.mem + a, 4);
     return std::byteswap(v);
 }
 inline uint64_t read64(Cpu& c, uint32_t a) { return uint64_t{read32(c, a)} << 32 | read32(c, a + 4); }
 inline void write8(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]]
-        return c.hooks->write(c, a, v & 0xFF, 1);
+    if (a >= kSlowFrom) [[unlikely]] {
+        if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v & 0xFF, 1);
+        const uint32_t m = plain_memory(a, 1);
+        if (!m) return c.hooks->write(c, a, v & 0xFF, 1);
+        a = m;
+    }
     c.mem[a] = static_cast<uint8_t>(v);
 }
 inline void write16(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]]
-        return c.hooks->write(c, a, v & 0xFFFF, 2);
+    if (a >= kSlowFrom) [[unlikely]] {
+        if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v & 0xFFFF, 2);
+        const uint32_t m = plain_memory(a, 2);
+        if (!m) return c.hooks->write(c, a, v & 0xFFFF, 2);
+        a = m;
+    }
     const uint16_t s = std::byteswap(static_cast<uint16_t>(v));
     std::memcpy(c.mem + a, &s, 2);
 }
 inline void write32(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]]
-        return c.hooks->write(c, a, v, 4);
+    if (a >= kSlowFrom) [[unlikely]] {
+        if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v, 4);
+        const uint32_t m = plain_memory(a, 4);
+        if (!m) return c.hooks->write(c, a, v, 4);
+        a = m;
+    }
     const uint32_t s = std::byteswap(v);
     std::memcpy(c.mem + a, &s, 4);
 }

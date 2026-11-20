@@ -175,10 +175,11 @@ struct Renderer::Impl {
     // topology and vertex layout) can't wait: a draw needs one. So every
     // pipeline the game has used is remembered in pipelines.keys beside the
     // cache (and those seen while making this build are built in,
-    // pipeline_seed.inc), and the workers compile them all as the game starts,
-    // ubershader's first: from the driver's cache after the first run, a few
-    // milliseconds each. A draw only compiles on the drawing thread when its
-    // pipeline is new to every run so far, and the log says how long it took.
+    // pipeline_seed.inc): the ubershader's are built before the first frame,
+    // the specialised ones by the workers as the game starts; from the
+    // driver's cache after the first run, a few milliseconds each. A draw
+    // only compiles on the drawing thread when its pipeline is new to every
+    // run so far, and the log says how long it took.
     enum class Specialize { kOff, kAsync, kSync } specialize = Specialize::kAsync;
     bool specialize_on = true;  // set_specialization
     struct SpecKey {
@@ -610,9 +611,16 @@ struct Renderer::Impl {
             requested.clear();
             return;
         }
+        // The ubershader's now, before the first frame (a draw can't do without
+        // one): a dozen or so, milliseconds each from the driver's cache after
+        // the first run. The specialised ones go to the workers.
+        const auto t0 = std::chrono::steady_clock::now();
+        for (const Job& j : uber) pipelines[{j.key.k}] = build_gx(j.key.k, nullptr);
+        if (!uber.empty())
+            rt::log("pipelines: the ubershader's %llu built in %.0f ms before the first frame", static_cast<unsigned long long>(uber.size()),
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         {
             std::lock_guard lock(spec_lock);
-            spec_queue.insert(spec_queue.end(), uber.begin(), uber.end());
             spec_queue.insert(spec_queue.end(), spec.begin(), spec.end());
         }
         spec_wake.notify_all();

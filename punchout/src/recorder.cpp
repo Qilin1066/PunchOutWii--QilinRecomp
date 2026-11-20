@@ -22,6 +22,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <type_traits>
 #include <unordered_map>
 
 #include "gx.hpp"
@@ -329,8 +330,12 @@ Plan plan_of(const Registers& r, const Format& f) {
     return pl;
 }
 
-// One vertex by its plan; returns the bytes it took.
-size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const uint8_t* p, Vertex& v) {
+// One vertex by its plan, straight into the frame's layout (Vertex, or
+// SmallVertex when the format has no tangents and at most two texture
+// coordinates); returns the bytes it took.
+template <class V>
+size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const uint8_t* p, V& v) {
+    constexpr bool kFull = std::is_same_v<V, Vertex>;
     const uint8_t* const start = p;
     uint8_t mtx[9];
     std::memcpy(mtx, pl.mtx, 9);
@@ -370,24 +375,31 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
             }
             case Step::kNormal: {
                 const uint8_t* d = fetch(st.how, 1, st.cs * 3 * st.n);
-                float* dst[3] = {v.normal, v.tangent, v.binormal};
+                float nbt[3][3];
                 for (unsigned k = 0; k < st.n; ++k)
-                    for (unsigned j = 0; j < 3; ++j) dst[k][j] = normal_component(d + (3 * k + j) * st.cs, st.fmt);
+                    for (unsigned j = 0; j < 3; ++j) nbt[k][j] = normal_component(d + (3 * k + j) * st.cs, st.fmt);
+                std::memcpy(v.normal, nbt[0], 12);
                 normal = true;
-                std::memcpy(g_last_normal, v.normal, 12);
-                if (st.n == 3) std::memcpy(g_last_tangent, v.tangent, 12), std::memcpy(g_last_binormal, v.binormal, 12);
+                std::memcpy(g_last_normal, nbt[0], 12);
+                if (st.n == 3) {
+                    std::memcpy(g_last_tangent, nbt[1], 12), std::memcpy(g_last_binormal, nbt[2], 12);
+                    if constexpr (kFull) std::memcpy(v.tangent, nbt[1], 12), std::memcpy(v.binormal, nbt[2], 12);
+                }
                 break;
             }
             case Step::kColor: read_color(fetch(st.how, 2 + st.slot, st.cs), st.fmt, col[st.slot]); break;
             case Step::kUv: {
                 const uint8_t* d = fetch(st.how, 4 + st.slot, st.cs * st.n);
+                if (!kFull && st.slot >= 2) [[unlikely]]
+                    rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
                 for (unsigned k = 0; k < st.n; ++k) v.uv[st.slot][k] = component(d + k * st.cs, st.fmt, st.scale, f.dequant);
                 break;
             }
         }
     }
     if (!normal) std::memcpy(v.normal, g_last_normal, 12);
-    if (!(pl.has & kHasTangent)) std::memcpy(v.tangent, g_last_tangent, 12), std::memcpy(v.binormal, g_last_binormal, 12);
+    if constexpr (kFull)
+        if (!(pl.has & kHasTangent)) std::memcpy(v.tangent, g_last_tangent, 12), std::memcpy(v.binormal, g_last_binormal, 12);
     if ((pl.has & kHasColor0) && !(pl.has & kHasColor1)) std::memcpy(col[1], col[0], 4);
     if (!(pl.has & kHasColor0) && (pl.has & kHasColor1)) std::memcpy(col[0], col[1], 4);
     std::memcpy(v.color0, col[0], 4);
@@ -709,48 +721,63 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     Frame& f = *g_frame;
     const Format fmt = format_of(r, opcode & 7);
     uint32_t has = 0;
-    thread_local std::vector<Vertex> decoded;
-    decoded.resize(count);
     const Plan plan = plan_of(r, fmt);
     if (g_dff_use) [[unlikely]]
         std::fill(std::begin(g_use_lo), std::end(g_use_lo), ~0u), std::fill(std::begin(g_use_hi), std::end(g_use_hi), 0u);
-    if (plan.usable) {
-        has = plan.has;
-        for (uint32_t i = 0; i < count; ++i) data += decode_vertex(r, fmt, plan, data, decoded[i]);
-    } else {
-        for (uint32_t i = 0; i < count; ++i) data += read_vertex(r, fmt, data, decoded[i], has);
-    }
-    if (g_dff_use) [[unlikely]]
-        for (unsigned a = 0; a < 16; ++a)
-            if (g_use_lo[a] < g_use_hi[a]) dff_use_memory(r.cp[0xA0 + a] + g_use_lo[a], g_use_hi[a] - g_use_lo[a]);
     // The compact layout when nothing needs the rest: no tangents or binormals
     // in the format, and none sent before (emboss texgen reads the last ones),
-    // and no texture coordinates past the second.
+    // and no texture coordinates past the second. Decoding can't change the
+    // answer: the last tangents only change in a format that has them.
     constexpr uint32_t kBig = kHasTangent | kHasBinormal | (0x3Fu * (kHasUv0 << 2));
     static constexpr float kZero3[3] = {};
     static const bool force_full = [] {  // PUNCHOUT_FULL_VERTICES=1: always the full layout (tests both)
         const char* e = std::getenv("PUNCHOUT_FULL_VERTICES");
         return e && *e && *e != '0';
     }();
-    const bool small = !force_full && !(has & kBig) && std::memcmp(g_last_tangent, kZero3, 12) == 0 && std::memcmp(g_last_binormal, kZero3, 12) == 0;
+    const bool no_last_nbt = std::memcmp(g_last_tangent, kZero3, 12) == 0 && std::memcmp(g_last_binormal, kZero3, 12) == 0;
+    bool small;
     uint32_t first;
-    if (small) {
-        first = uint32_t(f.small.size());
-        f.small.resize(first + count);
-        for (uint32_t i = 0; i < count; ++i) {
-            const Vertex& v = decoded[i];
-            SmallVertex& o = f.small[first + i];
-            std::memcpy(o.pos, v.pos, 12);
-            std::memcpy(o.normal, v.normal, 12);
-            std::memcpy(o.color0, v.color0, 4);
-            std::memcpy(o.color1, v.color1, 4);
-            std::memcpy(o.uv, v.uv, 16);
-            std::memcpy(o.matrices, v.matrices, 12);
+    if (plan.usable) {  // straight into the frame's vertices
+        has = plan.has;
+        small = !force_full && !(has & kBig) && no_last_nbt;
+        if (small) {
+            first = uint32_t(f.small.size());
+            f.small.resize(first + count);
+            SmallVertex* out = f.small.data() + first;
+            for (uint32_t i = 0; i < count; ++i) data += decode_vertex(r, fmt, plan, data, out[i]);
+        } else {
+            first = uint32_t(f.vertices.size());
+            f.vertices.resize(first + count);
+            Vertex* out = f.vertices.data() + first;
+            for (uint32_t i = 0; i < count; ++i) data += decode_vertex(r, fmt, plan, data, out[i]);
         }
-    } else {
-        first = uint32_t(f.vertices.size());
-        f.vertices.insert(f.vertices.end(), decoded.begin(), decoded.end());
+    } else {  // the general reader (rare formats), then the layout
+        thread_local std::vector<Vertex> decoded;
+        decoded.resize(count);
+        for (uint32_t i = 0; i < count; ++i) data += read_vertex(r, fmt, data, decoded[i], has);
+        small = !force_full && !(has & kBig) && std::memcmp(g_last_tangent, kZero3, 12) == 0 &&
+                std::memcmp(g_last_binormal, kZero3, 12) == 0;
+        if (small) {
+            first = uint32_t(f.small.size());
+            f.small.resize(first + count);
+            for (uint32_t i = 0; i < count; ++i) {
+                const Vertex& v = decoded[i];
+                SmallVertex& o = f.small[first + i];
+                std::memcpy(o.pos, v.pos, 12);
+                std::memcpy(o.normal, v.normal, 12);
+                std::memcpy(o.color0, v.color0, 4);
+                std::memcpy(o.color1, v.color1, 4);
+                std::memcpy(o.uv, v.uv, 16);
+                std::memcpy(o.matrices, v.matrices, 12);
+            }
+        } else {
+            first = uint32_t(f.vertices.size());
+            f.vertices.insert(f.vertices.end(), decoded.begin(), decoded.end());
+        }
     }
+    if (g_dff_use) [[unlikely]]
+        for (unsigned a = 0; a < 16; ++a)
+            if (g_use_lo[a] < g_use_hi[a]) dff_use_memory(r.cp[0xA0 + a] + g_use_lo[a], g_use_hi[a] - g_use_lo[a]);
     if (g_dirty) {
         f.states.emplace_back();
         build_state(r, f.states.back());
@@ -763,32 +790,58 @@ static void record_primitive_timed(const Registers& r, uint8_t opcode, const uin
     d.first_index = uint32_t(f.indices.size());
     auto& ix = f.indices;
     const unsigned type = (opcode >> 3) & 7;
+    // Sized once, then written through a pointer.
+    const auto grow = [&](size_t n) {
+        const size_t at = ix.size();
+        ix.resize(at + n);
+        return ix.data() + at;
+    };
     switch (type) {
-        case 0: case 1:  // quads (and the second quad type)
-            for (uint32_t i = 0; i + 3 < count; i += 4)
-                ix.insert(ix.end(), {first + i, first + i + 1, first + i + 2, first + i, first + i + 2, first + i + 3});
-            break;
-        case 2:  // triangles
-            for (uint32_t i = 0; i + 2 < count; i += 3) ix.insert(ix.end(), {first + i, first + i + 1, first + i + 2});
-            break;
-        case 3:  // strip: alternate triangles keep the winding
-            for (uint32_t i = 0; i + 2 < count; ++i) {
-                if (i & 1) ix.insert(ix.end(), {first + i + 1, first + i, first + i + 2});
-                else ix.insert(ix.end(), {first + i, first + i + 1, first + i + 2});
+        case 0: case 1: {  // quads (and the second quad type)
+            uint32_t* o = grow(size_t(count / 4) * 6);
+            for (uint32_t i = 0; i + 3 < count; i += 4, o += 6) {
+                const uint32_t v = first + i;
+                o[0] = v, o[1] = v + 1, o[2] = v + 2, o[3] = v, o[4] = v + 2, o[5] = v + 3;
             }
             break;
-        case 4:  // fan
-            for (uint32_t i = 1; i + 1 < count; ++i) ix.insert(ix.end(), {first, first + i, first + i + 1});
+        }
+        case 2: {  // triangles
+            uint32_t* o = grow(size_t(count / 3) * 3);
+            for (uint32_t i = 0; i + 2 < count; i += 3, o += 3) o[0] = first + i, o[1] = first + i + 1, o[2] = first + i + 2;
             break;
-        case 5:  // lines
-            for (uint32_t i = 0; i + 1 < count; i += 2) ix.insert(ix.end(), {first + i, first + i + 1});
+        }
+        case 3: {  // strip: alternate triangles keep the winding
+            if (count < 3) break;
+            uint32_t* o = grow(size_t(count - 2) * 3);
+            for (uint32_t i = 0; i + 2 < count; ++i, o += 3) {
+                const uint32_t v = first + i;
+                if (i & 1) o[0] = v + 1, o[1] = v, o[2] = v + 2;
+                else o[0] = v, o[1] = v + 1, o[2] = v + 2;
+            }
             break;
-        case 6:  // line strip
-            for (uint32_t i = 0; i + 1 < count; ++i) ix.insert(ix.end(), {first + i, first + i + 1});
+        }
+        case 4: {  // fan
+            if (count < 3) break;
+            uint32_t* o = grow(size_t(count - 2) * 3);
+            for (uint32_t i = 1; i + 1 < count; ++i, o += 3) o[0] = first, o[1] = first + i, o[2] = first + i + 1;
             break;
-        default:  // points
-            for (uint32_t i = 0; i < count; ++i) ix.push_back(first + i);
+        }
+        case 5: {  // lines
+            uint32_t* o = grow(size_t(count / 2) * 2);
+            for (uint32_t i = 0; i + 1 < count; i += 2, o += 2) o[0] = first + i, o[1] = first + i + 1;
             break;
+        }
+        case 6: {  // line strip
+            if (count < 2) break;
+            uint32_t* o = grow(size_t(count - 1) * 2);
+            for (uint32_t i = 0; i + 1 < count; ++i, o += 2) o[0] = first + i, o[1] = first + i + 1;
+            break;
+        }
+        default: {  // points
+            uint32_t* o = grow(count);
+            for (uint32_t i = 0; i < count; ++i) o[i] = first + i;
+            break;
+        }
     }
     d.index_count = uint32_t(ix.size()) - d.first_index;
     if (d.index_count == 0) return;

@@ -492,6 +492,12 @@ std::mutex g_stats_lock;
 Stats g_stats_seen;  // g_stats as of the last batch, for other threads
 
 void pipe_write(Cpu& c, uint32_t value, unsigned size) {
+    if (size == 4 && g_gathered <= 28) [[likely]] {  // most stores: a word, inside the burst
+        const uint32_t be = std::byteswap(value);
+        std::memcpy(g_gather + g_gathered, &be, 4);
+        if ((g_gathered += 4) == 32) send_burst(c);
+        return;
+    }
     for (unsigned i = 0; i < size; ++i) {  // a write can straddle two bursts
         g_gather[g_gathered++] = static_cast<uint8_t>(value >> (8 * (size - 1 - i)));
         if (g_gathered == 32) send_burst(c);
@@ -664,6 +670,7 @@ void init_gpu() {
     map_mmio({0xCC001000u, 0xCC001080u, "the pixel engine", read_reg, write_reg});
     map_mmio({0xCC003000u, 0xCC003100u, "the processor interface", read_reg, write_reg});
     map_mmio({0xCC008000u, 0xCC008020u, "the write-gather pipe", read_reg, write_reg});
+    rt::g_pipe_write = pipe_write;  // the stores' direct route (cpu.hpp)
     add_timer_source(poll_pe, pe_deadline);
     if (g_gpu_threaded) std::thread(gpu_thread).detach();  // runs until the process exits
 }

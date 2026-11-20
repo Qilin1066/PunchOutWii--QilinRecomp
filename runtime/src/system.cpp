@@ -16,6 +16,8 @@ namespace {
 constexpr uint32_t kMem1 = 0x80000000u, kMem1Size = 24u << 20;
 constexpr uint32_t kMem2 = 0x90000000u, kMem2Size = 64u << 20;
 constexpr uint32_t kLockedCache = 0xE0000000u, kLockedCacheSize = 16u << 10;
+static_assert(kMem1Size == 0x01800000u && kMem2Size == 0x04000000u && kLockedCache == 0xE0000000u && kLockedCacheSize == 0x4000u,
+              "cpu.hpp's plain_memory has these sizes too");
 
 struct Registered {
     uint32_t address;
