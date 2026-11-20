@@ -98,7 +98,7 @@ if (-not $Rebuild -and (Test-Path $game) -and $built -eq $kitVersion) {
     exit 0
 }
 
-Write-Host "Punch-Out!! QilinComp $kitVersion" -ForegroundColor Cyan
+Write-Host "Punch-Out!! QilinRecomp $kitVersion" -ForegroundColor Cyan
 if (Test-Path $game) { Write-Host "Updating the game for this version: a few minutes." }
 else { Write-Host "Building the game from your disc. This happens once (and after an update): a few minutes (up to 15 on a slower PC)." }
 Write-Host "Disc: $disc"

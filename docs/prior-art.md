@@ -1,19 +1,19 @@
 # Prior art: Wii and PowerPC recompilation, and this game (researched 2026-11-18)
 
-What exists, what each project chose, and what it means for this one (C++23, Vulkan 1.3, cross-platform including low-end ARM boards, efficiency and reliability first, the same targets as GBTG-Qilincomp). Sections 4–9 are BeatTheBeat-QilinComp's survey, which applies to every Wii game, carried over unchanged.
+What exists, what each project chose, and what it means for this one (C++23, Vulkan 1.3, cross-platform including low-end ARM boards, efficiency and reliability first, the same targets as GBTGhoulies-QilinRecomp). Sections 4–9 are BeatTheBeat-QilinRecomp's survey, which applies to every Wii game, carried over unchanged.
 
-## 1. Sibling projects: GBTG-Qilincomp and BeatTheBeat-QilinComp
-- **GBTG-Qilincomp** (Grabbed by the Ghoulies, Xbox) set the requirements and scope this project shares: static recompilation to C++, the platform's system libraries replaced natively, Vulkan 1.3 only, a Raspberry Pi 4–class board as the low-end reference.
-- **BeatTheBeat-QilinComp** (Beat the Beat: Rhythm Paradise, Wii) applied them to the Wii, and wrote the recompiler core this project started from (v0.4.0): the DOL loader, the Broadway decoder and its binutils cross-check, function discovery and CFG, coverage, the CLI, the tests and CI.
+## 1. Sibling projects: GBTGhoulies-QilinRecomp and BeatTheBeat-QilinRecomp
+- **GBTGhoulies-QilinRecomp** (Grabbed by the Ghoulies, Xbox) set the requirements and scope this project shares: static recompilation to C++, the platform's system libraries replaced natively, Vulkan 1.3 only, a Raspberry Pi 4–class board as the low-end reference.
+- **BeatTheBeat-QilinRecomp** (Beat the Beat: Rhythm Paradise, Wii) applied them to the Wii, and wrote the recompiler core this project started from (v0.4.0): the DOL loader, the Broadway decoder and its binutils cross-check, function discovery and CFG, coverage, the CLI, the tests and CI.
 
-**Takeaways:** the core is game-independent apart from the supported build's hash. Punch-Out!! exercised it harder (56% more code, three times the indirect calls) and needed four new switch rules and a soundness fix (`recompiler-core.md`). They belong in the shared core, so they should go back to BeatTheBeat-QilinComp too.
+**Takeaways:** the core is game-independent apart from the supported build's hash. Punch-Out!! exercised it harder (56% more code, three times the indirect calls) and needed four new switch rules and a soundness fix (`recompiler-core.md`). They belong in the shared core, so they should go back to BeatTheBeat-QilinRecomp too.
 
 ## 2. This game: no decompilation, no symbols
 - There's no public decompilation of Punch-Out!! (Wii), and none of the public Wii symbol collections (for example `riptl/wii-symbols`, 21 game IDs) has `R7P*`. The disc ships no linker map or ELF.
 - What the game does give: the SDK's build banners, MSL's and MetroTRK's strings, C++ class names in `.rodata` (`AK::`, `homebutton::`, `nw4hbm::`, Next Level Games' `nl*`, `Sl*` and `FE*` classes), and a disc whose file names are readable (`art/`, `art/wwiseaudio/SoundbanksInfo.xml`).
-- The libraries it shares with other games have names elsewhere: the Revolution SDK, MSL, the EABI runtime and MetroTRK are named by the Rhythm Heaven Fever decomp (CC0, vendored in BeatTheBeat-QilinComp) and other Wii decomps (Wii Sports, Super Paper Mario, Mario Kart Wii); the HOME Button Menu and `nw4hbm` by the decomps that link it.
+- The libraries it shares with other games have names elsewhere: the Revolution SDK, MSL, the EABI runtime and MetroTRK are named by the Rhythm Heaven Fever decomp (CC0, vendored in BeatTheBeat-QilinRecomp) and other Wii decomps (Wii Sports, Super Paper Mario, Mario Kart Wii); the HOME Button Menu and `nw4hbm` by the decomps that link it.
 
-**Takeaways:** names for the libraries come from matching against those decomps by function size sequences and strings, as BeatTheBeat-QilinComp ported US names to PAL; the game and engine code keep address names, with class names where vtables give them. Done for the Rhythm Heaven Fever decomp in v0.2.0 (`code-analysis.md`): it names 1,988 functions of the SDK, MSL, the EABI runtime, the HOME Button Menu and RFL.
+**Takeaways:** names for the libraries come from matching against those decomps by function size sequences and strings, as BeatTheBeat-QilinRecomp ported US names to PAL; the game and engine code keep address names, with class names where vtables give them. Done for the Rhythm Heaven Fever decomp in v0.2.0 (`code-analysis.md`): it names 1,988 functions of the SDK, MSL, the EABI runtime, the HOME Button Menu and RFL.
 
 ## 3. Audiokinetic Wwise on the Wii
 - Wwise is a commercial sound engine; its Wii version runs on top of AX and includes Wii Remote speaker output (`CAkWiimoteMgr`). The game's banks were generated with Wwise's authoring tool (the disc keeps `SoundBanksGeneration.log` and `SoundbanksInfo.xml`, which name the version and every event).
@@ -56,7 +56,7 @@ What exists, what each project chose, and what it means for this one (C++23, Vul
 - `objdump -M broadway,raw` decodes the 750CL's instructions with the paired singles, without simplified mnemonics. It is our decoder's cross-check (`tools/check/verify_decoder.py`). It differs from Broadway in reviewed ways: it leaves out `mftb`, accepts `fsqrt`, `fsqrts`, `tlbia`, `tlbld` and `tlbli` (not on the 750CL), accepts later ISAs' hint fields that are reserved on Broadway, and doesn't check several invalid forms. The full list is in the script.
 
 ## Decisions changed or added
-1. **Core:** BeatTheBeat-QilinComp's recompiler core, extended where this game needed it; the extensions go back to it.
+1. **Core:** BeatTheBeat-QilinRecomp's recompiler core, extended where this game needed it; the extensions go back to it.
 2. **Decoder:** our own, cross-checked against binutils on every word, in CI over a sweep of the encoding space (unchanged).
 3. **Names:** no decomp exists for this game. Libraries are named by matching against the CC0 Rhythm Heaven Fever decomp and other Wii decomps; the rest keeps address names, with class names from vtables.
 4. **System boundary:** replace the SDK's hardware-facing libraries at their API (no hardware register emulation beyond the write-gather pipe); lift the C/C++ runtime, the pure-software SDK libraries, THP, RFL, the HOME Button Menu, Wwise and Next Level Games' engine. Confirm per library in analysis.

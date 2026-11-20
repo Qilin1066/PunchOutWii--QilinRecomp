@@ -62,7 +62,7 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
 
     Gpu g;
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.pApplicationName = "Punch-Out!! (PunchOutWii-QilinComp)";
+    app.pApplicationName = "Punch-Out!! (PunchOutWii-QilinRecomp)";
     app.apiVersion = VK_API_VERSION_1_3;
     std::vector<const char*> ext(instance_extensions.begin(), instance_extensions.end());
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};

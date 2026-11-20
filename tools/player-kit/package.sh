@@ -3,8 +3,8 @@
 # (as the APB recomp's).
 #
 # Cross-compiles on Linux with llvm-mingw, then lays out:
-#   PunchOut-QilinComp/Play Punch-Out.bat, README.txt, LICENSES/
-#   PunchOut-QilinComp/kit/  qilin.exe, lib/libpunchout_kit.a, include/, kit.ninja,
+#   PunchOutWii-QilinRecomp/Play Punch-Out.bat, README.txt, LICENSES/
+#   PunchOutWii-QilinRecomp/kit/  qilin.exe, lib/libpunchout_kit.a, include/, kit.ninja,
 #                            plan.tsv, play.ps1, ninja.exe, toolchain/ (llvm-mingw, trimmed), VERSION
 # Nothing in it is made from the game: the player's PC lifts their own
 # main.dol and compiles that code with the bundled compiler (play.ps1).
@@ -21,7 +21,7 @@ out=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 root=$(cd "$(dirname "$0")/../.." && pwd)
 build=${BUILD_DIR:-$root/build-player-kit}
 stage=$(mktemp -d)
-pkg="$stage/PunchOut-QilinComp"
+pkg="$stage/PunchOutWii-QilinRecomp"
 
 # shellcheck disable=SC2086
 cmake -S "$root" -B "$build" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$root/tools/player-kit/mingw-cross.cmake" \
@@ -50,6 +50,6 @@ cp "$build/_deps/vulkanheaders-src/LICENSE.md" "$lic/Vulkan-Headers/" 2>/dev/nul
 cp "$build/_deps/volk-src/LICENSE.md" "$lic/volk/"
 
 rm -f "$out"
-(cd "$stage" && zip -q -r -9 "$out" PunchOut-QilinComp)
+(cd "$stage" && zip -q -r -9 "$out" PunchOutWii-QilinRecomp)
 rm -rf "$stage"
 echo "Packaged $out ($(du -h "$out" | cut -f1))"

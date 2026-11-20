@@ -1,5 +1,5 @@
-Punch-Out!! QilinComp for Windows (64-bit)
-==========================================
+Punch-Out!! QilinRecomp for Windows (64-bit)
+============================================
 
 Punch-Out!! (Next Level Games / Nintendo, Wii, 2009), recompiled to run
 natively: the game's own program translated into C++ and compiled for your

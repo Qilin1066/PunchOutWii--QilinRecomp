@@ -492,7 +492,7 @@ void Menu::game_page() {
     if (ImGui::Combo("Sound", &sound, kSound, 2)) s_.sound = unsigned(sound);
 
     ImGui::SeparatorText("About");
-    ImGui::TextWrapped("Punch-Out!! QilinComp %s: a static recompilation, the game's own code compiled for this computer.",
+    ImGui::TextWrapped("Punch-Out!! QilinRecomp %s: a static recompilation, the game's own code compiled for this computer.",
                        PUNCHOUT_VERSION);
     ImGui::TextWrapped("Graphics: Vulkan. Window, sound and input: SDL3 (zlib). Menu: Dear ImGui (MIT).");
     ImGui::TextWrapped("Settings file: %s", settings_file(folder_).string().c_str());
