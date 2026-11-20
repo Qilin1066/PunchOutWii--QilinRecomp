@@ -859,10 +859,10 @@ struct Renderer::Impl {
         const auto at = [&](size_t i) { return data + i * 8; };
         for (size_t i = 0; i < f.copies.size(); ++i) {
             const gx::Copy& c = f.copies[i];
-            rt::log("copy %llu: %s src %d,%d %dx%d -> %ux%u format %X%s gamma %.1f filter %u/%u/%u%s%s texture %d", static_cast<unsigned long long>(i),
+            rt::log("copy %llu: %s src %d,%d %dx%d -> %ux%u format %X%s gamma %.1f filter %u/%u/%u%s%s%s%s texture %d", static_cast<unsigned long long>(i),
                     c.to_xfb ? "XFB" : "texture", c.src[0], c.src[1], c.src[2], c.src[3], c.dest_width, c.dest_height, c.format,
                     c.half_scale ? " half" : "", c.gamma, c.filter[0], c.filter[1], c.filter[2], c.from_depth ? " depth" : "",
-                    c.efb_alpha ? " alpha" : "", c.texture);
+                    c.efb_alpha ? " alpha" : "", c.clamp_top ? " clamp-top" : "", c.clamp_bottom ? " clamp-bottom" : "", c.texture);
         }
         for (size_t i = 0; i + 1 <= count && i < f.packets.size(); ++i) {
             const uint8_t *a = at(i), *b = at(i + 1);
