@@ -62,7 +62,10 @@ void tune_process() {
     t.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | 0x4;  // ..._IGNORE_TIMER_RESOLUTION
 #endif
     t.StateMask = 0;  // neither: full speed, the timer as asked
-    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &t, sizeof t);  // older Windows: refused, harmless
+    // Looked up at run time: the headers declare it only for Windows 8 and up.
+    using Set = BOOL(WINAPI*)(HANDLE, PROCESS_INFORMATION_CLASS, LPVOID, DWORD);
+    if (auto set = from_dll<Set>(L"kernel32.dll", "SetProcessInformation"))
+        set(GetCurrentProcess(), ProcessPowerThrottling, &t, sizeof t);  // before Windows 10: refused, harmless
 #endif
 }
 
