@@ -36,6 +36,7 @@
 #include "qilin/host/paths.hpp"
 #include "qilin/rt/system.hpp"
 #include "shaders.inc"
+#include "pipeline_seed.inc"  // kPipelineSeed: pipelines.keys as this build's runs left it
 
 namespace punchout {
 namespace host = qilin::host;
@@ -164,11 +165,20 @@ struct Renderer::Impl {
     VkShaderModule gx_frag_stages[16];  // specialised, by TEV stage count
     VkDescriptorSetLayout states_layout, textures_layout, copy_set_layout;
     VkPipelineLayout gx_layout, clear_layout, copy_layout;
-    std::map<PipelineKey, VkPipeline> pipelines;  // the ubershader's
+    std::map<PipelineKey, VkPipeline> pipelines;  // the ubershader's (main thread)
     // Pipelines specialised to a draw's shape (gx.hpp, gx.frag): compiled by
-    // a worker thread into a pipeline cache kept on disk, the ubershader's
+    // worker threads into a pipeline cache kept on disk, the ubershader's
     // pipeline drawing until each is ready, so a new shape never stalls a
     // frame. PUNCHOUT_UBERSHADER=1 keeps to the ubershader.
+    //
+    // The ubershader's own pipelines (one per blend, write mask, logic op,
+    // topology and vertex layout) can't wait: a draw needs one. So every
+    // pipeline the game has used is remembered in pipelines.keys beside the
+    // cache (and those seen while making this build are built in,
+    // pipeline_seed.inc), and the workers compile them all as the game starts,
+    // ubershader's first: from the driver's cache after the first run, a few
+    // milliseconds each. A draw only compiles on the drawing thread when its
+    // pipeline is new to every run so far, and the log says how long it took.
     enum class Specialize { kOff, kAsync, kSync } specialize = Specialize::kAsync;
     bool specialize_on = true;  // set_specialization
     struct SpecKey {
@@ -183,13 +193,31 @@ struct Renderer::Impl {
     std::set<SpecKey> requested;                 // asked of the worker (main thread)
     std::mutex spec_lock;
     std::condition_variable spec_wake;
-    std::deque<SpecKey> spec_queue;                       // to compile
-    std::vector<std::pair<SpecKey, VkPipeline>> spec_done;  // compiled, not yet taken
+    struct Job {
+        bool uber;  // the ubershader's pipeline for key.k, or key specialised
+        SpecKey key;
+    };
+    std::deque<Job> spec_queue;                                     // to compile
+    std::vector<std::pair<SpecKey, VkPipeline>> spec_done;          // compiled, not yet taken
+    std::vector<std::pair<PipelineKey, VkPipeline>> uber_done;      // the same, the ubershader's
+    std::set<PipelineKey> uber_requested;                           // queued or built (main thread)
     bool spec_quit = false;
-    std::thread spec_worker;
+    std::vector<std::thread> spec_workers;
+    // pipelines.keys: what the game used, appended to as new ones appear.
+    std::filesystem::path keys_path;
+    std::vector<uint8_t> keys_new;  // records not yet written (main thread)
+    // Writing the cache and the keys: a thread of its own, at most every 20 s
+    // (and at the end), never the drawing thread.
+    std::thread saver;
+    std::condition_variable save_wake;
+    bool save_wanted = false;
+    std::vector<uint8_t> keys_to_write;  // under spec_lock
+    std::chrono::steady_clock::time_point last_save{};
+    uint64_t stalls = 0;      // pipelines compiled on the drawing thread
+    double stall_ms = 0;
     VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
     std::filesystem::path cache_path;
-    size_t cache_saved_at = 0;  // specialised pipelines when the cache was last written
+    size_t cache_saved_at = 0;  // pipelines (both kinds) when the cache was last written
     uint64_t draws_specialized = 0, draws_total = 0;
     VkDeviceSize small_at = 0, zeros_at = 0;  // this frame's compact vertices and zeros, in the vertex buffer
     double spec_ms = 0;      // time the worker spent compiling (under spec_lock)
@@ -344,6 +372,7 @@ struct Renderer::Impl {
             vkCmdClearDepthStencilImage(cmd, efb_depth.image, VK_IMAGE_LAYOUT_GENERAL, &far, 1, &d);
             host::transition(cmd, white.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         });
+        start_warmup();
     }
 
     template <class F>
@@ -506,8 +535,91 @@ struct Renderer::Impl {
                              k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0);
     }
 
+    // pipelines.keys records: a kind byte (0 the ubershader's, 1 specialised),
+    // the key, and for 1 the shape's words.
+    static constexpr char kKeysMagic[8] = {'P', 'O', 'P', 'K', 'E', 'Y', 'S', '1'};
+    static constexpr size_t kKeysHeader = sizeof kKeysMagic + 8;
+    void remember(bool uber, const gx::PipelineKey& k, uint32_t shape) {
+        if (keys_path.empty()) return;
+        keys_new.push_back(uber ? 0 : 1);
+        const auto* kb = reinterpret_cast<const uint8_t*>(&k);
+        keys_new.insert(keys_new.end(), kb, kb + sizeof k);
+        if (!uber) {
+            const gx::ShapeWords w = gx::shape_words(shape);
+            const auto* wb = reinterpret_cast<const uint8_t*>(w.data());
+            keys_new.insert(keys_new.end(), wb, wb + sizeof w);
+        }
+    }
+    // Queue every remembered pipeline (records after the header).
+    void queue_remembered(const uint8_t* p, size_t n, std::deque<Job>& uber, std::deque<Job>& spec) {
+        const size_t one = 1 + sizeof(gx::PipelineKey);
+        while (n >= one) {
+            const uint8_t kind = p[0];
+            gx::PipelineKey k;
+            std::memcpy(&k, p + 1, sizeof k);
+            if (kind == 0) {
+                if (uber_requested.insert({k}).second) uber.push_back({true, {k, 0}});
+                p += one, n -= one;
+            } else if (kind == 1 && n >= one + sizeof(gx::ShapeWords)) {
+                gx::ShapeWords w;
+                std::memcpy(w.data(), p + one, sizeof w);
+                const SpecKey key{k, gx::intern_shape(w)};
+                if (!k.depth_out && requested.insert(key).second) spec.push_back({false, key});
+                p += one + sizeof w, n -= one + sizeof w;
+            } else {
+                return;  // damaged: keep what was read
+            }
+        }
+    }
+    static bool keys_header_ok(const uint8_t* p, size_t n) {
+        uint32_t key_size, words;
+        if (n < kKeysHeader || std::memcmp(p, kKeysMagic, sizeof kKeysMagic) != 0) return false;
+        std::memcpy(&key_size, p + 8, 4);
+        std::memcpy(&words, p + 12, 4);
+        return key_size == sizeof(gx::PipelineKey) && words == gx::kShapeWords;
+    }
+
+    // Start-up: the workers, then everything remembered queued for them (the
+    // ubershader's pipelines first: draws need them; then the shapes).
+    void start_warmup() {
+        if (specialize == Specialize::kOff) return;
+        keys_path = host::user_folder() / "pipelines.keys";
+        std::deque<Job> uber, spec;
+        if (keys_header_ok(kPipelineSeed, sizeof kPipelineSeed))
+            queue_remembered(kPipelineSeed + kKeysHeader, sizeof kPipelineSeed - kKeysHeader, uber, spec);
+        std::vector<uint8_t> file;
+        if (FILE* f = std::fopen(keys_path.string().c_str(), "rb")) {
+            uint8_t buf[65536];
+            for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) file.insert(file.end(), buf, buf + n);
+            std::fclose(f);
+        }
+        if (keys_header_ok(file.data(), file.size())) {
+            queue_remembered(file.data() + kKeysHeader, file.size() - kKeysHeader, uber, spec);
+        } else {  // none yet, or from another build: start it again
+            std::error_code ec;
+            std::filesystem::remove(keys_path, ec);
+            keys_new.assign(kKeysMagic, kKeysMagic + sizeof kKeysMagic);
+            const uint32_t key_size = sizeof(gx::PipelineKey), words = gx::kShapeWords;
+            keys_new.insert(keys_new.end(), reinterpret_cast<const uint8_t*>(&key_size), reinterpret_cast<const uint8_t*>(&key_size) + 4);
+            keys_new.insert(keys_new.end(), reinterpret_cast<const uint8_t*>(&words), reinterpret_cast<const uint8_t*>(&words) + 4);
+        }
+        rt::log("pipelines: %llu of the ubershader's and %llu specialised remembered, compiling as the game starts",
+                static_cast<unsigned long long>(uber.size()), static_cast<unsigned long long>(spec.size()));
+        if (specialize == Specialize::kSync) {  // PUNCHOUT_SPECIALIZE_SYNC (the tests): each when first drawn, as before
+            uber_requested.clear();
+            requested.clear();
+            return;
+        }
+        {
+            std::lock_guard lock(spec_lock);
+            spec_queue.insert(spec_queue.end(), uber.begin(), uber.end());
+            spec_queue.insert(spec_queue.end(), spec.begin(), spec.end());
+        }
+        spec_wake.notify_all();
+    }
+
     // The pipeline for a draw: specialised if ready, else the ubershader's
-    // while the worker compiles it.
+    // while a worker compiles it.
     VkPipeline gx_pipeline(const gx::PipelineKey& k, uint32_t shape) {
         ++draws_total;
         if (specialize != Specialize::kOff && specialize_on && !k.depth_out) {  // depth-writing draws (rare) keep the ubershader
@@ -519,64 +631,126 @@ struct Renderer::Impl {
             if (specialize == Specialize::kSync) {
                 const gx::ShapeWords w = gx::shape_words(shape);
                 ++draws_specialized;
+                if (requested.insert(key).second) remember(false, k, shape);
                 return specialized[key] = build_gx(k, &w);
             }
             if (requested.insert(key).second) {
+                remember(false, k, shape);
                 std::lock_guard lock(spec_lock);
-                spec_queue.push_back(key);
+                spec_queue.push_back({false, key});
                 spec_wake.notify_one();
             }
         }
         auto& p = pipelines[{k}];
-        if (!p) p = build_gx(k, nullptr);
+        if (!p) {
+            take_done();  // a worker may have just finished it
+            if (!p) {     // new to every run so far (or not reached yet): compile it here
+                const auto t0 = std::chrono::steady_clock::now();
+                p = build_gx(k, nullptr);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ++stalls, stall_ms += ms;
+                if (stalls <= 64)
+                    rt::log("pipelines: the ubershader's pipeline for a new blend state compiled on the drawing thread in %.0f ms", ms);
+                if (uber_requested.insert({k}).second) remember(true, k, 0);
+            }
+        }
         return p;
     }
 
-    // The worker: compiles queued shapes, newest request last.
+    // A worker: compiles queued pipelines, in order.
     void compile_specialized() {
         for (;;) {
-            SpecKey key;
+            Job job;
             {
                 std::unique_lock lock(spec_lock);
                 spec_wake.wait(lock, [&] { return spec_quit || !spec_queue.empty(); });
                 if (spec_quit) return;
-                key = spec_queue.front();
+                job = spec_queue.front();
                 spec_queue.pop_front();
             }
-            const gx::ShapeWords w = gx::shape_words(key.shape);
             const auto t0 = std::chrono::steady_clock::now();
-            const VkPipeline p = build_gx(key.k, &w);
+            VkPipeline p;
+            if (job.uber) {
+                p = build_gx(job.key.k, nullptr);
+            } else {
+                const gx::ShapeWords w = gx::shape_words(job.key.shape);
+                p = build_gx(job.key.k, &w);
+            }
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             std::lock_guard lock(spec_lock);
-            spec_done.push_back({key, p});
-            spec_ms += ms;
-            ++spec_count;
+            if (job.uber) {
+                uber_done.push_back({{job.key.k}, p});
+            } else {
+                spec_done.push_back({job.key, p});
+                spec_ms += ms;
+                ++spec_count;
+            }
         }
     }
 
-    // Main thread, each frame: take what the worker finished; now and then
-    // write the pipeline cache, so the next run starts with them compiled.
-    void collect_specialized() {
-        {
-            std::lock_guard lock(spec_lock);
-            for (auto& [k, p] : spec_done) specialized[k] = p;
-            spec_done.clear();
+    // Main thread: take what the workers finished.
+    void take_done() {
+        std::lock_guard lock(spec_lock);
+        for (auto& [k, p] : spec_done) specialized[k] = p;
+        spec_done.clear();
+        for (auto& [k, p] : uber_done) {
+            VkPipeline& mine = pipelines[k];
+            if (mine) vkDestroyPipeline(gpu.device, p, nullptr);  // the drawing thread got there first
+            else mine = p;
         }
-        // Write the cache when the worker has caught up with something new, so
-        // it survives however the game ends.
-        if (!cache_path.empty() && specialized.size() > cache_saved_at && specialized.size() == requested.size()) save_pipeline_cache();
+        uber_done.clear();
+    }
+
+    // Main thread, each frame: take what the workers finished; now and then
+    // have the cache and the new keys written, so the next run starts with
+    // them compiled.
+    void collect_specialized() {
+        take_done();
+        const size_t have = specialized.size() + pipelines.size();
+        const auto now = std::chrono::steady_clock::now();
+        if (!cache_path.empty() && (have > cache_saved_at || !keys_new.empty()) && now - last_save > std::chrono::seconds(20)) {
+            last_save = now;
+            cache_saved_at = have;
+            std::lock_guard lock(spec_lock);
+            keys_to_write.insert(keys_to_write.end(), keys_new.begin(), keys_new.end());
+            keys_new.clear();
+            save_wanted = true;
+            save_wake.notify_all();
+        }
         if (frames % 600 == 0 && draws_total)
-            rt::log("pipelines: %llu specialised (%.0f ms each to compile), %llu compiling; %.0f%% of draws specialised (last 600 frames)",
+            rt::log("pipelines: %llu specialised (%.0f ms each to compile), %llu compiling; %.0f%% of draws specialised (last 600 frames); "
+                    "%llu compiled on the drawing thread (%.0f ms in all)",
                     static_cast<unsigned long long>(specialized.size()), spec_count ? spec_ms / double(spec_count) : 0.0,
                     static_cast<unsigned long long>(requested.size() - specialized.size()),
-                    100.0 * double(draws_specialized) / double(draws_total));
+                    100.0 * double(draws_specialized) / double(draws_total), static_cast<unsigned long long>(stalls), stall_ms);
         if (frames % 600 == 0) draws_specialized = draws_total = 0;
     }
 
-    void save_pipeline_cache() {
-        cache_saved_at = specialized.size();
+    // The saver thread: the cache (vkGetPipelineCacheData needs no lock
+    // against the workers' vkCreateGraphicsPipelines) and the new keys.
+    void save_loop() {
+        for (;;) {
+            std::vector<uint8_t> keys;
+            bool quit;
+            {
+                std::unique_lock lock(spec_lock);
+                save_wake.wait(lock, [&] { return save_wanted || spec_quit; });
+                quit = spec_quit;
+                keys.swap(keys_to_write);
+                save_wanted = false;
+            }
+            save_now(keys);
+            if (quit) return;
+        }
+    }
+    void save_now(const std::vector<uint8_t>& keys) {
+        if (!keys.empty() && !keys_path.empty())
+            if (FILE* f = std::fopen(keys_path.string().c_str(), "ab")) {
+                std::fwrite(keys.data(), 1, keys.size(), f);
+                std::fclose(f);
+            }
         size_t size = 0;
-        if (vkGetPipelineCacheData(gpu.device, pipeline_cache, &size, nullptr) != VK_SUCCESS || size == 0) return;
+        if (cache_path.empty() || vkGetPipelineCacheData(gpu.device, pipeline_cache, &size, nullptr) != VK_SUCCESS || size == 0) return;
         std::vector<char> data(size);
         if (vkGetPipelineCacheData(gpu.device, pipeline_cache, &size, data.data()) != VK_SUCCESS) return;
         const auto tmp = cache_path.string() + ".tmp";
@@ -590,7 +764,7 @@ struct Renderer::Impl {
     }
 
     // The pipeline cache, from disk if there (the driver checks it's its own
-    // and ignores it otherwise), and the worker.
+    // and ignores it otherwise), the workers and the saver.
     void start_specialization() {
         if (const char* u = std::getenv("PUNCHOUT_UBERSHADER"); u && *u && *u != '0') specialize = Specialize::kOff;
         if (const char* s = std::getenv("PUNCHOUT_SPECIALIZE_SYNC"); s && *s && *s != '0') specialize = Specialize::kSync;
@@ -611,20 +785,27 @@ struct Renderer::Impl {
             ci.pInitialData = nullptr;
             check(vkCreatePipelineCache(gpu.device, &ci, nullptr, &pipeline_cache), "vkCreatePipelineCache");
         }
-        if (specialize == Specialize::kAsync) spec_worker = std::thread([this] { compile_specialized(); });
+        if (specialize == Specialize::kAsync) {
+            // Leave a core each for the game and the drawing thread; at most 4.
+            const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+            const unsigned n = std::clamp(cores > 2 ? cores - 2 : 1u, 1u, 4u);
+            for (unsigned i = 0; i < n; ++i) spec_workers.emplace_back([this] { compile_specialized(); });
+        }
+        if (specialize != Specialize::kOff) saver = std::thread([this] { save_loop(); });
     }
     void stop_specialization() {
-        if (spec_worker.joinable()) {
-            {
-                std::lock_guard lock(spec_lock);
-                spec_quit = true;
-            }
-            spec_wake.notify_all();
-            spec_worker.join();
+        {
+            std::lock_guard lock(spec_lock);
+            spec_quit = true;
+            spec_queue.clear();
+            keys_to_write.insert(keys_to_write.end(), keys_new.begin(), keys_new.end());
+            keys_new.clear();
         }
-        for (auto& [k, p] : spec_done) specialized[k] = p;
-        spec_done.clear();
-        if (!cache_path.empty() && specialized.size() > cache_saved_at) save_pipeline_cache();
+        spec_wake.notify_all();
+        for (std::thread& t : spec_workers) t.join();
+        take_done();
+        save_wake.notify_all();
+        if (saver.joinable()) saver.join();  // writes the cache and the keys a last time
         for (auto& [k, p] : specialized) vkDestroyPipeline(gpu.device, p, nullptr);
         vkDestroyPipelineCache(gpu.device, pipeline_cache, nullptr);
     }

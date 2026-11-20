@@ -116,6 +116,9 @@ inline ShapeWords shape_of(const uint32_t* bp) {
 // The registry of shapes (recorder.cpp): the id for a draw's BP registers,
 // and, from any thread, the words of an id handed out.
 uint32_t shape_id(const uint32_t* bp);
+// A shape remembered from an earlier run, given its id before the game starts
+// (the renderer's start-up only: the recorder's table isn't locked for it).
+uint32_t intern_shape(const ShapeWords& w);
 ShapeWords shape_words(uint32_t id);
 
 struct Sampler {

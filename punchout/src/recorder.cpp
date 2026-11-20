@@ -916,6 +916,14 @@ uint32_t shape_id(const uint32_t* bp) {
     }
     return it->second;
 }
+uint32_t intern_shape(const ShapeWords& w) {
+    const auto [it, added] = g_shape_ids.try_emplace(w, uint32_t(g_shape_ids.size()));
+    if (added) {
+        std::lock_guard lock(g_shapes_lock);
+        g_shapes.push_back(w);
+    }
+    return it->second;
+}
 ShapeWords shape_words(uint32_t id) {
     std::lock_guard lock(g_shapes_lock);
     if (id >= g_shapes.size()) rt::fatal(nullptr, "the renderer asked for shape %u, which the recorder never made", id);
