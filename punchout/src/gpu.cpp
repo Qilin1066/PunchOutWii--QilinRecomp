@@ -306,7 +306,7 @@ void dff_write(const DffCapture& d) {
     std::fwrite(rt::guest_ptr(0x80000000u), 1, kMem1, f);
     std::fwrite(rt::guest_ptr(0x90000000u), 1, kMem2, f);
     std::fclose(f);
-    rt::log("PUNCHOUT_DFF: wrote %s (%zu bytes of commands)", d.path.c_str(), d.bytes.size());
+    rt::log("PUNCHOUT_DFF: wrote %s (%llu bytes of commands)", d.path.c_str(), static_cast<unsigned long long>(d.bytes.size()));
 }
 
 // After each top-level command: record it while the frame is being captured;
