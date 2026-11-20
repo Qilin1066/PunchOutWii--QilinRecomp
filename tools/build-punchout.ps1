@@ -96,7 +96,8 @@ while (-not $Disc -or -not (Test-Path (Join-Path $Disc "sys\main.dol"))) {
 $Disc = $Disc.TrimEnd('\')
 $dol = Join-Path $Disc "sys\main.dol"
 
-$configure = @("-S", $root, "-B", $build, "-DQILIN_GAME_DOL=$dol")
+# Built for this PC's own processor (QILIN_NATIVE: AVX2 and FMA where it has them).
+$configure = @("-S", $root, "-B", $build, "-DQILIN_GAME_DOL=$dol", "-DQILIN_NATIVE=ON")
 if ($onWindows -and -not (Test-Path (Join-Path $build "CMakeCache.txt"))) { $configure += @("-G", "Visual Studio 17 2022", "-A", "x64") }
 if (-not $onWindows) { $configure += "-DCMAKE_BUILD_TYPE=Release" }
 Invoke-Step "Configuring" "cmake" $configure

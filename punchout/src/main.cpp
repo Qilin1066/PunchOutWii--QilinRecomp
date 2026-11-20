@@ -438,9 +438,9 @@ int main(int argc, char** argv) {
             punchout::g_pointer_on.store(std::fabs(cursor_x) <= 1.1f && std::fabs(cursor_y) <= 1.1f, std::memory_order_relaxed);
             display->rumble(settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed));
         }
-        if (!renderer) {
-            uint32_t w, h;
-            punchout::take_frame(&sequence, 10, rgba, w, h);
+        if (!renderer) {  // headless: nothing shows the frames, so they're only waited for, not converted
+            uint32_t xfb, w, h;
+            punchout::take_xfb(&sequence, 10, xfb, w, h);
             continue;
         }
         // PUNCHOUT_SPECIALIZE_FROM=<seconds of game time>: the ubershader until

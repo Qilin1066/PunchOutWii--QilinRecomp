@@ -30,6 +30,12 @@ $stamp = Join-Path $work "built-with.txt"
 $discFile = Join-Path $work "disc-folder.txt"
 $kitVersion = (Get-Content (Join-Path $kit "VERSION") -Raw).Trim()
 $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or $IsWindows   # Windows PowerShell 5.1 has no $IsWindows
+# The game is compiled for this PC's own processor (-march=native: FMA for the
+# Wii's fused multiply-adds, which are then one instruction instead of a call
+# into the C library, and whatever else it has). So a build is for one CPU:
+# it's built again if the folder moves to a PC with a different one.
+$cpu = if ($onWindows) { "$env:PROCESSOR_IDENTIFIER" } else { "cross" }
+$builtFor = "$kitVersion | $cpu"
 # Off Windows (testing the download under Wine), QILIN_KIT_RUNNER runs the kit's programs.
 $runner = $env:QILIN_KIT_RUNNER
 
@@ -93,13 +99,14 @@ Set-Content -Path $discFile -Value $disc -Encoding UTF8
 
 # Up to date: just play.
 $built = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { "" }
-if (-not $Rebuild -and (Test-Path $game) -and $built -eq $kitVersion) {
+if (-not $Rebuild -and (Test-Path $game) -and $built -eq $builtFor) {
     if (-not $BuildOnly) { Start-Process -FilePath $game -ArgumentList "`"$disc`"" -WorkingDirectory $top }
     exit 0
 }
 
 Write-Host "Punch-Out!! QilinRecomp $kitVersion" -ForegroundColor Cyan
-if (Test-Path $game) { Write-Host "Updating the game for this version: a few minutes." }
+if ((Test-Path $game) -and $built -and -not $built.StartsWith("$kitVersion |")) { Write-Host "Updating the game for this version: a few minutes." }
+elseif (Test-Path $game) { Write-Host "Building the game for this PC's processor: a few minutes." }
 else { Write-Host "Building the game from your disc. This happens once (and after an update): a few minutes (up to 15 on a slower PC)." }
 Write-Host "Disc: $disc"
 Write-Host ""
@@ -120,8 +127,9 @@ $lines = @(
     "kit = ../kit",
     "include ../kit/kit.ninja",
     "cxx = ..\kit\toolchain\bin\x86_64-w64-mingw32-clang++.exe",
+    "native = -march=native",
     "rule cxx",
-    "  command = `$cxx `$cxxflags -Igen -MD -MF `$out.d -c `$in -o `$out",
+    "  command = `$cxx `$cxxflags `$native -Igen -MD -MF `$out.d -c `$in -o `$out",
     "  depfile = `$out.d",
     "  deps = gcc",
     "  description = Compiling `$in",
@@ -129,7 +137,7 @@ $lines = @(
     "  command = `$cxx `$ldflags -o `$out `$in `$libs",
     "  description = Linking `$out"
 )
-if (-not $onWindows) { $lines[3] = "cxx = " + $env:QILIN_KIT_CXX }   # testing off Windows: a cross compiler
+if (-not $onWindows) { $lines[3] = "cxx = " + $env:QILIN_KIT_CXX; $lines[4] = "native =" }   # testing off Windows: a cross compiler, for any CPU
 $objects = @()
 foreach ($s in $sources) {
     $object = "obj/$($s.BaseName).o"
@@ -147,7 +155,7 @@ if ($onWindows) { $code = Invoke-Kit $ninja @("-C", $work, "-j", "$jobs") }
 else { & $ninja -C $work -j $jobs | Out-Host; $code = $LASTEXITCODE }
 if ($code -ne 0) { throw "compiling failed" }
 Copy-Item (Join-Path $work "Punch-Out.exe") $game -Force
-Set-Content -Path $stamp -Value $kitVersion -Encoding ASCII
+Set-Content -Path $stamp -Value $builtFor -Encoding ASCII
 Write-Host ""
 Write-Host "Built: $game" -ForegroundColor Green
 if (-not $BuildOnly) {

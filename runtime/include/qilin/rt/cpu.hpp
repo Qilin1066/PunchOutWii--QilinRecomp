@@ -13,6 +13,20 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#if defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__)
+#include <immintrin.h>  // fused(): MSVC's std::fma is a call even with /arch:AVX2
+#endif
+
+// The lifted code's hottest helpers are forced inline: in a large lifted
+// function the compiler's own limits otherwise leave a call (and its register
+// spills) behind every load and store. Their rare paths stay out of line.
+#if defined(_MSC_VER) && !defined(__clang__)
+#define QILIN_INLINE __forceinline
+#define QILIN_OUTLINE __declspec(noinline) inline
+#else
+#define QILIN_INLINE [[gnu::always_inline]] inline
+#define QILIN_OUTLINE [[gnu::noinline]] inline
+#endif
 
 namespace qilin::rt {
 
@@ -83,65 +97,68 @@ inline uint32_t plain_memory(uint32_t a, unsigned size) {
     return 0;
 }
 
-inline uint32_t read8(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]] {
-        const uint32_t m = plain_memory(a, 1);
-        if (!m) return c.hooks->read(c, a, 1);
-        a = m;
+// The slow branch of a load or store at kSlowFrom and above: the plain memory
+// there (uncached mirrors, the locked cache), the write-gather pipe, or the hooks.
+QILIN_OUTLINE uint32_t read_slow(Cpu& c, uint32_t a, unsigned size) {
+    const uint32_t m = plain_memory(a, size);
+    if (!m) return c.hooks->read(c, a, size);
+    if (size == 1) return c.mem[m];
+    if (size == 2) {
+        uint16_t v;
+        std::memcpy(&v, c.mem + m, 2);
+        return std::byteswap(v);
     }
+    uint32_t v;
+    std::memcpy(&v, c.mem + m, 4);
+    return std::byteswap(v);
+}
+QILIN_OUTLINE void write_slow(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
+    if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v, size);
+    const uint32_t m = plain_memory(a, size);
+    if (!m) return c.hooks->write(c, a, v, size);
+    if (size == 1) {
+        c.mem[m] = static_cast<uint8_t>(v);
+    } else if (size == 2) {
+        const uint16_t s = std::byteswap(static_cast<uint16_t>(v));
+        std::memcpy(c.mem + m, &s, 2);
+    } else {
+        const uint32_t s = std::byteswap(v);
+        std::memcpy(c.mem + m, &s, 4);
+    }
+}
+
+QILIN_INLINE uint32_t read8(Cpu& c, uint32_t a) {
+    if (a >= kSlowFrom) [[unlikely]] return read_slow(c, a, 1);
     return c.mem[a];
 }
-inline uint32_t read16(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]] {
-        const uint32_t m = plain_memory(a, 2);
-        if (!m) return c.hooks->read(c, a, 2);
-        a = m;
-    }
+QILIN_INLINE uint32_t read16(Cpu& c, uint32_t a) {
+    if (a >= kSlowFrom) [[unlikely]] return read_slow(c, a, 2);
     uint16_t v;
     std::memcpy(&v, c.mem + a, 2);
     return std::byteswap(v);
 }
-inline uint32_t read32(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]] {
-        const uint32_t m = plain_memory(a, 4);
-        if (!m) return c.hooks->read(c, a, 4);
-        a = m;
-    }
+QILIN_INLINE uint32_t read32(Cpu& c, uint32_t a) {
+    if (a >= kSlowFrom) [[unlikely]] return read_slow(c, a, 4);
     uint32_t v;
     std::memcpy(&v, c.mem + a, 4);
     return std::byteswap(v);
 }
-inline uint64_t read64(Cpu& c, uint32_t a) { return uint64_t{read32(c, a)} << 32 | read32(c, a + 4); }
-inline void write8(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]] {
-        if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v & 0xFF, 1);
-        const uint32_t m = plain_memory(a, 1);
-        if (!m) return c.hooks->write(c, a, v & 0xFF, 1);
-        a = m;
-    }
+QILIN_INLINE uint64_t read64(Cpu& c, uint32_t a) { return uint64_t{read32(c, a)} << 32 | read32(c, a + 4); }
+QILIN_INLINE void write8(Cpu& c, uint32_t a, uint32_t v) {
+    if (a >= kSlowFrom) [[unlikely]] return write_slow(c, a, v & 0xFF, 1);
     c.mem[a] = static_cast<uint8_t>(v);
 }
-inline void write16(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]] {
-        if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v & 0xFFFF, 2);
-        const uint32_t m = plain_memory(a, 2);
-        if (!m) return c.hooks->write(c, a, v & 0xFFFF, 2);
-        a = m;
-    }
+QILIN_INLINE void write16(Cpu& c, uint32_t a, uint32_t v) {
+    if (a >= kSlowFrom) [[unlikely]] return write_slow(c, a, v & 0xFFFF, 2);
     const uint16_t s = std::byteswap(static_cast<uint16_t>(v));
     std::memcpy(c.mem + a, &s, 2);
 }
-inline void write32(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]] {
-        if (is_pipe(a) && g_pipe_write) return g_pipe_write(c, v, 4);
-        const uint32_t m = plain_memory(a, 4);
-        if (!m) return c.hooks->write(c, a, v, 4);
-        a = m;
-    }
+QILIN_INLINE void write32(Cpu& c, uint32_t a, uint32_t v) {
+    if (a >= kSlowFrom) [[unlikely]] return write_slow(c, a, v, 4);
     const uint32_t s = std::byteswap(v);
     std::memcpy(c.mem + a, &s, 4);
 }
-inline void write64(Cpu& c, uint32_t a, uint64_t v) {
+QILIN_INLINE void write64(Cpu& c, uint32_t a, uint64_t v) {
     write32(c, a, static_cast<uint32_t>(v >> 32));
     write32(c, a + 4, static_cast<uint32_t>(v));
 }
@@ -241,6 +258,16 @@ inline double round25(double d) {
     return from_bits((i & keep) + (i & round));
 }
 
+// a * b + c with one rounding: the FMA instruction where the build has it
+// (GCC and Clang inline std::fma then; MSVC needs the intrinsic).
+QILIN_INLINE double fused(double a, double b, double c) {
+#if defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__)
+    return _mm_cvtsd_f64(_mm_fmadd_sd(_mm_set_sd(a), _mm_set_sd(b), _mm_set_sd(c)));
+#else
+    return std::fma(a, b, c);
+#endif
+}
+
 inline double add(double a, double b) {
     const double r = a + b;
     return is_nan(r) ? nan2(a, b) : r;
@@ -260,7 +287,7 @@ inline double div(double a, double b) {
 // a * c + b (or - b) with one rounding; NaNs looked at in the order a, b, c,
 // with b as it was before any negation.
 inline double madd(double a, double c, double b, bool subtract) {
-    const double r = std::fma(a, c, subtract ? -b : b);
+    const double r = fused(a, c, subtract ? -b : b);
     return is_nan(r) ? nan3(a, b, c) : r;
 }
 // The single-precision form: frC rounded to 25 bits, a double fma, and where
@@ -269,12 +296,12 @@ inline double madd(double a, double c, double b, bool subtract) {
 // the result is rounded to single only once, as Broadway does.
 inline double madd_single(double a, double c, double b, bool subtract) {
     const double cr = round25(c), bs = subtract ? -b : b;
-    double r = std::fma(a, cr, bs);
+    double r = fused(a, cr, bs);
     const uint64_t rb = bits(r);
     if ((rb & 0x1FFFFFFFull) == 0x10000000ull) {
         const double a1 = bs - r;   // -(a*cr) plus the fma's rounding error, rounded
         const double b1 = r + a1;
-        double err = std::fma(a, cr, a1) + (bs - b1);
+        double err = fused(a, cr, a1) + (bs - b1);
         // A product below the smallest subnormal leaves r == bs with an error the
         // transformation can't see (it underflows to zero): the error is then the
         // product itself, and its sign is the product's.
@@ -318,7 +345,7 @@ inline uint32_t compare(double a, double b) {
     } while (!(frac & 0x800000));
     return from_bits(((v & 0x80000000u) << 32) | (exp << 52) | ((frac & 0x7FFFFF) << 29));
 }
-inline double load_single(uint32_t x) {
+QILIN_INLINE double load_single(uint32_t x) {
     const uint64_t v = x, e = (v >> 23) & 0xFF;
     if (e == 0 && (v & 0x7FFFFF) != 0) [[unlikely]]
         return load_single_denormal(x);
@@ -451,7 +478,8 @@ inline uint32_t quantize(unsigned type, unsigned scale, double value) {
 }  // namespace fp
 
 // psq_l / psq_st over guest memory, with GQR i. w: one element (ps1 = 1.0 on load).
-inline void psq_load(Cpu& c, uint32_t ea, unsigned i, bool w, double& ps0, double& ps1) {
+// The quantised types, and invalid GQRs (out of line: the float type is the common one).
+QILIN_OUTLINE void psq_load_quantized(Cpu& c, uint32_t ea, unsigned i, bool w, double& ps0, double& ps1) {
     const uint32_t g = c.gqr[i];
     const unsigned type = (g >> 16) & 7, scale = (g >> 24) & 63;
     if (!fp::quant_valid(type)) c.hooks->trap(c, ea, "psq_l with an invalid GQR load type");
@@ -462,7 +490,7 @@ inline void psq_load(Cpu& c, uint32_t ea, unsigned i, bool w, double& ps0, doubl
     ps0 = v0;
     ps1 = v1;
 }
-inline void psq_store(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0, double ps1) {
+QILIN_OUTLINE void psq_store_quantized(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0, double ps1) {
     const uint32_t g = c.gqr[i];
     const unsigned type = g & 7, scale = (g >> 8) & 63;
     if (!fp::quant_valid(type)) c.hooks->trap(c, ea, "psq_st with an invalid GQR store type");
@@ -470,6 +498,24 @@ inline void psq_store(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0, doubl
     auto write = [&](uint32_t a, uint32_t v) { n == 1 ? write8(c, a, v) : n == 2 ? write16(c, a, v) : write32(c, a, v); };
     write(ea, fp::quantize(type, scale, ps0));
     if (!w) write(ea + n, fp::quantize(type, scale, ps1));
+}
+QILIN_INLINE void psq_load(Cpu& c, uint32_t ea, unsigned i, bool w, double& ps0, double& ps1) {
+    if (((c.gqr[i] >> 16) & 7) == 0) [[likely]] {  // floats: lfs's conversion, two at a time
+        const double v0 = fp::load_single(read32(c, ea));
+        const double v1 = w ? 1.0 : fp::load_single(read32(c, ea + 4));
+        ps0 = v0;
+        ps1 = v1;
+        return;
+    }
+    psq_load_quantized(c, ea, i, w, ps0, ps1);
+}
+QILIN_INLINE void psq_store(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0, double ps1) {
+    if ((c.gqr[i] & 7) == 0) [[likely]] {
+        write32(c, ea, fp::store_single_ftz(ps0));
+        if (!w) write32(c, ea + 4, fp::store_single_ftz(ps1));
+        return;
+    }
+    psq_store_quantized(c, ea, i, w, ps0, ps1);
 }
 
 }  // namespace qilin::rt

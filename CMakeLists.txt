@@ -53,6 +53,16 @@ if(QILIN_NATIVE AND NOT MSVC)
     else()
         add_compile_options(-march=native)
     endif()
+elseif(QILIN_NATIVE AND MSVC)
+    # MSVC has no "native": /arch:AVX2 (with FMA, for the Wii's fused
+    # multiply-adds) when this machine runs it.
+    try_run(qilin_avx2_runs qilin_avx2_compiles ${CMAKE_BINARY_DIR}/cpu_avx2 ${CMAKE_SOURCE_DIR}/cmake/cpu_avx2.cpp)
+    if(qilin_avx2_compiles AND qilin_avx2_runs EQUAL 0)
+        add_compile_options(/arch:AVX2)
+        message(STATUS "QILIN_NATIVE: /arch:AVX2")
+    else()
+        message(STATUS "QILIN_NATIVE: this CPU has no AVX2 and FMA; the baseline instructions")
+    endif()
 endif()
 
 # ---- Warnings for our own targets ----
@@ -366,7 +376,7 @@ if(QILIN_PLAYER_KIT)
     # Lifted calls nest as deeply as the guest's: a 16 MB main stack, as MSVC's /STACK.
     file(WRITE "${CMAKE_BINARY_DIR}/kit.ninja"
         "# Written by CMake for the player kit (QILIN_PLAYER_KIT).\n"
-        "cxxflags = -O2 -DNDEBUG -std=c++23 -w -I$kit/include\n"
+        "cxxflags = -O2 -DNDEBUG -std=c++23 -w -ffp-contract=off -I$kit/include\n"
         "ldflags = -static -O2 -Wl,--stack,16777216\n"
         "libs = $kit/lib/libpunchout_kit.a ${kit_system_text}\n")
     # Linked with stand-ins for the lifted code: the kit is complete.

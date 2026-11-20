@@ -199,11 +199,24 @@ Cpu new_cpu() {
 
 uint8_t* guest_base() { return g->memory.base(); }
 
+// Indirect calls (virtual functions, callbacks) go through a direct-mapped
+// cache of recent targets in front of the binary search over every function:
+// one compare for a target called before. An entry is one 64-bit word (the
+// address, and the function's index in the table), read and written whole, so
+// it's never seen half-updated whichever thread calls.
+namespace {
+std::atomic<uint64_t> g_call_cache[4096];  // address << 32 | (index + 1); 0: empty
+}  // namespace
+
 void call(Cpu& c, uint32_t address) {
     const auto& f = g->program.functions;
-    const auto it = std::lower_bound(f.begin(), f.end(), address, [](const FunctionEntry& e, uint32_t a) { return e.address < a; });
+    std::atomic<uint64_t>& slot = g_call_cache[(address >> 2) & 4095];
+    const uint64_t e = slot.load(std::memory_order_relaxed);
+    if (uint32_t(e >> 32) == address && uint32_t(e) != 0) [[likely]] return f[uint32_t(e) - 1].fn(c);
+    const auto it = std::lower_bound(f.begin(), f.end(), address, [](const FunctionEntry& x, uint32_t a) { return x.address < a; });
     if (it == f.end() || it->address != address) [[unlikely]]
         fatal(&c, "call to %08X, which isn't the start of a function (from %08X)", address, c.lr);
+    slot.store(uint64_t{address} << 32 | uint32_t(it - f.begin() + 1), std::memory_order_relaxed);
     it->fn(c);
 }
 
