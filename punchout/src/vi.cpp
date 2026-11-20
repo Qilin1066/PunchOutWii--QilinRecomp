@@ -4,6 +4,7 @@
 //
 // The rate is 60 Hz: the console's settings report EuRGB60 (sc.cpp), which
 // this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
+#include <algorithm>
 #include <atomic>
 
 #include "boot.hpp"
@@ -20,7 +21,9 @@ using rt::Cpu;
 
 namespace {
 
-constexpr uint64_t kRetraceTicks = kTimerHz / 60;  // 60 Hz (59.94 on hardware: close enough until pacing is tuned)
+constexpr uint64_t kRetraceTicks = kTimerHz / 60;  // 60 Hz until the main thread matches it to the display
+// The retrace period in time-base ticks: set by the main thread, read by the game's.
+std::atomic<uint64_t> g_period{kRetraceTicks};
 constexpr uint32_t kVI_EURGB60 = 5;
 constexpr uint32_t kRetraceQueue = 0x00000100u;  // threads in VIWaitForRetrace (a key of our own)
 
@@ -32,6 +35,14 @@ uint32_t g_frames = 0;  // frame buffers handed over
 std::atomic<uint32_t> g_frames_seen{0};  // the same, for other threads
 bool g_black = true;
 uint32_t g_mode = 0;           // the GXRenderModeObj last configured
+
+// How on time the retraces are (the host's timers and the guest's load decide):
+// for the five-second report, and the frame-time overlay.
+struct Lateness {
+    uint64_t retraces = 0, late_1ms = 0, late_4ms = 0, resyncs = 0;
+    uint64_t worst_us = 0, total_us = 0;
+};
+Lateness g_late;
 
 // Every five seconds: what the GPU's front end has seen.
 void report() {
@@ -52,6 +63,13 @@ void report() {
             static_cast<unsigned long long>(a.voices - a_last.voices), static_cast<unsigned long long>(a.mails_in - a_last.mails_in),
             static_cast<unsigned long long>(a.mails_out - a_last.mails_out));
     a_last = a;
+    if (g_late.retraces) {
+        rt::log("  retraces on time: average %.2f ms late, worst %.2f ms; %llu over 1 ms late, %llu over 4 ms; %llu a frame behind (restarted)",
+                double(g_late.total_us) / 1000.0 / double(g_late.retraces), double(g_late.worst_us) / 1000.0,
+                static_cast<unsigned long long>(g_late.late_1ms), static_cast<unsigned long long>(g_late.late_4ms),
+                static_cast<unsigned long long>(g_late.resyncs));
+        g_late = {};
+    }
     // Drawing: per frame, the guest thread's recording and the main thread's drawing.
     struct Drawing {
         uint64_t frames, record, wait, lookups, hash, decoded, bytes, decode, rendered, render, gpu, made;
@@ -76,12 +94,28 @@ void report() {
     d_last = now;
 }
 
-// Post a retrace for each one the host clock has passed.
+// Post the retrace once the host clock reaches it. One at a time: after a
+// stall of more than a frame the schedule starts again from now instead of
+// posting the missed ones back to back, which would run several game frames
+// at once and then stall (one hitch becoming a stagger). The game then runs
+// a little behind the wall clock; its frames stay evenly spaced.
 void poll_retrace() {
     if (g_next_retrace == 0) return;  // before VIInit
     const uint64_t now = time_base();
-    while (now >= g_next_retrace) {
-        g_next_retrace += kRetraceTicks;
+    const uint64_t period = g_period.load(std::memory_order_relaxed);
+    if (now >= g_next_retrace) {
+        const uint64_t late = now - g_next_retrace;
+        const uint64_t late_us = late * 1000000 / kTimerHz;
+        ++g_late.retraces, g_late.total_us += late_us;
+        g_late.worst_us = std::max(g_late.worst_us, late_us);
+        if (late_us >= 1000) ++g_late.late_1ms;
+        if (late_us >= 4000) ++g_late.late_4ms;
+        if (late >= period) {  // a whole frame behind: start again from now
+            ++g_late.resyncs;
+            g_next_retrace = now + period;
+        } else {
+            g_next_retrace += period;
+        }
         post_interrupt([](Cpu& c) {
             park_if_requested();  // the settings menu's pause: here, between frames
             ++g_retraces;
@@ -99,7 +133,7 @@ void poll_retrace() {
 
 void VIInit(Cpu&) {
     if (g_next_retrace) return;
-    g_next_retrace = time_base() + kRetraceTicks;
+    g_next_retrace = time_base() + g_period.load(std::memory_order_relaxed);
     add_timer_source(poll_retrace, [] { return g_next_retrace; });
 }
 
@@ -159,5 +193,10 @@ const rt::Provided kReplacements[] = {
 std::span<const rt::Provided> vi_replacements() { return kReplacements; }
 
 uint32_t frame_count() { return g_frames_seen.load(std::memory_order_relaxed); }
+
+void set_retrace_rate(uint32_t num, uint32_t den) {
+    if (num == 0 || den == 0) num = 60, den = 1;
+    g_period.store((kTimerHz * den + num / 2) / num, std::memory_order_relaxed);
+}
 
 }  // namespace punchout

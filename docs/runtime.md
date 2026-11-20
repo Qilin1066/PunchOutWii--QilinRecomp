@@ -240,6 +240,14 @@ The main thread turns the pad, the keys and the mouse into the remote's buttons 
 - **Input while open:** the display's event hook gives every SDL event to the menu first; while it's up the game gets none (and no buttons). F11 and Alt+Enter are the display's, open or not.
 - **Binding by pressing:** *Add* takes the next key (by its SDL scancode name, as `key_code` reads it), or the next pad button or click not already held when it began (read from the display's buttons). Meanwhile ImGui's mouse and gamepad navigation are off, until the press is let go.
 
+## Frame pacing (`vi.cpp`, `os.cpp`, `priority.cpp`, `host/src/display.cpp`)
+
+- **Retraces** come from the host clock, one at a time (`poll_retrace`). The period is 60 Hz until the main loop matches it to the display (`set_retrace_rate`, checked every second): the display's refresh, or a whole fraction of it, when that is within 0.3 Hz of 60; otherwise, and without vsync, a free 60 Hz. More than a frame late, the schedule restarts from now rather than posting the missed retraces in a burst.
+- **Idle waits** (`idle_sleep`) to a timer's deadline sleep on the condition variable until 1.5 ms (Windows, with `timeBeginPeriod(1)`) or 0.25 ms (elsewhere) before it, then yield until it; a wake (`wake_idle`) ends either part. A wait that is only an upper bound (the millisecond cap in `poll_loop`) just sleeps.
+- **Priorities** (`priority.cpp`): game threads, the GPU command thread and the main loop high; shader compilers and the cache saver background.
+- **Presenting**: with vsync and `VK_KHR_present_wait`, a frame waits for the previous one to reach the screen before acquiring an image (bounded at 50 ms), keeping one frame queued at most. `QILIN_NO_PRESENT_WAIT=1` disables it.
+- **Measuring**: `Display::frame_times()` keeps the intervals between new frames presented (`host/include/qilin/host/frame_times.hpp`, 1200 frames); F3 or `performance_overlay` shows them, and the log has them and the retraces' lateness every 5 s.
+
 ## Hardware registers (`hw.cpp`, v0.12.0)
 
 Each device maps its own ranges of `0xCC000000`-`0xCD00FFFF` (the GPU's CP, PE, PI and write-gather pipe; the DSP; the audio interface). An access outside every range is fatal and names the address.

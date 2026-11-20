@@ -36,6 +36,7 @@
 #include "input.hpp"
 #include "menu.hpp"
 #include "os.hpp"
+#include "priority.hpp"
 #include "profile.hpp"
 #include "settings.hpp"
 #include "qilin/host/paths.hpp"
@@ -43,8 +44,19 @@
 #include "qilin/host/audio.hpp"
 #include "qilin/host/display.hpp"
 #include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_video.h>
 #include "threads.hpp"
 #include "video.hpp"
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <timeapi.h>
+#endif
 
 // The lifted code's tables (qilin lift's table.cpp and replaced.cpp), declared
 // here rather than through its functions.hpp, so this file builds without the
@@ -84,10 +96,52 @@ std::vector<Press> scripted_input(const char* text) {
 }
 }  // namespace
 
+namespace {
+// The retrace rate for the display the window is on (video.hpp's
+// set_retrace_rate): its refresh, or a whole fraction of it, when that is
+// within 0.3 Hz of 60; otherwise, and without vsync, a free 60 Hz (a VRR
+// display follows that on its own). Logged when it changes.
+void match_retrace_to_display(qilin::host::Display& display) {
+    namespace rt = qilin::rt;
+    static uint64_t chosen = 0;  // num << 32 | den
+    uint32_t num = 60, den = 1;
+    double display_hz = 0;
+    if (display.picture().vsync) {
+        auto* window = static_cast<SDL_Window*>(display.sdl_window());
+        const SDL_DisplayMode* m = window ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)) : nullptr;
+        if (m) {
+            uint32_t n = static_cast<uint32_t>(m->refresh_rate_numerator), d = static_cast<uint32_t>(m->refresh_rate_denominator);
+            if (n == 0 || d == 0) n = static_cast<uint32_t>(std::lround(m->refresh_rate * 1000.0)), d = 1000;
+            display_hz = d ? double(n) / double(d) : 0;
+            for (uint32_t k = 1; k <= 4 && n && d; ++k)
+                if (std::fabs(display_hz / k - 60.0) <= 0.3) {
+                    num = n, den = d * k;
+                    break;
+                }
+        }
+    }
+    const uint64_t key = uint64_t(num) << 32 | den;
+    if (key == chosen) return;
+    chosen = key;
+    punchout::set_retrace_rate(num, den);
+    if (num == 60 && den == 1)
+        rt::log("retraces at 60 Hz%s", display_hz > 0 ? " (the display's refresh isn't near a multiple of 60 Hz)" : "");
+    else
+        rt::log("retraces at %.3f Hz, matching the display's %.3f Hz refresh", double(num) / double(den), display_hz);
+}
+}  // namespace
+
 int main(int argc, char** argv) {
     namespace rt = qilin::rt;
     punchout::set_command_line(argc, argv);  // for the game's reset
     punchout::start_profiler();              // PUNCHOUT_PROFILE, for development
+#if defined(_WIN32)
+    // Windows' timers tick every 15.6 ms unless a program asks for finer: then a
+    // sleep to a retrace could end a whole frame late. Ended with the process.
+    timeBeginPeriod(1);
+#endif
+    // The main loop presents frames: ahead of shader compiles and cache saves.
+    punchout::set_this_thread_priority(punchout::Priority::high);
     bool headless = false, offscreen = false;
     const char* folder = nullptr;
     for (int i = 1; i < argc; ++i) {
@@ -290,6 +344,25 @@ int main(int argc, char** argv) {
                 punchout::gx::recycle_frame(std::move(f));
             }
             else break;
+        // Every second: the retrace rate follows the display (it may have moved, or changed mode).
+        if (display) {
+            static auto next_match = std::chrono::steady_clock::time_point{};
+            if (const auto t = std::chrono::steady_clock::now(); t >= next_match) {
+                next_match = t + std::chrono::seconds(1);
+                match_retrace_to_display(*display);
+            }
+        }
+        // Every 5 s: how evenly new pictures reached the screen (last 20 s).
+        if (display) {
+            static auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            if (const auto t = std::chrono::steady_clock::now(); t >= next_report) {
+                next_report = t + std::chrono::seconds(5);
+                const auto ft = display->frame_times().summary();
+                if (ft.frames)
+                    rt::log("  frame times (last %.0f s): %.1f fps (%.2f ms), 1%% low %.1f fps, 0.1%% low %.1f fps, worst %.1f ms",
+                            ft.average_ms * double(ft.frames) / 1000.0, ft.fps, ft.average_ms, ft.low1_fps, ft.low01_fps, ft.worst_ms);
+            }
+        }
         uint32_t xfb, w, h;
         if (!punchout::take_xfb(&sequence, 0, xfb, w, h)) continue;
         if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {

@@ -39,6 +39,7 @@
 #include "boot.hpp"
 #include "os.hpp"
 #include "threads.hpp"
+#include "priority.hpp"
 
 namespace punchout {
 namespace rt = qilin::rt;
@@ -637,6 +638,7 @@ void run_on_host_thread(void (*fn)(void*), void* arg) {
 #if defined(_WIN32)
     HANDLE h = CreateThread(nullptr, kHostStack, [](LPVOID p) -> DWORD {
         std::unique_ptr<Start> st(static_cast<Start*>(p));
+        set_this_thread_priority(Priority::high);  // the game's threads pace its frames
         st->fn(st->arg);
         return 0;
     }, s, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
@@ -650,6 +652,7 @@ void run_on_host_thread(void (*fn)(void*), void* arg) {
     pthread_t id;
     if (pthread_create(&id, &a, [](void* p) -> void* {
             std::unique_ptr<Start> st(static_cast<Start*>(p));
+            set_this_thread_priority(Priority::high);  // the game's threads pace its frames
             st->fn(st->arg);
             return nullptr;
         }, s) != 0)

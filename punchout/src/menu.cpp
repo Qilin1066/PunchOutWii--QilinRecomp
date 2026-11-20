@@ -141,6 +141,12 @@ bool Menu::handle(const void* event) {
                 toggle();
                 return true;
             }
+            if (!e.key.repeat && e.key.key == SDLK_F3) {  // the frame-time readout, kept in the settings
+                s_.performance_overlay = !s_.performance_overlay;
+                if (!save_settings(folder_, s_))
+                    qilin::rt::log("the settings can't be saved to %s", settings_file(folder_).string().c_str());
+                return true;
+            }
             break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
             if (capture_ >= 0) break;
@@ -258,20 +264,41 @@ void Menu::tick() {
         }
         return;
     }
-    if (hint_) {
-        if (SDL_GetTicks() >= hint_until_) {
-            hint_ = drawn_ = false;
-            return;
-        }
+    if (hint_ && SDL_GetTicks() >= hint_until_) hint_ = false;
+    if (hint_ || s_.performance_overlay) {
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
-        draw_hint();
+        if (hint_) draw_hint();
+        if (s_.performance_overlay) draw_frame_times();
         ImGui::Render();
         drawn_ = true;
         return;
     }
     drawn_ = false;
+}
+
+// F3: how evenly frames reach the screen, top left. The lows are the frame
+// rates of the slowest 1% and 0.1% of frames over the last 20 s.
+void Menu::draw_frame_times() {
+    const host::FrameTimes& t = display_.frame_times();
+    const host::FrameTimes::Summary s = t.summary();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + 8.0f, vp->WorkPos.y + 8.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::Begin("##frame times", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    if (s.frames == 0) {
+        ImGui::TextUnformatted("frame times: waiting for frames");
+    } else {
+        ImGui::Text("%.1f fps  %.2f ms", s.fps, s.average_ms);
+        ImGui::Text("1%% low %.1f  0.1%% low %.1f", s.low1_fps, s.low01_fps);
+        ImGui::Text("worst %.1f ms", s.worst_ms);
+        const std::vector<float> recent = t.recent(240);
+        ImGui::PlotLines("##ft", recent.data(), int(recent.size()), 0, nullptr, 0.0f, 50.0f, ImVec2(240.0f, 48.0f));
+    }
+    ImGui::End();
 }
 
 void Menu::draw_hint() {
@@ -436,6 +463,7 @@ void Menu::display_page() {
         ImGui::SameLine();
     }
     ImGui::Checkbox("Vsync", &s_.vsync);
+    ImGui::Checkbox("Frame times (F3)", &s_.performance_overlay);
     if (ImGui::Button("Look at the picture")) peek_ = true;
     ImGui::SameLine();
     ImGui::TextDisabled("(any key or button comes back)");

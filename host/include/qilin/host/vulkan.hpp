@@ -34,6 +34,9 @@ struct Gpu {
     // widths and its point sizes.
     bool logic_op = false, wide_lines = false, large_points = false;
     float max_line_width = 1.0f, max_point_size = 1.0f;
+    // VK_KHR_present_id + VK_KHR_present_wait: the display can wait until a
+    // frame is on screen, to keep at most one queued behind it (latency).
+    bool present_wait = false;
     // Anisotropic texture filtering: the most the device allows, or 1 without it.
     float max_anisotropy = 1.0f;
     // Every device here that could draw (the settings menu offers them).

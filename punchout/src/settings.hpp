@@ -58,6 +58,7 @@ struct Settings {
     unsigned anisotropy = 1;          // texture filtering: 1 (the console's), 2, 4, 8 or 16
     bool vsync = true;                // at the display's refresh (no tearing); off: the lowest latency
     std::string gpu;                  // the graphics device's name (empty: the best one)
+    bool performance_overlay = false; // frame rate, 1% and 0.1% lows and frame times in a corner (F3 switches it)
     // [controls]
     bool rumble = true;  // the Wii Remote's rumble on the controller
     std::vector<Binding> controls[kControlCount];

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "qilin/host/pad.hpp"
+#include "qilin/host/frame_times.hpp"
 #include "qilin/host/picture.hpp"
 #include "qilin/host/vulkan.hpp"
 
@@ -61,8 +62,12 @@ public:
     // layout, with sampled usage and a colour view, its work submitted to the
     // same queue before this call), the same way. It's left as it was given.
     void present_image(VkImage image, VkImageView view, uint32_t width, uint32_t height, float aspect, uint32_t lines);
-    // Show the last picture again (for a menu over a paused game).
+    // Show the last picture again (for a menu over a paused game). Not
+    // counted in frame_times().
     void present_again();
+    // The intervals between new pictures presented (present and
+    // present_image), over the last 20 s (frame_times.hpp).
+    const FrameTimes& frame_times() const;
     Gpu& gpu();
     // Headless: the last frame presented, as RGBA8 at the target's size.
     std::vector<uint8_t> read_back();

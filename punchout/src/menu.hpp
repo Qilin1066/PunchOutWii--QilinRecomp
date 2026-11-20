@@ -53,6 +53,7 @@ private:
     void display_page();
     void game_page();
     void draw_hint();
+    void draw_frame_times();
     void bind(const Binding& b);
 
     qilin::host::Display& display_;

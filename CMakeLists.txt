@@ -169,7 +169,7 @@ if(QILIN_HOST)
     # The game's renderer end to end, without the game: GX register writes through
     # the recorder and renderer, the frame read back (skipped without Vulkan 1.3).
     add_executable(punchout_render_test punchout/tests/render_test.cpp punchout/src/recorder.cpp punchout/src/texture.cpp
-                   punchout/src/renderer.cpp)
+                   punchout/src/renderer.cpp punchout/src/priority.cpp)
     target_include_directories(punchout_render_test PRIVATE punchout/src)
     target_link_libraries(punchout_render_test PRIVATE qilin_host qilin_rt qilin_warnings)
     qilin_tool(punchout_render_test)
@@ -194,10 +194,15 @@ add_executable(qilin_tests recomp/tests/tests.cpp)
 target_link_libraries(qilin_tests PRIVATE qilin_core qilin_rt qilin_warnings)
 qilin_tool(qilin_tests)
 add_test(NAME qilin_tests COMMAND qilin_tests)
+add_executable(qilin_frame_times_test host/tests/frame_times_test.cpp)
+target_include_directories(qilin_frame_times_test PRIVATE host/include)
+target_link_libraries(qilin_frame_times_test PRIVATE qilin_warnings)
+qilin_tool(qilin_frame_times_test)
+add_test(NAME qilin_frame_times_test COMMAND qilin_frame_times_test)
 
 # The thread model (the game's scheduler and interrupt layer) with guest
 # functions written in C++: no game files needed.
-add_executable(punchout_threads_test punchout/tests/threads_test.cpp punchout/src/threads.cpp punchout/src/os.cpp punchout/src/restart.cpp)
+add_executable(punchout_threads_test punchout/tests/threads_test.cpp punchout/src/threads.cpp punchout/src/os.cpp punchout/src/restart.cpp punchout/src/priority.cpp)
 target_include_directories(punchout_threads_test PRIVATE punchout/src)
 target_link_libraries(punchout_threads_test PRIVATE qilin_rt qilin_warnings)
 qilin_tool(punchout_threads_test)
@@ -257,7 +262,7 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in punchout but the code lifted from main.dol.
-set(punchout_runtime_sources punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp punchout/src/profile.cpp punchout/src/menu.cpp)
+set(punchout_runtime_sources punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp punchout/src/profile.cpp punchout/src/menu.cpp punchout/src/priority.cpp)
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
@@ -290,6 +295,9 @@ if(QILIN_GAME_DOL)
     add_executable(punchout ${punchout_runtime_sources} ${gen_sources})
     target_include_directories(punchout PRIVATE punchout/src ${gen})
     target_link_libraries(punchout PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static)
+    if(WIN32)
+        target_link_libraries(punchout PRIVATE winmm)  # timeBeginPeriod (main.cpp)
+    endif()
     target_compile_definitions(punchout PRIVATE PUNCHOUT_VERSION="${PROJECT_VERSION}")
     # Our own sources get the warning set; the lifter's output doesn't (unused labels and locals).
     set_source_files_properties(punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/settings.cpp

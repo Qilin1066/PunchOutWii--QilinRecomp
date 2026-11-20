@@ -173,6 +173,26 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
     if (g.large_points) g.max_point_size = g.properties.limits.pointSizeRange[1];
     std::vector<const char*> dext;
     if (want_swapchain) dext.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    // Optional: waiting for a frame to reach the screen (see Gpu::present_wait).
+    // QILIN_NO_PRESENT_WAIT=1 leaves it off (a driver that misbehaves with it).
+    VkPhysicalDevicePresentIdFeaturesKHR fid{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+    VkPhysicalDevicePresentWaitFeaturesKHR fwait{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
+    {
+        const char* off = std::getenv("QILIN_NO_PRESENT_WAIT");
+        if (want_swapchain && !(off && *off && *off != '0') && has_extension(g.physical, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+            has_extension(g.physical, VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) {
+            fid.pNext = &fwait;
+            VkPhysicalDeviceFeatures2 q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &fid};
+            vkGetPhysicalDeviceFeatures2(g.physical, &q);
+            if (fid.presentId && fwait.presentWait) {
+                g.present_wait = true;
+                dext.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+                dext.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+                fwait.pNext = f13.pNext;
+                f13.pNext = &fid;  // into the device's feature chain
+            }
+        }
+    }
 #if defined(__APPLE__)
     if (has_extension(g.physical, "VK_KHR_portability_subset")) dext.push_back("VK_KHR_portability_subset");
 #endif

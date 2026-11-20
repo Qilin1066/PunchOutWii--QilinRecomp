@@ -16,6 +16,7 @@
 // Runtime code: no std::format (macOS 10.15).
 #include "renderer.hpp"
 #include "recorder.hpp"
+#include "priority.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -667,6 +668,7 @@ struct Renderer::Impl {
 
     // A worker: compiles queued pipelines, in order.
     void compile_specialized() {
+        set_this_thread_priority(Priority::background);  // the ubershaders cover it meanwhile
         for (;;) {
             Job job;
             {
@@ -737,6 +739,7 @@ struct Renderer::Impl {
     // The saver thread: the cache (vkGetPipelineCacheData needs no lock
     // against the workers' vkCreateGraphicsPipelines) and the new keys.
     void save_loop() {
+        set_this_thread_priority(Priority::background);  // never ahead of a frame
         for (;;) {
             std::vector<uint8_t> keys;
             bool quit;

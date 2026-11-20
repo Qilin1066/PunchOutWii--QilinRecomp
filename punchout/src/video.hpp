@@ -27,4 +27,11 @@ bool take_frame(uint64_t* sequence, unsigned timeout_ms, std::vector<uint8_t>& r
 // the clock, measure its progress.
 uint32_t frame_count();
 
+// From the main thread: the retrace rate, num/den Hz (60/1 until set). Set to
+// the display's own refresh when that is within half a percent of 60 Hz (or
+// of a multiple of it), the game's frames then land one per refresh (or every
+// second one...) instead of drifting against it, which repeats or drops a
+// frame every few seconds. 0 for either: back to 60 Hz.
+void set_retrace_rate(uint32_t num, uint32_t den);
+
 }  // namespace punchout

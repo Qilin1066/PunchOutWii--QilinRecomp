@@ -19,6 +19,7 @@
 // VertexLoader_*.h, PixelEngine.h; GPL-2.0-or-later; facts only, our code).
 #include "gpu.hpp"
 #include "hw.hpp"
+#include "priority.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -573,6 +574,7 @@ void consume(Cpu& c, const uint8_t* bytes, size_t n) {
 }
 
 void gpu_thread() {
+    set_this_thread_priority(Priority::high);  // a frame's draws wait on it
     std::vector<uint8_t> batch;
     for (;;) {
         Cpu* c;

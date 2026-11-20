@@ -11,6 +11,7 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -115,6 +116,11 @@ struct Display::Impl {
     Image target;     // headless: what's presented
     bool need_rebuild = false;
     bool vsync_built = true;  // the present mode the swapchain has
+    // With vsync and VK_KHR_present_wait: each present has an id, and the next
+    // frame waits until the one before is on screen, so at most one waits in
+    // the queue (a frame less latency than a full FIFO queue). 0: none yet on
+    // this swapchain.
+    uint64_t present_id = 0, waitable_id = 0;
     uint32_t buttons = 0;
     SDL_Gamepad* pad = nullptr;
     bool rumbling = false;
@@ -164,6 +170,14 @@ struct Display::Impl {
     uint32_t last_w = 0, last_h = 0, last_lines = 0;
     float last_aspect = 16.0f / 9.0f;
     bool shown_any = false;
+    FrameTimes times;
+    std::chrono::steady_clock::time_point last_new{};  // when the last new picture was presented
+    bool counting = false;                            // last_new is set
+    void count_new() {  // a new picture was presented
+        const auto now = std::chrono::steady_clock::now();
+        if (counting) times.add(std::chrono::duration<double, std::milli>(now - last_new).count());
+        last_new = now, counting = true;
+    }
 
     void show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh, float aspect, uint32_t lines);
 
@@ -335,6 +349,7 @@ struct Display::Impl {
         for (auto& s : rendered) check(vkCreateSemaphore(gpu.device, &si, nullptr, &s), "vkCreateSemaphore");
         make_pipelines(swap_format);
         need_rebuild = false;
+        waitable_id = 0;  // ids belong to a swapchain
     }
 
     // The picture's place in a target this size: see Scaling.
@@ -603,6 +618,15 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
     if (d.window) {
         if (d.need_rebuild || d.vsync_built != d.picture.vsync) d.build_swapchain();
         if (d.extent.width == 0) return;  // minimised
+        if (d.gpu.present_wait && d.vsync_built && d.waitable_id) {
+            // Bounded: a display that stops refreshing (asleep, covered) only costs 50 ms.
+            const VkResult w = vkWaitForPresentKHR(d.gpu.device, d.swapchain, d.waitable_id, 50'000'000);
+            if (w == VK_ERROR_OUT_OF_DATE_KHR) {
+                d.need_rebuild = true;
+                return;
+            }
+            if (w != VK_TIMEOUT && w != VK_SUBOPTIMAL_KHR) check(w, "vkWaitForPresentKHR");
+        }
         const VkResult r = vkAcquireNextImageKHR(d.gpu.device, d.swapchain, UINT64_MAX, d.acquired, VK_NULL_HANDLE, &index);
         if (r == VK_ERROR_OUT_OF_DATE_KHR) {
             d.need_rebuild = true;
@@ -661,9 +685,15 @@ void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh
         pi.swapchainCount = 1;
         pi.pSwapchains = &d.swapchain;
         pi.pImageIndices = &index;
+        const uint64_t id = ++d.present_id;
+        VkPresentIdKHR pid{VK_STRUCTURE_TYPE_PRESENT_ID_KHR};
+        pid.swapchainCount = 1;
+        pid.pPresentIds = &id;
+        if (d.gpu.present_wait) pi.pNext = &pid;
         const VkResult r = vkQueuePresentKHR(d.gpu.queue, &pi);
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) d.need_rebuild = true;
         else check(r, "vkQueuePresentKHR");
+        if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) d.waitable_id = id;
     }
 }
 
@@ -681,16 +711,21 @@ void Display::present(uint32_t width, uint32_t height, const uint8_t* rgba, floa
     }
     std::memcpy(d.staging.mapped, rgba, bytes);
     d.show(VK_NULL_HANDLE, VK_NULL_HANDLE, width, height, aspect, lines);
+    d.count_new();
 }
 
 void Display::present_image(VkImage image, VkImageView view, uint32_t width, uint32_t height, float aspect, uint32_t lines) {
     Impl& d = *impl_;
     check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
     d.show(image, view, width, height, aspect, lines);
+    d.count_new();
 }
+
+const FrameTimes& Display::frame_times() const { return impl_->times; }
 
 void Display::present_again() {
     Impl& d = *impl_;
+    d.counting = false;  // the pause isn't a frame time
     check(vkWaitForFences(d.gpu.device, 1, &d.done, VK_TRUE, UINT64_MAX), "vkWaitForFences");
     if (!d.shown_any) {  // nothing yet: black
         static const uint8_t black[4] = {0, 0, 0, 255};

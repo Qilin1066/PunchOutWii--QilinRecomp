@@ -71,7 +71,7 @@ bool parse_binding(const std::string& text, Binding& b, std::string& why) {
             return false;
         }
         if (key_reserved(name)) {
-            why = "key:" + name + " is kept for the program (Escape and F1 open the settings menu, F11 is full screen)";
+            why = "key:" + name + " is kept for the program (Escape and F1 open the settings menu, F3 the frame times, F11 is full screen)";
             return false;
         }
         b = {Binding::kKey, 0, name};
@@ -106,7 +106,7 @@ const char* pad_button_name(uint32_t bit) {
 
 bool key_reserved(const std::string& name) {
     const std::string l = lower(trim(name));
-    return l == "escape" || l == "f1" || l == "f11";
+    return l == "escape" || l == "f1" || l == "f3" || l == "f11";
 }
 
 std::string binding_text(const Binding& b) {
@@ -244,9 +244,12 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
                 if (!boolean(s.vsync)) return false;
             } else if (name == "gpu") {
                 s.gpu = value;
+            } else if (name == "performance_overlay") {
+                if (!boolean(s.performance_overlay)) return false;
             } else {
                 return fail("[display] has no '" + name +
-                            "' (preset fullscreen monitor scaling smooth look scanlines mask internal_scale anisotropy vsync gpu)");
+                            "' (preset fullscreen monitor scaling smooth look scanlines mask internal_scale anisotropy vsync gpu "
+                            "performance_overlay)");
             }
             continue;
         }
@@ -322,6 +325,8 @@ std::string settings_text(const Settings& s) {
         "vsync = " + b(s.vsync) + "\n"
         "# The graphics device, by name (empty: the best one).\n"
         "gpu = " + s.gpu + "\n"
+        "# Frame rate, 1% and 0.1% lows and recent frame times in a corner (F3 switches it).\n"
+        "performance_overlay = " + b(s.performance_overlay) + "\n"
         "\n"
         "[controls]\n"
         "# The Wii Remote's rumble, on the controller.\n"

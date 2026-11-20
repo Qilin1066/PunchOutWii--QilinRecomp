@@ -27,8 +27,11 @@ void add_timer_source(std::function<void()> poll, std::function<uint64_t()> dead
 uint64_t next_timer_deadline();
 // Sleep up to `ns` while every guest thread waits, or until another host
 // thread calls wake_idle because it has something for a timer source to
-// post (the GPU thread, reaching a draw-done command).
-void idle_sleep(uint64_t ns);
+// post (the GPU thread, reaching a draw-done command). `on_time`: the end is a
+// timer's deadline (a retrace), so it is met to within tens of microseconds:
+// the OS sleeps until shortly before it, and the rest is spent yielding.
+// Otherwise the end is only an upper bound and the OS's timer slack is fine.
+void idle_sleep(uint64_t ns, bool on_time = true);
 void wake_idle();
 
 // Called when the guest writes WPAR (PPCMtwpar), which resets the write-gather

@@ -417,17 +417,41 @@ void on_wpar_write(void (*reset)()) { g_wpar_reset = reset; }
 namespace {
 std::mutex g_idle_lock;
 std::condition_variable g_idle_cv;
-bool g_idle_woken = false;
+std::atomic<bool> g_idle_woken{false};  // written under g_idle_lock; read without it while yielding
+// How early an OS sleep may end up late: Windows wakes on its 1 ms timer tick
+// (main.cpp asks for 1 ms, not the default 15.6), others within ~100 us.
+#ifdef _WIN32
+constexpr auto kSleepSlack = std::chrono::microseconds(1500);
+#else
+constexpr auto kSleepSlack = std::chrono::microseconds(250);
+#endif
 }  // namespace
-void idle_sleep(uint64_t ns) {
-    std::unique_lock l(g_idle_lock);
-    g_idle_cv.wait_for(l, std::chrono::nanoseconds(ns), [] { return g_idle_woken; });
-    g_idle_woken = false;
+void idle_sleep(uint64_t ns, bool on_time) {
+    using clock = std::chrono::steady_clock;
+    const auto end = clock::now() + std::chrono::nanoseconds(ns);
+    {
+        std::unique_lock l(g_idle_lock);
+        const auto os_end = on_time ? end - kSleepSlack : end;
+        if (clock::now() < os_end)
+            g_idle_cv.wait_until(l, os_end, [] { return g_idle_woken.load(std::memory_order_relaxed); });
+        if (g_idle_woken.exchange(false, std::memory_order_relaxed) || !on_time) return;
+    }
+    // The last stretch: yield until the deadline or a wake. A retrace posted
+    // a millisecond late is a frame paced a millisecond late; this costs at
+    // most kSleepSlack of a core per deadline.
+    while (clock::now() < end) {
+        if (g_idle_woken.load(std::memory_order_relaxed)) {
+            std::lock_guard l(g_idle_lock);
+            g_idle_woken.store(false, std::memory_order_relaxed);
+            return;
+        }
+        std::this_thread::yield();
+    }
 }
 void wake_idle() {
     {
         std::lock_guard l(g_idle_lock);
-        g_idle_woken = true;
+        g_idle_woken.store(true, std::memory_order_relaxed);
     }
     g_idle_cv.notify_all();
 }
@@ -474,8 +498,9 @@ void poll_loop(Cpu& c) {
         for (const auto& timer : g_timers) timer.poll();  // the hardware's state moves on; delivery waits
     }
     // Nothing came: wait for the next timed event, a millisecond at most, rather than spin.
-    const uint64_t now = time_base(), next = std::min(next_timer_deadline(), now + kTimerHz / 1000);
-    if (next > now) idle_sleep((next - now) * 4000 / 243);
+    // Only a timer's own deadline needs meeting on time; the millisecond is a bound.
+    const uint64_t now = time_base(), timer = next_timer_deadline(), next = std::min(timer, now + kTimerHz / 1000);
+    if (next > now) idle_sleep((next - now) * 4000 / 243, next == timer);
 }
 
 bool deliver_interrupts_idle(Cpu& c) {
