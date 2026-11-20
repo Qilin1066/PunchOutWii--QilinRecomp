@@ -175,6 +175,41 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
     if (want_swapchain) dext.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     // Optional: waiting for a frame to reach the screen (see Gpu::present_wait).
     // QILIN_NO_PRESENT_WAIT=1 leaves it off (a driver that misbehaves with it).
+    // Optional: blend state set per draw (see Gpu::dynamic_blend).
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT feds3{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feds2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
+    {
+        const char* off = std::getenv("QILIN_NO_DYNAMIC_BLEND");
+        if (!(off && *off && *off != '0') && has_extension(g.physical, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)) {
+            const bool has2 = has_extension(g.physical, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
+            feds3.pNext = has2 ? &feds2 : nullptr;
+            VkPhysicalDeviceFeatures2 q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &feds3};
+            vkGetPhysicalDeviceFeatures2(g.physical, &q);
+            if (feds3.extendedDynamicState3ColorBlendEnable && feds3.extendedDynamicState3ColorBlendEquation &&
+                feds3.extendedDynamicState3ColorWriteMask) {
+                g.dynamic_blend = true;
+                g.dynamic_logic = g.logic_op && has2 && feds2.extendedDynamicState2LogicOp && feds3.extendedDynamicState3LogicOpEnable;
+                // Enable only what's used.
+                VkPhysicalDeviceExtendedDynamicState3FeaturesEXT on3{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+                on3.extendedDynamicState3ColorBlendEnable = on3.extendedDynamicState3ColorBlendEquation =
+                    on3.extendedDynamicState3ColorWriteMask = VK_TRUE;
+                on3.extendedDynamicState3LogicOpEnable = g.dynamic_logic;
+                feds3 = on3;
+                dext.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+                if (g.dynamic_logic) {
+                    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT on2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
+                    on2.extendedDynamicState2LogicOp = VK_TRUE;
+                    feds2 = on2;
+                    feds2.pNext = f13.pNext;
+                    feds3.pNext = &feds2;
+                    dext.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
+                } else {
+                    feds3.pNext = f13.pNext;
+                }
+                f13.pNext = &feds3;
+            }
+        }
+    }
     VkPhysicalDevicePresentIdFeaturesKHR fid{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
     VkPhysicalDevicePresentWaitFeaturesKHR fwait{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
     {

@@ -55,6 +55,27 @@ ctest --test-dir build --output-on-failure
 
 Both run `tools/build-punchout.ps1`, which finds Visual Studio's CMake and Git itself.
 
+**On Linux, the Raspberry Pi 4 and macOS, one command.** In the project's folder:
+
+```sh
+./punchout.sh --disc "<extracted disc>"   # the first time: builds it, then starts it
+./punchout.sh                             # after that: starts it (building first if needed)
+./punchout.sh update                      # gets the latest code, rebuilds what changed, starts it
+```
+
+It checks for CMake, a compiler (GCC 14+ or Clang 19+) and, on Debian, Ubuntu and Raspberry Pi OS, the packages SDL3 needs to build, and says what to install if one is missing. The build is optimised for the machine's own CPU and runs as many compiles at once as the memory allows (about 1.5 GB each).
+
+**The Raspberry Pi 4** (4 GB or more; 64-bit Raspberry Pi OS based on Debian 13 "Trixie", whose Mesa has the Pi's Vulkan 1.3 driver):
+
+```sh
+sudo apt install git cmake g++-14 libx11-dev libxext-dev libwayland-dev libxkbcommon-dev libegl-dev \
+                 libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
+git clone https://github.com/Qilin1066/PunchOutWii-QilinRecomp && cd PunchOutWii-QilinRecomp
+./punchout.sh --disc "<extracted disc>"
+```
+
+The first build takes about an hour on a Pi 4 (two compiles at once on 4 GB). Use the `low-end` preset (the default, `original`, is the same: the console's own 640x528 picture), keep vsync on, and play full screen (F11) so the desktop's compositor doesn't copy every frame. F3 shows how evenly frames arrive. Our ARM64 build is checked by cross-compiling everything, the code lifted from the disc included, for the Pi 4's Cortex-A72 (`tools/check/arm64_build.sh`) and by CI on Linux ARM64.
+
 **By hand:**
 
 The game is built from your own disc's `main.dol`; nothing of the game is in this repository. Extract the whole disc first (Dolphin: right-click the game, *Extract Entire Disc*; or `wit extract`). That gives a folder with `sys/` and `files/`. Then:

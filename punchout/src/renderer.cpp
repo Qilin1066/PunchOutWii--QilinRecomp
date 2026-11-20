@@ -422,7 +422,7 @@ struct Renderer::Impl {
     VkPipeline make_pipeline(VkShaderModule vs, VkShaderModule fs, VkPipelineLayout layout, bool vertices, VkPrimitiveTopology topology,
                              const VkPipelineColorBlendAttachmentState& blend, bool depth, bool depth_dynamic, int logic_op = -1,
                              bool line_width_dynamic = false, const VkSpecializationInfo* fs_constants = nullptr,
-                             bool small_vertices = false) {
+                             bool small_vertices = false, bool blend_dynamic = false) {
         const VkPipelineShaderStageCreateInfo stages[2] = {
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr},
             {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", fs_constants}};
@@ -484,6 +484,15 @@ struct Renderer::Impl {
         }
         std::vector<VkDynamicState> dyn = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         if (line_width_dynamic) dyn.push_back(VK_DYNAMIC_STATE_LINE_WIDTH);
+        if (blend_dynamic) {
+            dyn.push_back(VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT);
+            dyn.push_back(VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT);
+            dyn.push_back(VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT);
+            if (gpu.dynamic_logic) {
+                dyn.push_back(VK_DYNAMIC_STATE_LOGIC_OP_ENABLE_EXT);
+                dyn.push_back(VK_DYNAMIC_STATE_LOGIC_OP_EXT);
+            }
+        }
         if (depth_dynamic) {
             dyn.insert(dyn.end(), {VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
                                    VK_DYNAMIC_STATE_DEPTH_COMPARE_OP});
@@ -512,8 +521,9 @@ struct Renderer::Impl {
         return p;
     }
 
-    // A GX pipeline: the ubershader's, or specialised to `shape` (thread-safe).
-    VkPipeline build_gx(const gx::PipelineKey& k, const gx::ShapeWords* shape) {
+    // The blend state for a key, and its logic op (-1: none, or approximated
+    // by blending where the GPU has no logic ops).
+    VkPipelineColorBlendAttachmentState blend_for(const gx::PipelineKey& k, int& logic) const {
         VkPipelineColorBlendAttachmentState b{};
         b.blendEnable = k.blend;
         b.srcColorBlendFactor = VkBlendFactor(k.src);
@@ -523,7 +533,7 @@ struct Renderer::Impl {
         b.dstAlphaBlendFactor = VkBlendFactor(k.dst_alpha);
         b.alphaBlendOp = VkBlendOp(k.op_alpha);
         b.colorWriteMask = k.write_mask;
-        int logic = -1;
+        logic = -1;
         if (k.logic) {
             const unsigned op = k.logic - 1u;
             if (gpu.logic_op) {
@@ -539,6 +549,41 @@ struct Renderer::Impl {
                 b.colorBlendOp = b.alphaBlendOp = l.subtract ? VK_BLEND_OP_REVERSE_SUBTRACT : VK_BLEND_OP_ADD;
             }
         }
+        return b;
+    }
+
+    // With dynamic blend state (Gpu::dynamic_blend), the part of a key that
+    // still needs a pipeline of its own: the blend (and the logic op, where
+    // it's dynamic too or only approximated by blending) is set per draw.
+    gx::PipelineKey base_key(gx::PipelineKey k) const {
+        if (!gpu.dynamic_blend) return k;
+        k.blend = k.src = k.dst = k.src_alpha = k.dst_alpha = k.op = k.op_alpha = 0;
+        k.write_mask = 0xF;
+        if (!gpu.logic_op || gpu.dynamic_logic) k.logic = 0;
+        return k;
+    }
+    // Set a draw's blend state on the command buffer (dynamic blend only).
+    void set_dynamic_blend(VkCommandBuffer cmd, const gx::PipelineKey& k) {
+        int logic;
+        const VkPipelineColorBlendAttachmentState b = blend_for(k, logic);
+        const VkBool32 enable = b.blendEnable;
+        vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &enable);
+        const VkColorBlendEquationEXT eq{b.srcColorBlendFactor, b.dstColorBlendFactor, b.colorBlendOp,
+                                         b.srcAlphaBlendFactor, b.dstAlphaBlendFactor, b.alphaBlendOp};
+        vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &eq);
+        const VkColorComponentFlags mask = b.colorWriteMask;
+        vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &mask);
+        if (gpu.dynamic_logic) {
+            vkCmdSetLogicOpEnableEXT(cmd, logic >= 0);
+            if (logic >= 0) vkCmdSetLogicOpEXT(cmd, VkLogicOp(logic));
+        }
+    }
+
+    // A GX pipeline: the ubershader's, or specialised to `shape` (thread-safe).
+    VkPipeline build_gx(const gx::PipelineKey& k, const gx::ShapeWords* shape) {
+        int logic;
+        VkPipelineColorBlendAttachmentState b = blend_for(k, logic);
+        if (gpu.dynamic_blend && gpu.dynamic_logic) logic = 0;  // logic op enable and op are dynamic: any value
         static constexpr VkPrimitiveTopology kTopology[3] = {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
                                                               VK_PRIMITIVE_TOPOLOGY_POINT_LIST};
         // Specialisation: constants 1-70 are the shape's words (constant 0, the
@@ -554,7 +599,7 @@ struct Renderer::Impl {
         }
         const VkShaderModule fs = shape ? gx_frag_stages[((*shape)[0] >> 10) & 15] : k.depth_out ? gx_frag_depth : gx_frag;
         return make_pipeline(gx_vert, fs, gx_layout, true, kTopology[k.topology], b, true, true, logic,
-                             k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0);
+                             k.topology == 1 && gpu.wide_lines, shape ? &info : nullptr, k.small_vertices != 0, gpu.dynamic_blend);
     }
 
     // pipelines.keys records: a kind byte (0 the ubershader's, 1 specialised),
@@ -579,6 +624,7 @@ struct Renderer::Impl {
             const uint8_t kind = p[0];
             gx::PipelineKey k;
             std::memcpy(&k, p + 1, sizeof k);
+            k = base_key(k);
             if (kind == 0) {
                 if (uber_requested.insert({k}).second) uber.push_back({true, {k, 0}});
                 p += one, n -= one;
@@ -625,6 +671,19 @@ struct Renderer::Impl {
             keys_new.insert(keys_new.end(), reinterpret_cast<const uint8_t*>(&key_size), reinterpret_cast<const uint8_t*>(&key_size) + 4);
             keys_new.insert(keys_new.end(), reinterpret_cast<const uint8_t*>(&words), reinterpret_cast<const uint8_t*>(&words) + 4);
         }
+        if (gpu.dynamic_blend) {
+            // Blend states are set per draw: the few pipelines left (each
+            // topology, depth-writing or not, either vertex layout) are all
+            // built now, so no draw ever waits for one.
+            for (uint8_t topology = 0; topology < 3; ++topology)
+                for (uint8_t depth_out = 0; depth_out < 2; ++depth_out)
+                    for (uint8_t small = 0; small < 2; ++small) {
+                        gx::PipelineKey k{};
+                        k.topology = topology, k.depth_out = depth_out, k.small_vertices = small;
+                        k = base_key(k);
+                        if (uber_requested.insert({k}).second) uber.push_back({true, {k, 0}});
+                    }
+        }
         rt::log("pipelines: %llu of the ubershader's and %llu specialised remembered, compiling as the game starts",
                 static_cast<unsigned long long>(uber.size()), static_cast<unsigned long long>(spec.size()));
         if (specialize == Specialize::kSync) {  // PUNCHOUT_SPECIALIZE_SYNC (the tests): each when first drawn, as before
@@ -649,8 +708,9 @@ struct Renderer::Impl {
 
     // The pipeline for a draw: specialised if ready, else the ubershader's
     // while a worker compiles it.
-    VkPipeline gx_pipeline(const gx::PipelineKey& k, uint32_t shape) {
+    VkPipeline gx_pipeline(const gx::PipelineKey& raw, uint32_t shape) {
         ++draws_total;
+        const gx::PipelineKey k = base_key(raw);
         if (specialize != Specialize::kOff && specialize_on && !k.depth_out) {  // depth-writing draws (rare) keep the ubershader
             const SpecKey key{k, shape};
             if (auto it = specialized.find(key); it != specialized.end()) {
@@ -660,11 +720,11 @@ struct Renderer::Impl {
             if (specialize == Specialize::kSync) {
                 const gx::ShapeWords w = gx::shape_words(shape);
                 ++draws_specialized;
-                if (requested.insert(key).second) remember(false, k, shape);
+                if (requested.insert(key).second) remember(false, raw, shape);
                 return specialized[key] = build_gx(k, &w);
             }
             if (requested.insert(key).second) {
-                remember(false, k, shape);
+                remember(false, raw, shape);
                 std::lock_guard lock(spec_lock);
                 spec_queue.push_back({false, key});
                 spec_wake.notify_one();
@@ -680,7 +740,7 @@ struct Renderer::Impl {
                 ++stalls, stall_ms += ms;
                 if (stalls <= 64)
                     rt::log("pipelines: the ubershader's pipeline for a new blend state compiled on the drawing thread in %.0f ms", ms);
-                if (uber_requested.insert({k}).second) remember(true, k, 0);
+                if (uber_requested.insert({k}).second) remember(true, raw, 0);
             }
         }
         return p;
@@ -1180,6 +1240,8 @@ struct Renderer::Impl {
 
         begin_efb(cmd);
         VkPipeline bound = VK_NULL_HANDLE;
+        gx::PipelineKey blend_key{};  // the blend state last set (dynamic blend)
+        bool blend_set = false;
         std::map<std::vector<uint64_t>, VkDescriptorSet> texture_sets;
         VkDescriptorSet bound_textures = VK_NULL_HANDLE;
         bool need_bind = true;
@@ -1231,6 +1293,7 @@ struct Renderer::Impl {
             if (pk.kind == gx::Packet::kCopy) {
                 copy(cmd, s, f.copies[pk.index]);
                 bound = VK_NULL_HANDLE;
+                blend_set = false;
                 bound_textures = VK_NULL_HANDLE;
                 need_bind = true;
                 continue;
@@ -1241,6 +1304,10 @@ struct Renderer::Impl {
             if (p != bound) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
                 bound = p;
+            }
+            if (gpu.dynamic_blend && (!blend_set || std::memcmp(&d.pipeline, &blend_key, sizeof blend_key) != 0)) {
+                set_dynamic_blend(cmd, d.pipeline);  // kept across GX pipelines; copies and clears reset it below
+                blend_key = d.pipeline, blend_set = true;
             }
             if (need_bind || d.pipeline.small_vertices != bound_small) {
                 const VkBuffer buffers[2] = {s.vertices.buffer, s.vertices.buffer};

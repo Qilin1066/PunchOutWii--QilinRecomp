@@ -297,7 +297,9 @@ int main(int argc, char** argv) {
         if (const char* e = std::getenv("PUNCHOUT_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
         renderer = std::make_unique<punchout::Renderer>(display->gpu(), scale, settings.anisotropy);
         punchout::gx::set_rendering(true);
-        rt::log("drawing with %s, the EFB at %ux", display->device_name().c_str(), scale);
+        rt::log("drawing with %s, the EFB at %ux%s%s", display->device_name().c_str(), scale,
+                display->gpu().dynamic_blend ? "; blend state set per draw (no pipeline to build for a new one)" : "",
+                display->gpu().present_wait ? "; waits for each frame to reach the screen" : "");
         renderer_scale = scale;
         if (!offscreen) {
             menu = std::make_unique<punchout::Menu>(*display, settings, data);

@@ -43,6 +43,18 @@ if(NOT MSVC)
     add_compile_options(-ffp-contract=off)
 endif()
 
+# For this machine's own CPU (a build that runs only here, as
+# tools/build-punchout.sh makes): the Raspberry Pi 4's Cortex-A72, say,
+# instead of the baseline ARMv8.0 or x86-64. Off by default (CI, downloads).
+option(QILIN_NATIVE "Optimise for the CPU of the machine building (not portable)" OFF)
+if(QILIN_NATIVE AND NOT MSVC)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        add_compile_options(-mcpu=native)
+    else()
+        add_compile_options(-march=native)
+    endif()
+endif()
+
 # ---- Warnings for our own targets ----
 add_library(qilin_warnings INTERFACE)
 if(MSVC)

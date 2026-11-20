@@ -37,6 +37,11 @@ struct Gpu {
     // VK_KHR_present_id + VK_KHR_present_wait: the display can wait until a
     // frame is on screen, to keep at most one queued behind it (latency).
     bool present_wait = false;
+    // VK_EXT_extended_dynamic_state3's blend enable, equation and write mask:
+    // one pipeline serves every blend state, set per draw instead of compiled
+    // in (no pipeline to build when the game uses a new one). dynamic_logic:
+    // the logic op too (with VK_EXT_extended_dynamic_state2's). QILIN_NO_DYNAMIC_BLEND=1: off.
+    bool dynamic_blend = false, dynamic_logic = false;
     // Anisotropic texture filtering: the most the device allows, or 1 without it.
     float max_anisotropy = 1.0f;
     // Every device here that could draw (the settings menu offers them).
