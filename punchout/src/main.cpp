@@ -417,14 +417,14 @@ int main(int argc, char** argv) {
             bindings[c].clear();
             for (const punchout::Binding& b : settings.controls[c]) {
                 int key = -1;
-                if (b.kind == punchout::Binding::kKey && (key = display->key_code(b.key.c_str())) < 0)
+                if (b.kind == punchout::Binding::kKey && display && (key = display->key_code(b.key.c_str())) < 0)
                     rt::fatal(nullptr, "punchout.ini: %s = key:%s, but there's no key called '%s'",
                               punchout::control_name(static_cast<punchout::Control>(c)), b.key.c_str(), b.key.c_str());
                 bindings[c].push_back({b.kind, b.pad, key});
             }
         }
     };
-    if (display) look_up_controls();
+    look_up_controls();
 
     const char* dump = offscreen ? std::getenv("PUNCHOUT_DUMP") : nullptr;
     const char* every_text = std::getenv("PUNCHOUT_DUMP_EVERY");
@@ -486,8 +486,8 @@ int main(int argc, char** argv) {
             }
         }
         if (renderer) renderer->set_anisotropy(settings.anisotropy);  // the menu's, once it's closed (unchanged: nothing to do)
-        if (display) {
-            uint32_t held = display->buttons();
+        {  // (without a display, --headless: the scripted presses and pointer alone)
+            uint32_t held = display ? display->buttons() : 0;
             const double now = punchout::frame_count() / 60.0;  // game time: see the top
             for (const Press& p : presses)
                 if (now >= p.at && now < p.at + 0.2) held |= p.button;
@@ -496,7 +496,7 @@ int main(int argc, char** argv) {
                 for (const Input& in : bindings[c]) {
                     const bool on = in.kind == punchout::Binding::kPad     ? (held & in.pad) != 0
                                     : in.kind == punchout::Binding::kMouse ? (held & qilin::host::kPadClick) != 0
-                                                                           : display->key_down(in.key);
+                                                                           : display && display->key_down(in.key);
                     if (on) controls |= 1u << c;
                 }
             punchout::g_controls.store(controls, std::memory_order_relaxed);
@@ -504,17 +504,17 @@ int main(int argc, char** argv) {
             const auto tick = std::chrono::steady_clock::now();
             const float dt = std::chrono::duration<float>(tick - last).count();
             last = tick;
-            float mx, my, sx, sy;
-            if (display->mouse_moved(mx, my)) cursor_x = mx, cursor_y = my;
+            float mx, my, sx = 0, sy = 0;
+            if (display && display->mouse_moved(mx, my)) cursor_x = mx, cursor_y = my;
             for (const Point& p : points)
                 if (now >= p.at && now < p.at + 0.2) cursor_x = p.x, cursor_y = p.y;
-            display->right_stick(sx, sy);
+            if (display) display->right_stick(sx, sy);
             cursor_x = std::clamp(cursor_x + sx * dt * 2.0f, -1.2f, 1.2f);
             cursor_y = std::clamp(cursor_y + sy * dt * 2.0f, -1.2f, 1.2f);
             punchout::g_pointer_x.store(int32_t(cursor_x * 1000), std::memory_order_relaxed);
             punchout::g_pointer_y.store(int32_t(cursor_y * 1000), std::memory_order_relaxed);
             punchout::g_pointer_on.store(std::fabs(cursor_x) <= 1.1f && std::fabs(cursor_y) <= 1.1f, std::memory_order_relaxed);
-            display->rumble(settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed));
+            if (display) display->rumble(settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed));
         }
         if (!renderer) {  // headless: nothing shows the frames, so they're only waited for, not converted
             uint32_t xfb, w, h;

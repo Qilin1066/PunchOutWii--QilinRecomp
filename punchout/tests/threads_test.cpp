@@ -320,6 +320,30 @@ void test_calendar(Cpu& c) {
     expect("OSGetTime is the local date and time", {"today"});
 }
 
+// The memory map as lifted code reaches it (cpu.hpp's loads and stores): the
+// locked cache is plain memory of its own, the uncached mirrors are MEM1 and
+// MEM2 again, and all three take any access size.
+void test_memory_map(Cpu& c) {
+    using namespace qilin::rt;
+    char line[96];
+    write32(c, 0xE0000010u, 0x11223344u);  // the locked cache
+    write16(c, 0xE0003FFEu, 0xBEEFu);      // its last two bytes
+    write8(c, 0xE0000014u, 0x5Au);
+    std::snprintf(line, sizeof line, "%08X %04X %02X %02X", read32(c, 0xE0000010u), read16(c, 0xE0003FFEu), read8(c, 0xE0000014u),
+                  read8(c, 0xE0000011u));
+    note(line);
+    write32(c, 0x80001000u, 0xCAFEF00Du);  // MEM1, read back through its uncached mirror
+    write32(c, 0xC0001004u, 0x01020304u);  // and written through it
+    std::snprintf(line, sizeof line, "%08X %08X %04X", read32(c, 0xC0001000u), read32(c, 0x80001004u), read16(c, 0xC0001006u));
+    note(line);
+    write32(c, 0x90002000u, 0xA1B2C3D4u);  // MEM2 and its mirror
+    write8(c, 0xD0002003u, 0xEEu);
+    std::snprintf(line, sizeof line, "%08X %08X", read32(c, 0xD0002000u), read32(c, 0x90002000u));
+    note(line);
+    expect("the locked cache and the uncached mirrors are plain memory",
+           {"11223344 BEEF 5A 22", "CAFEF00D 01020304 0304", "A1B2C3EE A1B2C3EE"});
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -362,6 +386,7 @@ int main(int argc, char** argv) {
     test_exit(c);
     test_alarm_and_sleep(c);
     test_calendar(c);
+    test_memory_map(c);
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
     std::fflush(nullptr);
     std::_Exit(g_failures ? 1 : 0);  // other guest threads are parked on host threads

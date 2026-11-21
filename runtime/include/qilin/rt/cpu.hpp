@@ -72,12 +72,15 @@ struct Cpu {
     }
 };
 
-// Cached MEM1 (0x80000000, 24 MB) and MEM2 (0x90000000, 64 MB) are plain host
-// memory at mem + address, kept in the guest's byte order. Accesses at
-// 0xC0000000 and above take the slow branch: the uncached RAM mirrors, the
-// locked cache and the write-gather pipe are handled there, the rest by the
-// hooks.
-constexpr uint32_t kSlowFrom = 0xC0000000u;
+// Cached MEM1 (0x80000000, 24 MB), MEM2 (0x90000000, 64 MB) and the 16 KB
+// locked cache (0xE0000000: the game does its paired-single work there, every
+// skinned vertex of a fight) are plain host memory at mem + address, kept in
+// the guest's byte order. Accesses from 0xC0000000 to 0xDFFFFFFF take the slow
+// branch: the uncached RAM mirrors and the write-gather pipe are handled
+// there, the rest by the hooks. Anywhere else that nothing backs faults, and
+// the crash report names the address.
+constexpr uint32_t kSlowFrom = 0xC0000000u, kSlowSize = 0x20000000u;
+QILIN_INLINE bool is_slow(uint32_t a) { return a - kSlowFrom < kSlowSize; }
 
 // The write-gather pipe (0xCC008000-0xCC00801F), if the game's runtime set
 // one: stores there go straight to it instead of through the hooks and the
@@ -87,20 +90,18 @@ using PipeWrite = void (*)(Cpu&, uint32_t value, unsigned size);
 inline PipeWrite g_pipe_write = nullptr;
 inline bool is_pipe(uint32_t a) { return (a & ~31u) == 0xCC008000u; }
 
-// Plain memory past kSlowFrom, for an access wholly inside it: the uncached
+// Plain memory in the slow range, for an access wholly inside it: the uncached
 // mirrors of MEM1 (0xC0000000) and MEM2 (0xD0000000), the same memory as
-// 0x80000000 and 0x90000000, and the 16 KB locked cache (0xE0000000, its own
-// memory at mem + address; the game does its paired-single work there). The
-// address in mem, else 0 (the hooks take it: hardware).
+// 0x80000000 and 0x90000000. The address in mem, else 0 (the hooks take it:
+// hardware).
 inline uint32_t plain_memory(uint32_t a, unsigned size) {
     if (a - 0xC0000000u <= 0x01800000u - size) return a - 0x40000000u;
     if (a - 0xD0000000u <= 0x04000000u - size) return a - 0x40000000u;
-    if (a - 0xE0000000u <= 0x00004000u - size) return a;
     return 0;
 }
 
-// The slow branch of a load or store at kSlowFrom and above: the plain memory
-// there (uncached mirrors, the locked cache), the write-gather pipe, or the hooks.
+// The slow branch of a load or store: the plain memory there (the uncached
+// mirrors), the write-gather pipe, or the hooks.
 QILIN_OUTLINE uint32_t read_slow(Cpu& c, uint32_t a, unsigned size) {
     const uint32_t m = plain_memory(a, size);
     if (!m) return c.hooks->read(c, a, size);
@@ -130,33 +131,33 @@ QILIN_OUTLINE void write_slow(Cpu& c, uint32_t a, uint32_t v, unsigned size) {
 }
 
 QILIN_INLINE uint32_t read8(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]] return read_slow(c, a, 1);
+    if (is_slow(a)) [[unlikely]] return read_slow(c, a, 1);
     return c.mem[a];
 }
 QILIN_INLINE uint32_t read16(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]] return read_slow(c, a, 2);
+    if (is_slow(a)) [[unlikely]] return read_slow(c, a, 2);
     uint16_t v;
     std::memcpy(&v, c.mem + a, 2);
     return std::byteswap(v);
 }
 QILIN_INLINE uint32_t read32(Cpu& c, uint32_t a) {
-    if (a >= kSlowFrom) [[unlikely]] return read_slow(c, a, 4);
+    if (is_slow(a)) [[unlikely]] return read_slow(c, a, 4);
     uint32_t v;
     std::memcpy(&v, c.mem + a, 4);
     return std::byteswap(v);
 }
 QILIN_INLINE uint64_t read64(Cpu& c, uint32_t a) { return uint64_t{read32(c, a)} << 32 | read32(c, a + 4); }
 QILIN_INLINE void write8(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]] return write_slow(c, a, v & 0xFF, 1);
+    if (is_slow(a)) [[unlikely]] return write_slow(c, a, v & 0xFF, 1);
     c.mem[a] = static_cast<uint8_t>(v);
 }
 QILIN_INLINE void write16(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]] return write_slow(c, a, v & 0xFFFF, 2);
+    if (is_slow(a)) [[unlikely]] return write_slow(c, a, v & 0xFFFF, 2);
     const uint16_t s = std::byteswap(static_cast<uint16_t>(v));
     std::memcpy(c.mem + a, &s, 2);
 }
 QILIN_INLINE void write32(Cpu& c, uint32_t a, uint32_t v) {
-    if (a >= kSlowFrom) [[unlikely]] return write_slow(c, a, v, 4);
+    if (is_slow(a)) [[unlikely]] return write_slow(c, a, v, 4);
     const uint32_t s = std::byteswap(v);
     std::memcpy(c.mem + a, &s, 4);
 }
@@ -166,7 +167,7 @@ QILIN_INLINE void write64(Cpu& c, uint32_t a, uint64_t v) {
 }
 inline void zero_block(Cpu& c, uint32_t a) {  // dcbz: the 32-byte block holding a
     a &= ~31u;
-    if (a >= kSlowFrom) [[unlikely]] {
+    if (is_slow(a)) [[unlikely]] {
         for (uint32_t k = 0; k < 32; k += 4) c.hooks->write(c, a + k, 0, 4);
         return;
     }

@@ -167,18 +167,12 @@ This compares the decoder with GNU objdump (`-M broadway,raw`): mnemonic and eve
 
 ## Licence
 
-This project's own code and documentation are under the [MIT licence](LICENSE), as in the other QilinRecomp projects. Some things in or around it are not:
+PunchOutWii--QilinRecomp's own code and documentation are free software under the [GNU General Public License, version 3](LICENSE) (GPL-3.0), as in the other QilinRecomp projects: you may use, share, change and sell it, but anything you distribute that is built from it, changed or not, must come with its full source under the same licence. Some things in or around it are not ours:
 
-- `third_party/rhf/` keeps its own licence, CC0 1.0 (`third_party/rhf/LICENSE`).
-- The dependencies CMake fetches at build time keep theirs: SDL3 (zlib), Khronos' Vulkan headers (Apache-2.0 or MIT), volk (MIT) and Dear ImGui (MIT).
+- `third_party/rhf/`, the Rhythm Heaven Fever decomp's symbols and splits, keeps its own licence, CC0 1.0 (`third_party/rhf/LICENSE`).
+- The dependencies CMake fetches at build time keep theirs, all compatible: SDL3 (zlib), Khronos' Vulkan headers (Apache-2.0 or MIT), volk (MIT) and Dear ImGui (MIT). The Windows download carries each under `LICENSES/`.
 
-The game itself is Nintendo's and is not covered by anything here: you need your own copy, and nothing built from it may be shared.
-
-## Licence
-
-PunchOutWii--QilinRecomp is free software under the **GNU General Public License, version 3** (`LICENSE`): you may use, share, change and sell it, but anything you distribute that is built from it, changed or not, must come with its full source under the same licence. The libraries it uses keep their own licences (all compatible): SDL3 (zlib), Dear ImGui, volk and Vulkan-Headers (MIT / Apache-2.0), and the Rhythm Heaven Fever symbols in `third_party/rhf` (CC0). The Windows download carries each under `LICENSES/`.
-
-Punch-Out!! itself, its code and data, belong to Nintendo, and none of it is here: the game's code is translated from your own disc when you build. Bring your own copy.
+Punch-Out!! itself, its code and data, belong to Nintendo and are not covered by anything here. None of it is in this repository: the game's code is translated from your own disc when you build, and nothing built from it may be shared.
 
 ## Design targets (short version)
 
