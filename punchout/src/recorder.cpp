@@ -59,8 +59,15 @@ float as_float(uint32_t v) { return std::bit_cast<float>(v); }
 uint16_t be16(const uint8_t* p) { return uint16_t((p[0] << 8) | p[1]); }
 uint32_t be32(const uint8_t* p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; }
 
+// Forced inline: one per vertex attribute (MSVC spells it differently).
+#if defined(_MSC_VER) && !defined(__clang__)
+#define QILIN_RECORDER_INLINE __forceinline
+#else
+#define QILIN_RECORDER_INLINE [[gnu::always_inline]] inline
+#endif
+
 unsigned component_size(unsigned fmt) { return fmt <= 1 ? 1 : fmt <= 3 ? 2 : 4; }
-[[gnu::always_inline]] inline float component(const uint8_t* p, unsigned fmt, float scale, bool scale_bytes) {
+QILIN_RECORDER_INLINE float component(const uint8_t* p, unsigned fmt, float scale, bool scale_bytes) {
     switch (fmt) {
         case 0: return scale_bytes ? p[0] * scale : p[0];
         case 1: return scale_bytes ? static_cast<int8_t>(p[0]) * scale : static_cast<int8_t>(p[0]);
@@ -69,7 +76,7 @@ unsigned component_size(unsigned fmt) { return fmt <= 1 ? 1 : fmt <= 3 ? 2 : 4; 
         default: return as_float(be32(p));
     }
 }
-[[gnu::always_inline]] inline float normal_component(const uint8_t* p, unsigned fmt) {
+QILIN_RECORDER_INLINE float normal_component(const uint8_t* p, unsigned fmt) {
     switch (fmt) {  // fixed scales: the fraction is the type's
         case 0: return p[0] / 128.0f;
         case 1: return static_cast<int8_t>(p[0]) / 64.0f;
@@ -395,8 +402,10 @@ size_t decode_vertex(const Registers& r, const Format& f, const Plan& pl, const 
             case Step::kColor: read_color(fetch(st.how, 2 + st.slot, st.cs), st.fmt, col[st.slot]); break;
             case Step::kUv: {
                 const uint8_t* d = fetch(st.how, 4 + st.slot, st.cs * st.n);
-                if (!kFull && st.slot >= kSmallUvs) [[unlikely]]
-                    rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
+                if constexpr (!kFull) {
+                    if (st.slot >= kSmallUvs) [[unlikely]]
+                        rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
+                }
                 if (st.fmt == 4) {  // float
                     for (unsigned k = 0; k < st.n; ++k) v.uv[st.slot][k] = as_float(be32(d + 4 * k));
                 } else {
@@ -545,8 +554,10 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
                 each(2u + st.slot, st.cs, [&](uint32_t i, const uint8_t* d) { read_color(d, st.fmt, st.slot ? out[i].color1 : out[i].color0); });
                 break;
             case Step::kUv: {
-                if (!kFull && st.slot >= kSmallUvs) [[unlikely]]
-                    rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
+                if constexpr (!kFull) {
+                    if (st.slot >= kSmallUvs) [[unlikely]]
+                        rt::fatal(nullptr, "texture coordinate %u in the compact vertex layout", unsigned(st.slot));
+                }
                 const uint32_t bytes = st.cs * st.n;
                 const unsigned a = 4u + st.slot, slot = st.slot;
                 const float scale = st.scale;
