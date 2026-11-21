@@ -432,7 +432,7 @@ void Menu::controls_page() {
         note_.clear();
     }
     ImGui::TextDisabled("The pointer follows the mouse and the right stick. An input on one button moves there from another.");
-    ImGui::TextDisabled("F1 or Esc (controller: Back + Start): this menu. F11 or Alt+Enter: full screen.");
+    ImGui::TextDisabled("F1 or Esc (controller: Back + Start): this menu. F3: frame times. F11 or Alt+Enter: full screen.");
 }
 
 void Menu::display_page() {
