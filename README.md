@@ -1,6 +1,6 @@
-# PunchOutWii-QilinRecomp
+# PunchOutWii--QilinRecomp
 
-A static recompilation of **Punch-Out!!** (Next Level Games / Nintendo, Wii, 2009) into portable C++23 with a Vulkan 1.3 renderer, aimed at 64-bit Windows, Linux and macOS, on x86-64 or ARM64. Anything with a Vulkan 1.3 driver is in scope, including the Raspberry Pi 4 (Mesa 24.3+); every 64-bit Mac with a Metal GPU that runs macOS 10.15 (Catalina) or later, Intel or Apple Silicon, is covered through MoltenVK. Efficiency is the first priority: a Raspberry Pi 4–class board is our reference for typical low-end hardware, not a floor. The requirements and scope are the same as [GBTGhoulies-QilinRecomp](https://github.com/Qilin1066/GBTGhoulies-QilinRecomp)'s, applied to the Wii as in [BeatTheBeat-QilinRecomp](https://github.com/Qilin1066/BeatTheBeat-QilinRecomp), whose recompiler core this project started from.
+A static recompilation of **Punch-Out!!** (Next Level Games / Nintendo, Wii, 2009) into portable C++23 with a Vulkan 1.3 renderer, aimed at 64-bit Windows, Linux and macOS, on x86-64 or ARM64. Anything with a Vulkan 1.3 driver is in scope, including the Raspberry Pi 4 (Mesa 24.3+); every 64-bit Mac with a Metal GPU that runs macOS 10.15 (Catalina) or later, Intel or Apple Silicon, is covered through MoltenVK. Efficiency is the first priority: a Raspberry Pi 4–class board is our reference for typical low-end hardware, not a floor. The requirements and scope are the same as [GBTGhoulies--QilinRecomp](https://github.com/Qilin1066/GBTGhoulies--QilinRecomp)'s, applied to the Wii as in [RhythmHeavenFever--QilinRecomp](https://github.com/Qilin1066/RhythmHeavenFever--QilinRecomp), whose recompiler core this project started from.
 
 > **No game data is included, and none ever will be.** You need your own copy of the game: the Europe/Australia release, disc `R7PP01`, **revision 1**. The tools read `main.dol` and the disc files from a path you give them. `.gitignore` keeps game files, and anything generated from them, out of the repo.
 
@@ -11,7 +11,7 @@ Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime
 | Piece | State |
 |---|---|
 | DOL loader (sections, BSS, entry point, flat image; the PAL Rev 1 build recognised by SHA-256) | ✅ |
-| Broadway decoder (all 222 instructions of the 750CL with the paired singles; reserved bits and invalid forms rejected) | ✅ 0 unexplained disagreements with GNU binutils over all 799,200 words of the game's code (and ~38 million swept words in BeatTheBeat-QilinRecomp) |
+| Broadway decoder (all 222 instructions of the 750CL with the paired singles; reserved bits and invalid forms rejected) | ✅ 0 unexplained disagreements with GNU binutils over all 799,200 words of the game's code (and ~38 million swept words in RhythmHeavenFever--QilinRecomp) |
 | Function discovery + CFG (tail calls, vtables and callbacks, CodeWarrior jump tables including strength-reduced and loop-invariant ones, register save/restore chains) | ✅ 13,487 functions, all 187 jump tables proven; every word of the code accounted for (`qilin coverage`: 99.58% code, the rest padding, dead code and 101 identified words of data and debugger stub, none of it lifted) |
 | CI: Linux x64 (GCC 14, Clang 19), Linux ARM64, macOS ARM64 and x64, Windows x64, warnings as errors, plus the decoder sweep | ✅ |
 | What's linked in: Revolution SDK `0x4199_60831`, MSL, MetroTRK, HOME Button Menu, Audiokinetic Wwise, Next Level Games' engine | ✅ from their strings (`docs/dol-analysis.md`) |
@@ -46,7 +46,7 @@ ctest --test-dir build --output-on-failure
 
 ## Playing
 
-**On Windows, the download (nothing to install).** Each release has `PunchOutWii-QilinRecomp-<version>-windows-x64.zip` (about 80 MB; GitHub builds it, `.github/workflows/player-kit.yml`), as the APB recomp has. Unpack it and double-click **`Play Punch-Out.bat`**: the first time it asks for your extracted disc folder and builds the game from it (a few minutes: 3 on an 8-core PC), with the compiler inside the download (LLVM-MinGW: Clang, free and open source); after that it starts the game at once. The download has everything but the game's own code, prebuilt: the recompiler, the runtime, the renderer, SDL3, the menu. The code made from the disc is made on the player's PC, from their own copy, and never distributed. See `tools/player-kit/` (`package.sh` builds the download on Linux; `play.ps1` is what Play runs).
+**On Windows, the download (nothing to install).** Each release has `PunchOutWii--QilinRecomp-<version>-windows-x64.zip` (about 80 MB; GitHub builds it, `.github/workflows/player-kit.yml`), as the APB recomp has. Unpack it and double-click **`Play Punch-Out.bat`**: the first time it asks for your extracted disc folder and builds the game from it (a few minutes: 3 on an 8-core PC), with the compiler inside the download (LLVM-MinGW: Clang, free and open source); after that it starts the game at once. The download has everything but the game's own code, prebuilt: the recompiler, the runtime, the renderer, SDL3, the menu. The code made from the disc is made on the player's PC, from their own copy, and never distributed. See `tools/player-kit/` (`package.sh` builds the download on Linux; `play.ps1` is what Play runs).
 
 **On Windows, from the source, double-click.** With Visual Studio 2022 (17.10 or newer, the free Community edition, with "Desktop development with C++") and Git installed, in the project's folder:
 
@@ -70,7 +70,7 @@ It checks for CMake, a compiler (GCC 14+ or Clang 19+) and, on Debian, Ubuntu an
 ```sh
 sudo apt install git cmake g++-14 libx11-dev libxext-dev libwayland-dev libxkbcommon-dev libegl-dev \
                  libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
-git clone https://github.com/Qilin1066/PunchOutWii-QilinRecomp && cd PunchOutWii-QilinRecomp
+git clone https://github.com/Qilin1066/PunchOutWii--QilinRecomp && cd PunchOutWii--QilinRecomp
 ./punchout.sh --disc "<extracted disc>"
 ```
 
@@ -176,7 +176,7 @@ The game itself is Nintendo's and is not covered by anything here: you need your
 
 ## Licence
 
-PunchOutWii-QilinRecomp is free software under the **GNU General Public License, version 3** (`LICENSE`): you may use, share, change and sell it, but anything you distribute that is built from it, changed or not, must come with its full source under the same licence. The libraries it uses keep their own licences (all compatible): SDL3 (zlib), Dear ImGui, volk and Vulkan-Headers (MIT / Apache-2.0), and the Rhythm Heaven Fever symbols in `third_party/rhf` (CC0). The Windows download carries each under `LICENSES/`.
+PunchOutWii--QilinRecomp is free software under the **GNU General Public License, version 3** (`LICENSE`): you may use, share, change and sell it, but anything you distribute that is built from it, changed or not, must come with its full source under the same licence. The libraries it uses keep their own licences (all compatible): SDL3 (zlib), Dear ImGui, volk and Vulkan-Headers (MIT / Apache-2.0), and the Rhythm Heaven Fever symbols in `third_party/rhf` (CC0). The Windows download carries each under `LICENSES/`.
 
 Punch-Out!! itself, its code and data, belong to Nintendo, and none of it is here: the game's code is translated from your own disc when you build. Bring your own copy.
 

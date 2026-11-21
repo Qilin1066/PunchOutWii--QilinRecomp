@@ -2,7 +2,7 @@ name: Windows download
 
 # Builds the Windows download (tools/player-kit): on every push, as an
 # artifact to check; on a version tag (vX.Y.Z), attached to that tag's GitHub
-# Release as PunchOutWii-QilinRecomp-X.Y.Z-windows-x64.zip. No game data is used or
+# Release as PunchOutWii--QilinRecomp-X.Y.Z-windows-x64.zip. No game data is used or
 # included: players lift their own main.dol with the bundled tools.
 on:
   push:
@@ -49,18 +49,18 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then version="${GITHUB_REF_NAME#v}"; else version="$(git describe --tags --always)"; fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          tools/player-kit/package.sh "$version" "$PWD/PunchOutWii-QilinRecomp-$version-windows-x64.zip"
+          tools/player-kit/package.sh "$version" "$PWD/PunchOutWii--QilinRecomp-$version-windows-x64.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: PunchOutWii-QilinRecomp-${{ env.VERSION }}-windows-x64
-          path: PunchOutWii-QilinRecomp-${{ env.VERSION }}-windows-x64.zip
+          name: PunchOutWii--QilinRecomp-${{ env.VERSION }}-windows-x64
+          path: PunchOutWii--QilinRecomp-${{ env.VERSION }}-windows-x64.zip
           retention-days: 14
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          zip="PunchOutWii-QilinRecomp-$VERSION-windows-x64.zip"
+          zip="PunchOutWii--QilinRecomp-$VERSION-windows-x64.zip"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$zip" --clobber
           else

@@ -27,7 +27,7 @@ segments, one library each:
 Between two labelled functions of different libraries, the boundary goes
 where the unlabelled functions' calls agree best (each prefers the side its
 callers and callees are on). Code before the first label is the game and its
-engine. `.init` is split by the decomp's names, as in BeatTheBeat-QilinRecomp.
+engine. `.init` is split by the decomp's names, as in RhythmHeavenFever--QilinRecomp.
 
 Usage:
   identify_libraries.py --qilin build/qilin --dol main.dol [--names-out pal_names.txt]
@@ -57,7 +57,7 @@ GAME = "game and Next Level Games' engine"
 NEAR = 0x4000  # callers this close are the same client module
 WWISE = "Audiokinetic Wwise"
 
-# What each library is, and what happens to it (the boundary BeatTheBeat-QilinRecomp fixed, with
+# What each library is, and what happens to it (the boundary RhythmHeavenFever--QilinRecomp fixed, with
 # the libraries this game adds). lift: recompiled with the game; replace: native at its API;
 # drop: never runs.
 PLAN = {
