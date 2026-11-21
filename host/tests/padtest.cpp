@@ -3,6 +3,7 @@
 // is, and one connected later. Each press must show in Display::buttons().
 // Needs a window: skips (exit 77) where there's no display or no Vulkan 1.3.
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 
 #include <cstdio>
 #include <cstring>
@@ -44,6 +45,13 @@ int main() {
         std::printf("padtest: no display here (%s): skipped\n", SDL_GetError());
         return 77;
     }
+    // The window is Vulkan: skip where there's no Vulkan loader (a macOS
+    // runner without MoltenVK), as vktest does, rather than fail to open it.
+    if (!SDL_Vulkan_LoadLibrary(nullptr)) {
+        std::printf("padtest: no Vulkan here (%s): skipped\n", SDL_GetError());
+        return 77;
+    }
+    SDL_Vulkan_UnloadLibrary();
     const SDL_JoystickID first = attach_pad("Virtual Xbox controller");
     if (!first) {
         std::printf("padtest: SDL has no virtual joysticks here: skipped\n");

@@ -23,9 +23,11 @@
 #if defined(_MSC_VER) && !defined(__clang__)
 #define QILIN_INLINE __forceinline
 #define QILIN_OUTLINE __declspec(noinline) inline
+#define QILIN_COLD_OUTLINE __declspec(noinline) inline  // MSVC has no "cold"
 #else
 #define QILIN_INLINE [[gnu::always_inline]] inline
 #define QILIN_OUTLINE [[gnu::noinline]] inline
+#define QILIN_COLD_OUTLINE [[gnu::noinline, gnu::cold]] inline
 #endif
 
 namespace qilin::rt {
@@ -336,7 +338,7 @@ inline uint32_t compare(double a, double b) {
 // signalling NaNs kept), not the host's float/double conversions.
 // A single's denormal, normalised into the double (rare: kept out of line so
 // load_single inlines into the lifted code).
-[[gnu::noinline, gnu::cold]] inline double load_single_denormal(uint32_t x) {
+QILIN_COLD_OUTLINE double load_single_denormal(uint32_t x) {
     const uint64_t v = x;
     uint64_t exp = 1023 - 126, frac = v & 0x7FFFFF;
     do {
