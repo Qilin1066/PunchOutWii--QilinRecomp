@@ -38,9 +38,10 @@ printf '%s\n' "$version" > "$pkg/kit/VERSION"
 
 # Every licence of what's included, by component.
 lic="$pkg/LICENSES"
-mkdir -p "$lic/llvm-mingw" "$lic/ninja" "$lic/SDL3" "$lic/Dear ImGui" "$lic/Vulkan-Headers" "$lic/volk"
+mkdir -p "$lic/PunchOutWii-QilinRecomp" "$lic/llvm-mingw" "$lic/ninja" "$lic/SDL3" "$lic/Dear ImGui" "$lic/Vulkan-Headers" "$lic/volk"
 mv "$pkg/kit/toolchain/licenses/"* "$lic/llvm-mingw/"
 rmdir "$pkg/kit/toolchain/licenses"
+sed 's/$/\r/' "$root/LICENSE" > "$lic/PunchOutWii-QilinRecomp/LICENSE.txt"  # GPL-3.0
 cp "$NINJA_WINDOWS/COPYING" "$lic/ninja/"
 cp "$build/_deps/sdl3-src/LICENSE.txt" "$lic/SDL3/"
 imgui=$(sed -n 's/^FETCHCONTENT_SOURCE_DIR_IMGUI:PATH=//p' "$build/CMakeCache.txt")

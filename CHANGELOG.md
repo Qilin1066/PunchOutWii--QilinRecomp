@@ -11,6 +11,7 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 ### Added
+- **Licence: GPL-3.0** (`LICENSE`; the README's Licence section). The project had none before, which left every right reserved. The Windows download has it in `LICENSES/`.
 - **Project licence: MIT** (`LICENSE`), as in the other QilinRecomp projects. The README's new Licence section lists what keeps its own licence (the CC0 symbol list and the fetched libraries) and that the game is Nintendo's.
 - **The Controls page's line of shortcut keys mentions F3 (frame times)**, as in Beat the Beat, Grabbed by the Ghoulies and APB.
 - **Quit is at the top of the F1 menu**, beside Close, on every page (it was at the bottom of the Game page). Quitting, closing the window, the game leaving and a reset now all save the pipeline cache and the pipelines met since its last save first (they were lost if the program ended within 20 s of meeting them, so the same stutter came back next time).

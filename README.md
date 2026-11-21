@@ -174,6 +174,12 @@ This project's own code and documentation are under the [MIT licence](LICENSE), 
 
 The game itself is Nintendo's and is not covered by anything here: you need your own copy, and nothing built from it may be shared.
 
+## Licence
+
+PunchOutWii-QilinRecomp is free software under the **GNU General Public License, version 3** (`LICENSE`): you may use, share, change and sell it, but anything you distribute that is built from it, changed or not, must come with its full source under the same licence. The libraries it uses keep their own licences (all compatible): SDL3 (zlib), Dear ImGui, volk and Vulkan-Headers (MIT / Apache-2.0), and the Rhythm Heaven Fever symbols in `third_party/rhf` (CC0). The Windows download carries each under `LICENSES/`.
+
+Punch-Out!! itself, its code and data, belong to Nintendo, and none of it is here: the game's code is translated from your own disc when you build. Bring your own copy.
+
 ## Design targets (short version)
 
 - **Efficiency and reliability come first.** Every choice is judged by whether it makes the game cheaper to run on low-end hardware, and whether it fails loudly instead of misbehaving quietly.
