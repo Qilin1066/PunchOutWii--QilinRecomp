@@ -47,6 +47,7 @@
 #include "recorder.hpp"
 #include "qilin/host/audio.hpp"
 #include "qilin/host/display.hpp"
+#include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_video.h>
 #include "threads.hpp"
@@ -260,7 +261,7 @@ static void report_timing(qilin::host::Display* display, punchout::Menu* menu, q
         sound_now = a.average_ms;
         sound_sum += a.average_ms * a.pushes, sound_pushes += a.pushes;
         sound.max_ms = std::max(sound.max_ms, a.max_ms);
-        sound.empty += a.empty, sound.dropped += a.dropped, sound.ratio = a.ratio;
+        sound.empty += a.empty, sound.dropped += a.dropped, sound.dropped_ms += a.dropped_ms, sound.ratio = a.ratio;
     }
     if (menu && menu->frame_times_shown()) {
         char a[96], b[96];
@@ -280,8 +281,8 @@ static void report_timing(qilin::host::Display* display, punchout::Menu* menu, q
         g_vbl.slack_sum = 0, g_vbl.slack_count = 0, g_vbl.late = 0;
     }
     if (audio && sound_pushes) {
-        rt::log("  sound: %.1f ms queued on average, %.1f at most, played at %.4fx; ran dry %u times, dropped %u times",
-                sound_sum / double(sound_pushes), sound.max_ms, sound.ratio, sound.empty, sound.dropped);
+        rt::log("  sound: %.1f ms queued on average (aiming for %.0f), %.1f at most, played at %.4fx; ran dry %u times, dropped %.0f ms in %u times",
+                sound_sum / double(sound_pushes), audio->target_ms(), sound.max_ms, sound.ratio, sound.empty, sound.dropped_ms, sound.dropped);
         sound = {}, sound_sum = 0, sound_pushes = 0;
     }
 }
@@ -454,6 +455,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<qilin::host::AudioOut> audio;
     // (PUNCHOUT_AUDIO=1: sound without a window too, to test its queue; SDL_AUDIO_DRIVER=dummy plays to nowhere.)
     if ((!headless && !offscreen) || std::getenv("PUNCHOUT_AUDIO")) {
+        // (With no window nothing reads SDL's events, so SDL mustn't turn Ctrl+C or a kill into one.)
+        if (headless) SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
         audio = std::make_unique<qilin::host::AudioOut>();
         punchout::set_audio_sink([](const int16_t* lr, size_t frames, unsigned rate, void* out) {
             static_cast<qilin::host::AudioOut*>(out)->push(lr, frames, rate);
