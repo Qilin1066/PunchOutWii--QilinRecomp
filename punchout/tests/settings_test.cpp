@@ -20,7 +20,7 @@ void check(bool ok, const char* what) {
 bool same(const punchout::Settings& a, const punchout::Settings& b) {
     if (a.scale != b.scale || a.preset != b.preset || a.fullscreen != b.fullscreen || a.monitor != b.monitor ||
         a.scaling != b.scaling || a.smooth != b.smooth || a.look != b.look || a.scanlines != b.scanlines || a.mask != b.mask ||
-        a.anisotropy != b.anisotropy || a.vsync != b.vsync || a.gpu != b.gpu || a.rumble != b.rumble ||
+        a.anisotropy != b.anisotropy || a.true_color != b.true_color || a.vsync != b.vsync || a.gpu != b.gpu || a.rumble != b.rumble ||
         a.language != b.language || a.widescreen != b.widescreen || a.sound != b.sound)
         return false;
     for (unsigned c = 0; c < punchout::kControlCount; ++c) {
@@ -113,6 +113,12 @@ int main() {
         check(!punchout::parse_settings("[display]\npreset = huge\n", s, e) && e.find("presets are") != std::string::npos,
               "an unknown preset");
         check(error_of("[display]\nanisotropy = 3\n").find("1, 2, 4, 8 or 16") != std::string::npos, "anisotropy is a power of two");
+        punchout::Settings o, l, t;
+        std::string eo;
+        check(punchout::parse_settings("[display]\npreset = original\n", o, eo) && !o.true_color &&
+                  punchout::parse_settings("[display]\npreset = low-end\n", l, eo) && l.true_color &&
+                  punchout::parse_settings("[display]\npreset = original\ntrue_color = true\n", t, eo) && t.true_color && s.true_color,
+              "true colour: off in the original preset alone, and a key of its own");
     }
     {
         punchout::Settings s = d;

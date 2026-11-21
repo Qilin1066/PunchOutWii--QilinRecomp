@@ -69,9 +69,147 @@ bool in_slice(const Insn& in, std::string* why) {
 
 namespace {
 
+// ---- single mode (cpu.hpp, "single mode"): a function whose floating point
+// is all single precision keeps its FPR halves as floats. Halves are bits of
+// a mask: ps0 of FPR n is bit n, ps1 bit 32 + n.
+constexpr uint64_t F0(unsigned n) { return uint64_t{1} << n; }
+constexpr uint64_t P1(unsigned n) { return uint64_t{1} << (32 + n); }
+constexpr uint64_t FP(unsigned n) { return F0(n) | P1(n); }
+
+bool uses_fpr(Op op) {
+    for (ppc::Opnd o : ppc::spec(op).operands)
+        if (o == ppc::Opnd::fD || o == ppc::Opnd::fA || o == ppc::Opnd::fB || o == ppc::Opnd::fC) return true;
+    return false;
+}
+
+// The halves a single-mode instruction reads and writes. False for a
+// floating-point instruction single mode doesn't have (double arithmetic,
+// lfd and stfd, the conversions to integers, frsqrte: their values aren't
+// single-precision ones).
+bool single_effect(const Insn& in, uint64_t& use, uint64_t& def) {
+    const unsigned d = in.rd(), a = in.ra(), b = in.rb(), c = in.rc_reg();
+    use = def = 0;
+    switch (in.op) {
+    case Op::fadds: case Op::fsubs: case Op::fdivs: use = F0(a) | F0(b), def = FP(d); return true;
+    case Op::fmuls: use = F0(a) | F0(c), def = FP(d); return true;
+    case Op::fmadds: case Op::fmsubs: case Op::fnmadds: case Op::fnmsubs: use = F0(a) | F0(b) | F0(c), def = FP(d); return true;
+    case Op::frsp: case Op::fres: use = F0(b), def = FP(d); return true;
+    case Op::fmr: case Op::fneg: case Op::fabs: case Op::fnabs: use = F0(b), def = F0(d); return true;  // ps1 stays
+    case Op::fsel: use = F0(a) | F0(b) | F0(c), def = F0(d); return true;
+    case Op::fcmpu: case Op::fcmpo: case Op::ps_cmpu0: case Op::ps_cmpo0: use = F0(a) | F0(b); return true;
+    case Op::ps_cmpu1: case Op::ps_cmpo1: use = P1(a) | P1(b); return true;
+    case Op::lfs: case Op::lfsx: case Op::lfsu: case Op::lfsux: def = FP(d); return true;
+    case Op::stfs: case Op::stfsx: case Op::stfsu: case Op::stfsux: use = F0(d); return true;
+    case Op::psq_l: case Op::psq_lu: case Op::psq_lx: case Op::psq_lux: def = FP(d); return true;
+    case Op::psq_st: case Op::psq_stu: use = in.psq_w() ? F0(d) : FP(d); return true;
+    case Op::psq_stx: case Op::psq_stux: use = in.psqx_w() ? F0(d) : FP(d); return true;
+    case Op::ps_add: case Op::ps_sub: case Op::ps_div: use = FP(a) | FP(b), def = FP(d); return true;
+    case Op::ps_mul: use = FP(a) | FP(c), def = FP(d); return true;
+    case Op::ps_muls0: use = FP(a) | F0(c), def = FP(d); return true;
+    case Op::ps_muls1: use = FP(a) | P1(c), def = FP(d); return true;
+    case Op::ps_madd: case Op::ps_msub: case Op::ps_nmadd: case Op::ps_nmsub: case Op::ps_sel:
+        use = FP(a) | FP(b) | FP(c), def = FP(d);
+        return true;
+    case Op::ps_madds0: use = FP(a) | FP(b) | F0(c), def = FP(d); return true;
+    case Op::ps_madds1: use = FP(a) | FP(b) | P1(c), def = FP(d); return true;
+    case Op::ps_sum0: use = F0(a) | P1(b) | P1(c), def = FP(d); return true;
+    case Op::ps_sum1: use = F0(a) | P1(b) | F0(c), def = FP(d); return true;
+    case Op::ps_merge00: use = F0(a) | F0(b), def = FP(d); return true;
+    case Op::ps_merge01: use = F0(a) | P1(b), def = FP(d); return true;
+    case Op::ps_merge10: use = P1(a) | F0(b), def = FP(d); return true;
+    case Op::ps_merge11: use = P1(a) | P1(b), def = FP(d); return true;
+    case Op::ps_mr: case Op::ps_neg: case Op::ps_abs: case Op::ps_nabs: case Op::ps_res: case Op::ps_rsqrte:
+        use = FP(b), def = FP(d);
+        return true;
+    default: return false;
+    }
+}
+
+// What single mode needs to know of a function: whether it can be lifted so,
+// the halves it reads before writing them (they must hold single-precision
+// values on entry, or the double version runs instead), and before each
+// instruction the halves it has written on every path there and on some path
+// (what to write back on the ways out: a half only read keeps its register).
+struct SingleInfo {
+    bool ok = false;
+    uint64_t live_in = 0, flags = 0;   // flags: halves written on some paths only, somewhere
+    std::vector<uint64_t> must, may;   // per instruction
+};
+
+SingleInfo analyse_single(const LiftInput& f) {
+    SingleInfo info;
+    const size_t n = f.insns.size();
+    if (n == 0 || f.insns[0].first != f.start) return info;
+    std::map<uint32_t, size_t> index;
+    for (size_t k = 0; k < n; ++k) index[f.insns[k].first] = k;
+    std::map<uint32_t, const JumpTable*> tables;
+    for (const JumpTable& t : f.jtabs) tables[t.at] = &t;
+    std::vector<uint64_t> use(n), def(n);
+    std::vector<std::vector<size_t>> succ(n), pred(n);
+    bool any = false;
+    for (size_t k = 0; k < n; ++k) {
+        const auto& [a, in] = f.insns[k];
+        if (uses_fpr(in.op) || in.op == Op::ps_cmpu0 || in.op == Op::ps_cmpo0 || in.op == Op::ps_cmpu1 || in.op == Op::ps_cmpo1) {
+            if (!single_effect(in, use[k], def[k])) return info;
+            any = true;
+        }
+        const bool branch = in.op == Op::b || in.op == Op::bc || in.op == Op::bclr || in.op == Op::bcctr;
+        // A call comes back with every register the callee's: no single mode.
+        if (branch && in.lk() && !(in.op == Op::b && f.not_calls.contains(a)) && !(in.op == Op::bc && in.branch_target(a) == a + 4))
+            return info;
+        bool next = !Cfg::is_terminator(in);
+        if ((in.op == Op::b || in.op == Op::bc) && !in.lk()) {
+            if (const auto it = index.find(in.branch_target(a)); it != index.end()) succ[k].push_back(it->second);
+        }
+        if (const auto it = tables.find(a); it != tables.end()) {
+            for (uint32_t t : it->second->targets)
+                if (const auto ti = index.find(t); ti != index.end()) succ[k].push_back(ti->second);
+            next = false;
+        }
+        if (next && k + 1 < n && f.insns[k + 1].first == a + 4) succ[k].push_back(k + 1);
+    }
+    if (!any) return info;
+    for (size_t k = 0; k < n; ++k)
+        for (size_t t : succ[k]) pred[t].push_back(k);
+    // Read before written on some path from the entry: liveness, backwards to a fixed point.
+    std::vector<uint64_t> live(n, 0);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (size_t k = n; k-- > 0;) {
+            uint64_t out = 0;
+            for (size_t t : succ[k]) out |= live[t];
+            const uint64_t in = use[k] | (out & ~def[k]);
+            if (in != live[k]) live[k] = in, changed = true;
+        }
+    }
+    info.live_in = live[0];
+    // Written by the function on every path to an instruction (a "must"
+    // analysis: start from everything and narrow), and on some path: forwards
+    // to a fixed point. An instruction nothing here leads to (there should be
+    // none) assumes the least: nothing surely written, anything possibly.
+    uint64_t all_defs = 0;
+    for (size_t k = 0; k < n; ++k) all_defs |= def[k];
+    info.must.assign(n, ~uint64_t{0});
+    info.may.assign(n, 0);
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (size_t k = 0; k < n; ++k) {
+            uint64_t must = k == 0 || pred[k].empty() ? 0 : ~uint64_t{0};
+            uint64_t may = k != 0 && pred[k].empty() ? all_defs : 0;
+            for (size_t p : pred[k]) must &= info.must[p] | def[p], may |= info.may[p] | def[p];
+            if (must != info.must[k] || may != info.may[k]) info.must[k] = must, info.may[k] = may, changed = true;
+        }
+    }
+    for (size_t k = 0; k < n; ++k) info.flags |= info.may[k] & ~info.must[k];
+    info.ok = true;
+    return info;
+}
+
 class Emitter {
 public:
-    explicit Emitter(const LiftInput& f) : f_(f) {
+    // With `single`, the function in single mode (the caller has checked it can be).
+    explicit Emitter(const LiftInput& f, const SingleInfo* single = nullptr, std::string name = {})
+        : f_(f), single_(single), name_(name.empty() ? fn_name(f.start) : std::move(name)) {
         for (const auto& [a, in] : f.insns) present_.insert(a);
         for (const JumpTable& t : f.jtabs) tables_[t.at] = &t;
     }
@@ -98,6 +236,7 @@ public:
         std::string body;
         for (size_t k = 0; k < f_.insns.size(); ++k) {
             const auto& [a, in] = f_.insns[k];
+            cur_ = k;
             if (labels_.contains(a)) body += std::format("L_{:08X}:\n", a);
             std::string line;
             if (!insn(a, in, line)) {
@@ -120,7 +259,7 @@ public:
                 }
             }
         }
-        out.code = std::format("void {}(Cpu& c) {{\n{}{}}}\n", fn_name(f_.start), prologue(), body);
+        out.code = std::format("{}void {}(Cpu& c) {{\n{}{}}}\n", name_ == fn_name(f_.start) ? "" : "static ", name_, prologue(), body);
         out.ok = true;
         return out;
     }
@@ -158,8 +297,24 @@ private:
         std::string p;
         for (unsigned n : gprs_) p += std::format("    uint32_t r{0} = c.r[{0}];\n", n);
         for (unsigned n : crs_) p += std::format("    uint32_t cr{0} = (c.cr >> {1}) & 15u;\n", n, 28 - 4 * n);
-        for (unsigned n : fprs_) p += std::format("    double f{0} = c.ps0[{0}];\n", n);
-        for (unsigned n : ps1s_) p += std::format("    double p{0} = c.ps1[{0}];\n", n);
+        if (single_) {
+            // Floats, written back only where written (the ways out say which); the halves read
+            // first come from the registers, which must hold single-precision values for that.
+            for (unsigned n : fprs_) p += std::format("    float f{0} = 0.0f;\n", n);
+            for (unsigned n : ps1s_) p += std::format("    float p{0} = 0.0f;\n", n);
+            for (unsigned h = 0; h < 64; ++h)
+                if (single_->flags & (uint64_t{1} << h)) p += std::format("    bool w{} = false;\n", half(h));
+            if (single_->live_in) {
+                std::string all;
+                for (unsigned h = 0; h < 64; ++h)
+                    if (single_->live_in & (uint64_t{1} << h))
+                        all += std::format("{}fp::to_f_exact(c.ps{}[{}], {})", all.empty() ? "" : " & ", h < 32 ? 0 : 1, h & 31, half(h));
+                p += std::format("    if (!({})) [[unlikely]] {{ {}_d(c); return; }}\n", all, name_);
+            }
+        } else {
+            for (unsigned n : fprs_) p += std::format("    double f{0} = c.ps0[{0}];\n", n);
+            for (unsigned n : ps1s_) p += std::format("    double p{0} = c.ps1[{0}];\n", n);
+        }
         if (specials_.contains("lr")) p += "    uint32_t lr = c.lr;\n";
         if (specials_.contains("ctr")) p += "    uint32_t ctr = c.ctr;\n";
         if (specials_.contains("so")) p += "    uint32_t so = c.xer_so;\n";
@@ -170,7 +325,28 @@ private:
     // Written back before anything outside the function can see the state
     // (calls, returns, traps); read again after a call. The text is a
     // placeholder until the function's uses are known.
-    std::string sync_out() { return "@OUT@"; }
+    std::string sync_out() {
+        if (!single_) return "@OUT@";
+        // Single mode: the halves written on every path here go back as doubles, those written on
+        // some paths if this run wrote them, the rest are the registers' own still.
+        std::string s = "@OUT@ ";
+        for (unsigned h = 0; h < 64; ++h) {
+            const uint64_t bit = uint64_t{1} << h;
+            if (!(single_->may[cur_] & bit)) continue;
+            (h < 32 ? fprs_ : ps1s_).insert(h & 31);
+            const std::string store = std::format("c.ps{}[{}] = fp::to_d({}); ", h < 32 ? 0 : 1, h & 31, half(h));
+            s += (single_->must[cur_] & bit) ? store : std::format("if (w{}) {}", half(h), store);
+        }
+        return s;
+    }
+    static std::string half(unsigned h) { return std::format("{}{}", h < 32 ? 'f' : 'p', h & 31); }
+    // Single mode: after writing these halves, their "written" flags (those that have one).
+    std::string wrote(uint64_t halves) const {
+        std::string s;
+        for (unsigned h = 0; h < 64; ++h)
+            if (halves & single_->flags & (uint64_t{1} << h)) s += std::format(" w{} = true;", half(h));
+        return s;
+    }
     std::string sync_in() { return "@IN@"; }
 
 public:
@@ -181,10 +357,12 @@ public:
             in_s += std::format("r{0} = c.r[{0}]; ", n);
         }
         for (unsigned n : fprs_) {
+            if (single_) break;  // (single mode writes its halves back at each way out: sync_out)
             out_s += std::format("c.ps0[{0}] = f{0}; ", n);
             in_s += std::format("f{0} = c.ps0[{0}]; ", n);
         }
         for (unsigned n : ps1s_) {
+            if (single_) break;
             out_s += std::format("c.ps1[{0}] = p{0}; ", n);
             in_s += std::format("p{0} = c.ps1[{0}]; ", n);
         }
@@ -260,14 +438,110 @@ private:
 
     // A paired result: each half computed from the old values, then both written.
     bool pair(std::string& out, unsigned d, const std::string& v0, const std::string& v1) {
-        out = std::format("    {{ const double t0 = {}; const double t1 = {}; {} = t0; {} = t1; }}\n", v0, v1, F(d), P(d));
+        if (single_)
+            out = std::format("    {{ const float t0 = {}; const float t1 = {}; {} = t0; {} = t1;{} }}\n", v0, v1, F(d), P(d), wrote(FP(d)));
+        else
+            out = std::format("    {{ const double t0 = {}; const double t1 = {}; {} = t0; {} = t1; }}\n", v0, v1, F(d), P(d));
         return true;
     }
 
     // A single-precision result: both halves of the FPR (Broadway with paired singles on).
     bool fill(std::string& out, unsigned d, const std::string& value) {
-        out = std::format("    {{ const double t = {}; {} = t; {} = t; }}\n", value, F(d), P(d));
+        if (single_)
+            out = std::format("    {{ const float t = {}; {} = t; {} = t;{} }}\n", value, F(d), P(d), wrote(FP(d)));
+        else
+            out = std::format("    {{ const double t = {}; {} = t; {} = t; }}\n", value, F(d), P(d));
         return true;
+    }
+
+    // Single mode's floating point (cpu.hpp's fp::..._s). False: not one of its instructions.
+    bool single_insn(const Insn& in, std::string& out) {
+        const unsigned d = in.rd(), a = in.ra(), b = in.rb(), cr = in.rc_reg();
+        auto line = [&](std::string s) { out = "    " + s + "\n"; };
+        auto ea_d = [&]() { return a ? R(a) + plus(in.simm()) : std::format("{}u", static_cast<uint32_t>(in.simm())); };
+        auto ea_x = [&]() { return std::format("{} + {}", RA0(a), R(b)); };
+        auto op2 = [](const char* f, const std::string& x, const std::string& y) { return std::format("fp::{}({}, {})", f, x, y); };
+        auto one = [&](unsigned dst, const std::string& v) { line(std::format("{} = {};{}", F(dst), v, wrote(F0(dst)))); return true; };
+        auto madd = [&](const std::string& x, const std::string& cv, const std::string& y, bool sub, bool neg) {
+            const std::string v = std::format("fp::madd_s({}, {}, {}, {})", x, cv, y, sub);
+            return neg ? "fp::neg_unless_nan_s(" + v + ")" : v;
+        };
+        switch (in.op) {
+        case Op::fadds: return fill(out, d, op2("add_s", F(a), F(b)));
+        case Op::fsubs: return fill(out, d, op2("sub_s", F(a), F(b)));
+        case Op::fmuls: return fill(out, d, op2("mul_s", F(a), F(cr)));
+        case Op::fdivs: return fill(out, d, op2("div_s", F(a), F(b)));
+        case Op::fmadds: case Op::fmsubs: case Op::fnmadds: case Op::fnmsubs:
+            return fill(out, d, madd(F(a), F(cr), F(b), in.op == Op::fmsubs || in.op == Op::fnmsubs, in.op == Op::fnmadds || in.op == Op::fnmsubs));
+        case Op::frsp: return fill(out, d, std::format("fp::single_s({})", F(b)));
+        case Op::fres: return fill(out, d, std::format("fp::res_s({})", F(b)));
+        case Op::fmr: return one(d, F(b));
+        case Op::fneg: return one(d, std::format("fp::neg_s({})", F(b)));
+        case Op::fabs: return one(d, std::format("fp::abs_s({})", F(b)));
+        case Op::fnabs: return one(d, std::format("fp::nabs_s({})", F(b)));
+        case Op::fsel: return one(d, std::format("{} >= -0.0f ? {} : {}", F(a), F(cr), F(b)));
+        case Op::fcmpu: case Op::fcmpo: case Op::ps_cmpu0: case Op::ps_cmpo0:
+            line(std::format("{} = fp::compare_s({}, {});", CR(in.crfd()), F(a), F(b)));
+            return true;
+        case Op::ps_cmpu1: case Op::ps_cmpo1: line(std::format("{} = fp::compare_s({}, {});", CR(in.crfd()), P(a), P(b))); return true;
+        case Op::lfs: return fill(out, d, std::format("fp::ffrom(read32(c, {}))", ea_d()));
+        case Op::lfsx: return fill(out, d, std::format("fp::ffrom(read32(c, {}))", ea_x()));
+        case Op::lfsu: case Op::lfsux: {
+            const std::string ea = in.op == Op::lfsux ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
+            line(std::format("{{ const uint32_t ea = {}; const float t = fp::ffrom(read32(c, ea)); {} = t; {} = t; {} = ea;{} }}", ea, F(d), P(d), R(a),
+                             wrote(FP(d))));
+            return true;
+        }
+        case Op::stfs: line(std::format("write32(c, {}, fp::fbits({}));", ea_d(), F(d))); return true;
+        case Op::stfsx: line(std::format("write32(c, {}, fp::fbits({}));", ea_x(), F(d))); return true;
+        case Op::stfsu: case Op::stfsux: {
+            const std::string ea = in.op == Op::stfsux ? std::format("{} + {}", R(a), R(b)) : R(a) + plus(in.simm());
+            line(std::format("{{ const uint32_t ea = {}; write32(c, ea, fp::fbits({})); {} = ea; }}", ea, F(d), R(a)));
+            return true;
+        }
+        case Op::psq_l: case Op::psq_lu: case Op::psq_lx: case Op::psq_lux:
+        case Op::psq_st: case Op::psq_stu: case Op::psq_stx: case Op::psq_stux: {
+            const bool x = in.op == Op::psq_lx || in.op == Op::psq_lux || in.op == Op::psq_stx || in.op == Op::psq_stux;
+            const bool u = in.op == Op::psq_lu || in.op == Op::psq_lux || in.op == Op::psq_stu || in.op == Op::psq_stux;
+            const bool load = in.op == Op::psq_l || in.op == Op::psq_lu || in.op == Op::psq_lx || in.op == Op::psq_lux;
+            const unsigned i = x ? in.psqx_i() : in.psq_i(), w = x ? in.psqx_w() : in.psq_w();
+            const std::string base = u ? R(a) : RA0(a);
+            const std::string ea = x ? (base == "0u" ? R(b) : std::format("{} + {}", base, R(b)))
+                                     : (base == "0u" ? std::format("{}u", static_cast<uint32_t>(in.psq_d())) : base + plus(in.psq_d()));
+            std::string s = std::format("{{ const uint32_t ea = {}; ", ea);
+            s += load ? std::format("psq_load_s(c, ea, {}, {}, {}, {});{}", i, w != 0, F(d), P(d), wrote(FP(d)))
+                      : std::format("psq_store_s(c, ea, {}, {}, {}, {});", i, w != 0, F(d), w ? std::string("0.0f") : P(d));
+            if (u) s += std::format(" {} = ea;", R(a));
+            line(s + " }");
+            return true;
+        }
+        case Op::ps_add: return pair(out, d, op2("add_s", F(a), F(b)), op2("add_s", P(a), P(b)));
+        case Op::ps_sub: return pair(out, d, op2("sub_s", F(a), F(b)), op2("sub_s", P(a), P(b)));
+        case Op::ps_div: return pair(out, d, op2("div_s", F(a), F(b)), op2("div_s", P(a), P(b)));
+        case Op::ps_mul: return pair(out, d, op2("mul_s", F(a), F(cr)), op2("mul_s", P(a), P(cr)));
+        case Op::ps_muls0: return pair(out, d, op2("mul_s", F(a), F(cr)), op2("mul_s", P(a), F(cr)));
+        case Op::ps_muls1: return pair(out, d, op2("mul_s", F(a), P(cr)), op2("mul_s", P(a), P(cr)));
+        case Op::ps_madd: case Op::ps_msub: case Op::ps_nmadd: case Op::ps_nmsub: case Op::ps_madds0: case Op::ps_madds1: {
+            const bool sub = in.op == Op::ps_msub || in.op == Op::ps_nmsub, neg = in.op == Op::ps_nmadd || in.op == Op::ps_nmsub;
+            const std::string c0 = in.op == Op::ps_madds1 ? P(cr) : F(cr), c1 = in.op == Op::ps_madds0 ? F(cr) : P(cr);
+            return pair(out, d, madd(F(a), c0, F(b), sub, neg), madd(P(a), c1, P(b), sub, neg));
+        }
+        case Op::ps_sum0: return pair(out, d, op2("add_s", F(a), P(b)), std::format("fp::single_s({})", P(cr)));
+        case Op::ps_sum1: return pair(out, d, std::format("fp::single_s({})", F(cr)), op2("add_s", F(a), P(b)));
+        case Op::ps_merge00: return pair(out, d, F(a), F(b));
+        case Op::ps_merge01: return pair(out, d, F(a), P(b));
+        case Op::ps_merge10: return pair(out, d, P(a), F(b));
+        case Op::ps_merge11: return pair(out, d, P(a), P(b));
+        case Op::ps_mr: return pair(out, d, F(b), P(b));
+        case Op::ps_neg: return pair(out, d, std::format("fp::neg_s({})", F(b)), std::format("fp::neg_s({})", P(b)));
+        case Op::ps_abs: return pair(out, d, std::format("fp::abs_s({})", F(b)), std::format("fp::abs_s({})", P(b)));
+        case Op::ps_nabs: return pair(out, d, std::format("fp::nabs_s({})", F(b)), std::format("fp::nabs_s({})", P(b)));
+        case Op::ps_sel:
+            return pair(out, d, std::format("{} >= -0.0f ? {} : {}", F(a), F(cr), F(b)), std::format("{} >= -0.0f ? {} : {}", P(a), P(cr), P(b)));
+        case Op::ps_res: return pair(out, d, std::format("fp::res_s({})", F(b)), std::format("fp::res_s({})", P(b)));
+        case Op::ps_rsqrte: return pair(out, d, std::format("fp::rsqrte_s({})", F(b)), std::format("fp::rsqrte_s({})", P(b)));
+        default: return false;
+        }
     }
 
     std::string trap(uint32_t pc, const char* why) {
@@ -275,6 +549,7 @@ private:
     }
 
     bool insn(uint32_t pc, const Insn& in, std::string& out) {
+        if (single_ && single_insn(in, out)) return true;
         const unsigned d = in.rd(), a = in.ra(), b = in.rb();
         const bool record_form = (ppc::spec(in.op).flags & ppc::kRc) && in.rc();
         auto line = [&](std::string s) { out = "    " + s + "\n"; };
@@ -694,6 +969,9 @@ private:
     }
 
     const LiftInput& f_;
+    const SingleInfo* single_;  // single mode, with its analysis; else null
+    std::string name_;
+    size_t cur_ = 0;  // the instruction being emitted (an index into f_.insns)
     std::set<uint32_t> present_, labels_, callees_;
     std::map<uint32_t, const JumpTable*> tables_;
     std::set<unsigned> gprs_, crs_, fprs_, ps1s_;
@@ -706,8 +984,24 @@ private:
 Lifted lift(const LiftInput& f) {
     Emitter e(f);
     Lifted out = e.run();
-    if (out.ok) out.code = e.expand(out.code);
-    return out;
+    if (!out.ok) return out;
+    out.code = e.expand(out.code);
+    // Single mode, where the function's floating point allows it (and nothing in it waits for
+    // interrupts: that reads the registers back). With halves read before they're written, the
+    // double version stays, for when they don't hold single-precision values.
+    const SingleInfo info = analyse_single(f);
+    if (!info.ok) return out;
+    Emitter s(f, &info);
+    Lifted single = s.run();
+    if (!single.ok || single.code.contains("@IN@")) return out;
+    single.code = s.expand(single.code);
+    if (info.live_in) {
+        Emitter d(f, nullptr, fn_name(f.start) + "_d");
+        Lifted twin = d.run();
+        if (!twin.ok) return out;
+        single.code = d.expand(twin.code) + single.code;
+    }
+    return single;
 }
 
 LiftInput lift_input(const Cfg& cfg, const Function& f) {

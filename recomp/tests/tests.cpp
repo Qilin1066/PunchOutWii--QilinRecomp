@@ -2,6 +2,8 @@
 // Broadway decoder, and function discovery on a synthetic program. No game files required (runs in CI).
 #include <limits>
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <print>
 #include <string>
@@ -683,6 +685,150 @@ void test_fp() {
     CHECK(fp::compare(1.0, d(fp::kDefaultNan)) == 1 && fp::compare(1.0, 2.0) == 8 && fp::compare(-0.0, 0.0) == 2);
 }
 
+// Single mode (cpu.hpp): each float operation against the double helpers it
+// stands for, on operands chosen to reach every way through: random bit
+// patterns (NaNs, infinities, denormals), ordinary numbers of like size (the
+// host's arithmetic, with every rounding case), numbers at the bottom of the
+// single range (NI mode's zeros) and sums built to sit exactly halfway
+// between two singles (where rounding twice would go wrong).
+void test_fp_single_mode() {
+    namespace fp = ::qilin::rt::fp;
+    uint64_t state = 0x9E3779B97F4A7C15ull;
+    auto rnd = [&]() {  // xorshift64*
+        state ^= state >> 12, state ^= state << 25, state ^= state >> 27;
+        return static_cast<uint32_t>((state * 0x2545F4914F6CDD1Dull) >> 32);
+    };
+    auto operand = [&]() -> float {
+        static const uint32_t special[] = {0, 0x80000000u, 0x3F800000u, 0xBF800000u, 0x7F800000u, 0xFF800000u, 0x7FC00000u, 0xFFC00001u,
+                                           0x7F800001u, 0xFFBFFFFFu, 1, 0x807FFFFFu, 0x00800000u, 0x80800000u, 0x00800001u, 0x7F7FFFFFu,
+                                           0xFF7FFFFFu, 0x00FFFFFFu, 0x3F7FFFFFu, 0x3F800001u, 0x33800000u, 0x4B800000u};
+        const uint32_t r = rnd();
+        switch (r % 8) {
+        case 0: return fp::ffrom(special[rnd() % std::size(special)]);
+        case 1: return fp::ffrom(rnd());                                                            // any bits
+        case 2: return fp::ffrom((rnd() & 0x807FFFFFu) | ((rnd() % 4) << 23));                       // the bottom: denormals to 2^-124
+        case 3: return fp::ffrom((rnd() & 0x807FFFFFu) | ((60 + rnd() % 10) << 23));                 // squares land at the bottom
+        case 4: return fp::ffrom((rnd() & 0x80000000u) | ((120 + rnd() % 16) << 23) | (rnd() & 0x7FF000u));  // short mantissas: exact sums and ties
+        default: return fp::ffrom((rnd() & 0x807FFFFFu) | ((117 + rnd() % 20) << 23));               // ordinary: 2^-10 to 2^9
+        }
+    };
+    auto same = [](float got, double want) { return fp::fbits(got) == fp::store_single(want) && fp::bits(fp::to_d(got)) == fp::bits(want); };
+    unsigned bad = 0, fast_double = 0, ties = 0, exact_ties = 0, rounded_ties = 0, hair_decided = 0;
+    [[maybe_unused]] unsigned fast_fused = 0;
+    for (unsigned n = 0; n < 3000000; ++n) {
+        float a = operand(), b = operand();
+        const float c = operand();
+        const bool sub = rnd() & 1;
+        if (n % 5 == 0) {
+            // b such that a*c + b is exactly halfway between two singles, or a hair off it: the
+            // product's low part, cancelled or not, around a single plus half its last place.
+            const double prod = static_cast<double>(a) * static_cast<double>(c);
+            const float near = static_cast<float>(prod);
+            if (std::isfinite(near) && near != 0.0f && fp::ordinary(near)) {
+                b = fp::ffrom(fp::fbits(near) ^ 0x80000000u ^ (rnd() % 3));  // close to -prod: the sum is the product's own low bits
+                if (sub) b = -b;
+                ++ties;
+            }
+        }
+        if (n % 5 == 1) {
+            // b plus half of its last place, exactly (a true tie: a weight of 1) or less a hair
+            // too small for a double to keep: then the sum rounds to the same double, and only
+            // the lost hair says the single below is the nearer.
+            const uint32_t e = 100 + rnd() % 40, j = rnd() % 4;  // j = 0: exact
+            const float one = fp::ffrom(0x3F800000u + j);          // 1 + j last places
+            const float half = fp::ffrom((rnd() & 0x80000000u) | (j ? ((e - 25) << 23) | (0x800000u - 2 * j) : (e - 24) << 23));
+            const float base = fp::ffrom((rnd() & 0x80000000u) | (e << 23) | (rnd() & 0x7FFFFFu));
+            const double want = fp::single(fp::madd_single(fp::to_d(one), fp::to_d(half), fp::to_d(base), sub));
+            bad += !same(fp::madd_s(one, half, base, sub), want);
+            bool f2;
+            const float by2 = fp::madd_by_double(one, half, base, sub, f2);
+            const double sum = static_cast<double>(one) * static_cast<double>(half) + static_cast<double>(sub ? -base : base);
+            if ((fp::bits(sum) & 0x1FFFFFFFull) == 0x10000000ull) {
+                if (f2) bad += !same(by2, want) || j != 0, ++exact_ties;
+                else bad += j == 0, ++rounded_ties;
+                // The hair matters: the plain rounding of the double is wrong for about half of them.
+                if (!f2 && !same(by2, want)) ++hair_decided;
+            }
+        }
+        const double da = fp::to_d(a), db = fp::to_d(b), dc = fp::to_d(c);
+        // Every float is the single-precision image of its double, both ways.
+        float back;
+        bad += !(fp::to_f_exact(da, back) && fp::fbits(back) == fp::fbits(a));
+        bad += !same(fp::add_s(a, b), fp::single(fp::add(da, db)));
+        bad += !same(fp::sub_s(a, b), fp::single(fp::sub(da, db)));
+        bad += !same(fp::mul_s(a, c), fp::single(fp::mul(da, fp::round25(dc))));
+        bad += !same(fp::div_s(a, b), fp::single(fp::div(da, db)));
+        const double madd = fp::single(fp::madd_single(da, dc, db, sub));
+        bad += !same(fp::madd_s(a, c, b, sub), madd);
+        bad += !same(fp::neg_unless_nan_s(fp::madd_s(a, c, b, sub)), fp::neg_unless_nan(madd));
+        bool fast;
+        const float by_double = fp::madd_by_double(a, c, b, sub, fast);
+        if (fast) bad += !same(by_double, madd), ++fast_double;
+#if defined(QILIN_FUSED_FLOAT)
+        const float fused = fp::madd_fused(a, c, b, sub, fast);
+        if (fast) bad += !same(fused, madd), ++fast_fused;
+#endif
+        bad += !same(fp::single_s(a), fp::single(da));
+        bad += !same(fp::res_s(a), fp::estimate_reciprocal(da));
+        bad += !same(fp::rsqrte_s(a), fp::single(fp::estimate_rsqrt(da)));
+        bad += !same(fp::neg_s(a), fp::from_bits(fp::bits(da) ^ fp::kSign));
+        bad += !same(fp::abs_s(a), fp::from_bits(fp::bits(da) & ~fp::kSign));
+        bad += !same(fp::nabs_s(a), fp::from_bits(fp::bits(da) | fp::kSign));
+        bad += fp::compare_s(a, b) != fp::compare(da, db);
+        bad += (a >= -0.0f) != (da >= -0.0);
+        bad += qilin::rt::psq_bits_s(a) != fp::store_single_ftz(da);
+        bad += fp::fbits(a) != fp::store_single(da);
+    }
+    CHECK(bad == 0);
+    CHECK(fast_double > 1500000 && ties > 300000);  // the fast way is the usual one, and the halfway cases were made
+    // Sums that are halfway and exact go the fast way; the ones a rounding put there don't, and
+    // of those the lost hair changed the answer for many.
+    CHECK(exact_ties > 50000 && rounded_ties > 100000 && hair_decided > 20000);
+#if defined(QILIN_FUSED_FLOAT)
+    CHECK(fast_fused > 1500000);
+#endif
+    // A double that isn't a single-precision value isn't taken for one.
+    float f;
+    CHECK(!fp::to_f_exact(0.1, f) && !fp::to_f_exact(fp::from_bits(1), f) && !fp::to_f_exact(1e300, f));
+    CHECK(fp::to_f_exact(0.5, f) && f == 0.5f && fp::to_f_exact(-0.0, f) && fp::fbits(f) == 0x80000000u);
+    CHECK(fp::to_f_exact(fp::from_bits(0x7FF0000020000000ull), f) && fp::fbits(f) == 0x7F800001u);  // a signalling NaN a single can hold
+
+    // The lifter: single mode where a function's floating point is all single precision.
+    auto fn = [](std::initializer_list<uint32_t> words) {
+        LiftInput in;
+        in.start = 0x80003000;
+        uint32_t a = in.start;
+        for (uint32_t w : words) in.insns.emplace_back(a, ppc::decode(w)), a += 4;
+        return lift(in);
+    };
+    // lfs f1,0(r3); lfs f2,4(r3); fmuls f1,f1,f2; stfs f1,8(r3); blr: nothing read first, one version, floats.
+    const Lifted leaf = fn({0xC0230000u, 0xC0430004u, 0xEC2100B2u, 0xD0230008u, 0x4E800020u});
+    CHECK(leaf.ok && leaf.code.contains("float f1 = 0.0f;") && leaf.code.contains("fp::mul_s(f1, f2)") && !leaf.code.contains("_d(c)"));
+    CHECK(leaf.code.contains("c.ps0[1] = fp::to_d(f1); c.ps0[2] = fp::to_d(f2);") && leaf.code.contains("c.ps1[2] = fp::to_d(p2);"));
+    // fadds f1,f1,f2; blr: f1 and f2 are read first, so the double version stays behind a check.
+    const Lifted args = fn({0xEC21102Au, 0x4E800020u});
+    CHECK(args.ok && args.code.contains("static void fn_80003000_d(Cpu& c)") && args.code.contains("fp::single(fp::add(f1, f2))"));
+    CHECK(args.code.contains("if (!(fp::to_f_exact(c.ps0[1], f1) & fp::to_f_exact(c.ps0[2], f2))) [[unlikely]] { fn_80003000_d(c); return; }"));
+    CHECK(args.code.contains("fp::add_s(f1, f2)") && !args.code.contains("c.ps0[2] = fp::to_d(f2)"));  // f2 is only read: left alone
+    // cmpwi r3,0; beqlr; lfs f1,0(r4); blr: the early way out writes nothing back, the other f1.
+    const Lifted early = fn({0x2C030000u, 0x4D820020u, 0xC0240000u, 0x4E800020u});
+    CHECK(early.ok && !early.code.contains("bool w") && early.code.contains("c.ps0[1] = fp::to_d(f1); c.ps1[1] = fp::to_d(p1);"));
+    // cmpwi r3,0; beq +8; lfs f1,0(r4); blr: one way out, f1 written on one path to it: a flag says which.
+    const Lifted maybe = fn({0x2C030000u, 0x41820008u, 0xC0240000u, 0x4E800020u});
+    CHECK(maybe.ok && maybe.code.contains("bool wf1 = false;") && maybe.code.contains("wf1 = true; wp1 = true;"));
+    CHECK(maybe.code.contains("if (wf1) c.ps0[1] = fp::to_d(f1); if (wp1) c.ps1[1] = fp::to_d(p1);"));
+    // fadd f1,f1,f2 (double arithmetic); blr: no single mode.
+    const Lifted dbl = fn({0xFC21102Au, 0x4E800020u});
+    CHECK(dbl.ok && dbl.code.contains("double f1 = c.ps0[1];") && !dbl.code.contains("float"));
+    // lfs f1,0(r3); bl elsewhere; blr: a call, no single mode.
+    LiftInput call;
+    call.start = 0x80003000;
+    call.insns = {{0x80003000, ppc::decode(0xC0230000u)}, {0x80003004, ppc::decode(0x48000101u)}, {0x80003008, ppc::decode(0x4E800020u)}};
+    call.is_function = [](uint32_t) { return true; };
+    const Lifted with_call = lift(call);
+    CHECK(with_call.ok && !with_call.code.contains("float"));
+}
+
 void test_cfg_switches() {
     using P = Program;
     const uint32_t blr = 0x4E800020, mtctr_r0 = 0x7C0903A6, bctr = 0x4E800420;
@@ -829,6 +975,7 @@ int main() {
     test_cfg_switches();
     test_lift();
     test_fp();
+    test_fp_single_mode();
     test_poll_loops();
     if (failures) {
         std::println(stderr, "{} check(s) failed", failures);

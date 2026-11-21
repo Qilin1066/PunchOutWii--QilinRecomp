@@ -27,7 +27,8 @@ layout(push_constant) uniform Push {
     uint state;
     uint has;    // gx::Has
     uint flags;  // 1: constant alpha can't be written (the blend reads source alpha);
-                 // bits 4-5: a logic op's help (1 output 0, 2 output 1, 3 invert the output)
+                 // bits 4-5: a logic op's help (1 output 0, 2 output 1, 3 invert the output);
+                 // 0x100: true colour (eight bits a channel in an EFB with alpha, no dither)
     float scale; // EFB pixels to target pixels
     float point_size;  // points: in target pixels
 } pc;

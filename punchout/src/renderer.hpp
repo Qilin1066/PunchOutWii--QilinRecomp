@@ -26,6 +26,9 @@ public:
     // Anisotropic filtering for the game's textures: 1 (the console's), 2, 4,
     // 8 or 16, up to what the GPU allows. Waits for the GPU.
     void set_anisotropy(unsigned level);
+    // True colour: an EFB with alpha (six bits a channel on the console, dithered) keeps all
+    // eight bits, with no dither. Off, the console's own colour depth. From the next frame.
+    void set_true_color(bool on);
     // Write the pipeline cache and the keys met since the last save, now (the
     // program is about to end without its destructors).
     void save_now();

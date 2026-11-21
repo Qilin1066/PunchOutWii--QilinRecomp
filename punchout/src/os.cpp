@@ -447,7 +447,7 @@ struct IdleTimer {
     }
 };
 }  // namespace
-void idle_sleep(uint64_t ns, bool on_time) {
+static void idle_sleep_for(uint64_t ns, bool on_time) {
     using clock = std::chrono::steady_clock;
     const auto end = clock::now() + std::chrono::nanoseconds(ns);
     if (g_idle_woken.exchange(false, std::memory_order_acq_rel)) return;
@@ -483,7 +483,7 @@ std::atomic<bool> g_idle_woken{false};  // written under g_idle_lock; read witho
 // How early an OS sleep may end up late: within ~100 us.
 constexpr auto kSleepSlack = std::chrono::microseconds(250);
 }  // namespace
-void idle_sleep(uint64_t ns, bool on_time) {
+static void idle_sleep_for(uint64_t ns, bool on_time) {
     using clock = std::chrono::steady_clock;
     const auto end = clock::now() + std::chrono::nanoseconds(ns);
     {
@@ -513,6 +513,17 @@ void wake_idle() {
     g_idle_cv.notify_all();
 }
 #endif
+
+namespace {
+std::atomic<uint64_t> g_idle_ns{0};
+}
+void idle_sleep(uint64_t ns, bool on_time) {
+    const auto t0 = std::chrono::steady_clock::now();
+    idle_sleep_for(ns, on_time);
+    g_idle_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
+                        std::memory_order_relaxed);
+}
+uint64_t idle_time_ns() { return g_idle_ns.load(std::memory_order_relaxed); }
 
 uint64_t next_timer_deadline() {
     uint64_t t = UINT64_MAX;

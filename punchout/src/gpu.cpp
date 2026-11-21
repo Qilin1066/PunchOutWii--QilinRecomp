@@ -27,7 +27,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <bit>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <string>
@@ -67,6 +69,7 @@ Stats g_stats;
 gx::Registers regs() { return {g_cpmem.data(), g_xf.data(), g_bp.data()}; }
 bool g_xfb_copied = false;  // set by the XFB copy just decoded (PUNCHOUT_DFF)
 bool g_dff_recording = false;  // PUNCHOUT_DFF is recording a frame
+std::atomic<uint32_t> g_gp_fifo_base{0}, g_gp_fifo_end{0};  // the CPU's FIFO while linked to the GPU (for PUNCHOUT_DFF)
 uint32_t g_primitive_serial = 0;  // every primitive decoded
 uint32_t g_dl_address = 0;        // the display list being decoded (physical), or 0
 size_t g_dl_call_at = 0;          // PUNCHOUT_DFF: where in the commands the call to it is
@@ -120,7 +123,9 @@ struct PeEvent {
 std::vector<PeEvent> g_pe_events;  // the GPU thread adds, the guest's timer polls them
 std::mutex g_pe_lock;
 
+void hand_over();
 void poll_pe() {
+    hand_over();  // what the guest has written reaches the GPU before the guest can wait on it
     const uint64_t now = time_base();
     std::lock_guard l(g_pe_lock);
     for (size_t i = 0; i < g_pe_events.size();) {
@@ -179,6 +184,9 @@ void on_bp(Cpu& c, uint32_t reg, uint32_t value) {
     }
     gx::bp_written(reg, g_bp[reg], g_bp[reg] != before);
     switch (reg) {
+    case 0x43:                                                      // the EFB's pixel format
+        if ((before & 7) != (g_bp[reg] & 7)) gx::record_pixel_format(before & 7, g_bp[reg] & 7);
+        break;
     case 0x45: pe_finish(); break;                                  // draw done
     case 0x47: pe_token(static_cast<uint16_t>(value), false); break;  // token
     case 0x48: pe_token(static_cast<uint16_t>(value), true); break;   // token with interrupt
@@ -293,8 +301,20 @@ DffCapture* g_dff = [] () -> DffCapture* {
 
 }  // namespace
 
-int bench_recording(const char* dff_path, unsigned times) {
-    std::vector<uint8_t> file;
+namespace {
+// A FIFO log's frame, loaded: its memory and registers put in place, its commands returned
+// with where the BP and CP registers are (they're set again before each replay).
+struct LoadedDff {
+    std::vector<uint8_t> file, commands;
+    uint64_t bp_at = 0, cp_at = 0;
+    uint32_t u32(uint64_t at) const { uint32_t v = 0; if (at + 4 <= file.size()) std::memcpy(&v, file.data() + at, 4); return v; }
+    void registers() const {
+        for (int b = 0; b < 256; ++b) g_bp[size_t(b)] = u32(bp_at + 4ull * b), g_cpmem[size_t(b)] = u32(cp_at + 4ull * b);
+    }
+};
+LoadedDff load_dff(const char* dff_path) {
+    LoadedDff out;
+    std::vector<uint8_t>& file = out.file;
     if (FILE* f = std::fopen(dff_path, "rb")) {
         uint8_t buf[1 << 16];
         for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) file.insert(file.end(), buf, buf + n);
@@ -302,18 +322,19 @@ int bench_recording(const char* dff_path, unsigned times) {
     }
     const auto u32 = [&](uint64_t at) { uint32_t v = 0; if (at + 4 <= file.size()) std::memcpy(&v, file.data() + at, 4); return v; };
     const auto u64 = [&](uint64_t at) { uint64_t v = 0; if (at + 8 <= file.size()) std::memcpy(&v, file.data() + at, 8); return v; };
-    if (file.size() < 128 || u32(0) != 0x0d01f1f0u) rt::fatal(nullptr, "--bench-record: %s isn't a FIFO log", dff_path);
+    if (file.size() < 128 || u32(0) != 0x0d01f1f0u) rt::fatal(nullptr, "%s isn't a FIFO log", dff_path);
     const uint64_t bp_at = u64(12), cp_at = u64(24), xfm_at = u64(36), xfr_at = u64(48), frame_at = u64(60);
+    out.bp_at = bp_at, out.cp_at = cp_at;
     const uint64_t fifo_at = u64(frame_at), upd_at = u64(frame_at + 20);
     const uint32_t fifo_size = u32(frame_at + 8), updates = u32(frame_at + 28);
-    if (fifo_at + fifo_size > file.size()) rt::fatal(nullptr, "--bench-record: %s is cut short", dff_path);
+    if (fifo_at + fifo_size > file.size()) rt::fatal(nullptr, "%s is cut short", dff_path);
     // The memory as the frame starts, then the later updates (their order in
     // the frame doesn't matter for timing).
     for (uint32_t i = 0; i < updates; ++i) {
         const uint64_t e = upd_at + 24ull * i;
         const uint32_t address = u32(e + 4), size = u32(e + 16);
         const uint64_t data = u64(e + 8);
-        if (data + size > file.size()) rt::fatal(nullptr, "--bench-record: %s is cut short", dff_path);
+        if (data + size > file.size()) rt::fatal(nullptr, "%s is cut short", dff_path);
         const bool mem1 = address < 0x01800000u && address + size <= 0x01800000u;
         const bool mem2 = address >= 0x10000000u && address + size <= 0x14000000u;
         if (mem1 || mem2) std::memcpy(rt::guest_ptr(0x80000000u | address), file.data() + data, size);
@@ -321,7 +342,63 @@ int bench_recording(const char* dff_path, unsigned times) {
     for (int i = 0; i < 256; ++i) g_bp[size_t(i)] = u32(bp_at + 4ull * i), g_cpmem[size_t(i)] = u32(cp_at + 4ull * i);
     for (int i = 0; i < 4096; ++i) g_xf[size_t(i)] = u32(xfm_at + 4ull * i);
     for (int i = 0; i < 88; ++i) g_xf[0x1000 + size_t(i)] = u32(xfr_at + 4ull * i);
-    const std::vector<uint8_t> commands(file.begin() + long(fifo_at), file.begin() + long(fifo_at + fifo_size));
+    out.commands.assign(file.begin() + long(fifo_at), file.begin() + long(fifo_at + fifo_size));
+    return out;
+}
+}  // namespace
+
+// --render-dff: the log's frame decoded and recorded `loops` times, each frame it makes given
+// to `draw` (the last loop's is the picture). It starts as Dolphin's FIFO player starts, so
+// that the two pictures compare loop for loop: an empty EFB (no colour, no alpha, the far
+// depth), then one clearing copy of the whole EFB under the log's own registers. The first
+// loop is then a frame drawn after nothing; from the second on, a loop begins with what the
+// one before left (the depth too, where the frame's last copy doesn't clear it), as the
+// game's frames do.
+void replay_dff(const char* dff_path, unsigned loops, const std::function<void(gx::Frame&)>& draw) {
+    const LoadedDff dff = load_dff(dff_path);
+    Cpu c = rt::new_cpu();
+    gx::set_rendering(true);
+    {
+        std::vector<uint8_t> start;
+        const auto bp = [&](uint32_t reg, uint32_t value) {
+            const uint32_t w = (reg << 24) | (value & 0xFFFFFF);
+            start.insert(start.end(), {0x61, uint8_t(w >> 24), uint8_t(w >> 16), uint8_t(w >> 8), uint8_t(w)});
+        };
+        const auto whole_efb_clear = [&] {
+            bp(0x49, 0), bp(0x4A, (527u << 10) | 639u), bp(0x4D, 0x140), bp(0x4B, 0);
+            bp(0x52, (12u << 3) | (1u << 11));  // to a texture (RGBA8, at address 0), clearing
+        };
+        dff.registers();
+        gx::state_changed();
+        bp(0x41, 0x18), bp(0x40, 0x1F);                    // colour, alpha and depth all written
+        bp(0x4F, 0), bp(0x50, 0), bp(0x51, 0xFFFFFF);      // with nothing, and the far depth
+        whole_efb_clear();
+        size_t used = 0;
+        decode(c, start.data(), start.size(), used, false);
+        start.clear();
+        dff.registers();
+        gx::state_changed();
+        whole_efb_clear();
+        used = 0;
+        decode(c, start.data(), start.size(), used, false);
+    }
+    for (unsigned i = 0; i < loops; ++i) {
+        dff.registers();
+        gx::state_changed();
+        size_t used = 0;
+        decode(c, dff.commands.data(), dff.commands.size(), used, false);
+        while (auto f = gx::next_frame(0)) {
+            draw(*f);
+            gx::recycle_frame(std::move(f));
+        }
+    }
+}
+
+int bench_recording(const char* dff_path, unsigned times) {
+    const LoadedDff dff = load_dff(dff_path);
+    const std::vector<uint8_t>& commands = dff.commands;
+    const auto u32 = [&](uint64_t at) { return dff.u32(at); };
+    const uint64_t bp_at = dff.bp_at, cp_at = dff.cp_at;
     Cpu c = rt::new_cpu();
     gx::set_rendering(true);  // frames are queued (and taken back below), as when drawing
     std::vector<double> ms;
@@ -372,8 +449,11 @@ void dff_write(const DffCapture& d) {
     u64le(tex_at), u32le(kTex), u32le(kMem1), u32le(kMem2);
     std::fwrite("R7PP01\0\0", 1, 8, f);
     u8s(0, 24);
-    // The FIFO the player streams the commands through: the game's own (PI's base and end).
-    const uint32_t fifo_base = g_pi[kPiFifoBase] & kFifoAddress, fifo_end = g_pi[kPiFifoEnd] & kFifoAddress;
+    // The FIFO the player streams the commands through: the game's own, as it was when a burst
+    // last went to the GPU. (Not the PI's registers as they are now: while the game builds a
+    // display list they point the pipe at the list's buffer, base 0, and a player given that
+    // has no FIFO to stream through; one capture in a few caught the game there.)
+    const uint32_t fifo_base = g_gp_fifo_base.load(std::memory_order_relaxed), fifo_end = g_gp_fifo_end.load(std::memory_order_relaxed);
     u64le(fifo_at), u32le(uint32_t(d.bytes.size())), u32le(fifo_base), u32le(fifo_end), u64le(upd_at),
         u32le(uint32_t(2 + d.updates.size())), u8s(0, 32);
     for (uint32_t v : d.bp) u32le(v);
@@ -419,6 +499,14 @@ void dff_after(const uint8_t* p, size_t n) {
         const auto* m2 = static_cast<const uint8_t*>(rt::guest_ptr(0x90000000u));
         d.mem1.assign(m1, m1 + 0x01800000u), d.mem2.assign(m2, m2 + 0x04000000u);
         d.seen1 = d.mem1, d.seen2 = d.mem2;
+        // The commands begin with the TEV colour registers and konstants, both kinds (BP memory
+        // holds one per address): a replay then has every one the frame's draws may read.
+        uint32_t tev[16];
+        gx::tev_register_writes(regs(), tev);
+        for (uint32_t w : tev) {
+            const uint8_t cmd[5] = {0x61, uint8_t(w >> 24), uint8_t(w >> 16), uint8_t(w >> 8), uint8_t(w)};
+            d.bytes.insert(d.bytes.end(), cmd, cmd + 5);
+        }
         d.state = 1;
         g_dff_recording = gx::g_dff_use = true;
         gx::g_dff_use_hook = dff_note_memory;
@@ -538,8 +626,12 @@ void decode(Cpu& c, const uint8_t* data, size_t size, size_t& used, bool in_disp
 // (GXFlush pads the pipe with 32 bytes of NOPs).
 uint8_t g_gather[32];
 unsigned g_gathered = 0;
+// Whole bursts on their way to the GPU thread (the guest's side: only one guest thread runs at a time).
+uint8_t g_outgoing[256];
+size_t g_outgoing_size = 0;
 
 void send_burst(Cpu& c);
+void hand_over();
 void consume(Cpu& c, const uint8_t* bytes, size_t n);
 
 // The GPU thread (v0.17.0): the guest's thread only queues the pipe's bursts;
@@ -560,6 +652,7 @@ const bool g_gpu_threaded = [] {
 constexpr size_t kMaxIncoming = 16u << 10;
 std::mutex g_gpu_lock;
 std::condition_variable g_gpu_cv;
+std::atomic<uint64_t> g_fifo_wait_ns{0};
 std::vector<uint8_t> g_incoming;  // bursts not yet decoded
 Cpu* g_guest_cpu = nullptr;       // for the decoder's error reports
 std::mutex g_stats_lock;
@@ -620,13 +713,32 @@ void send_burst(Cpu& c) {
     const uint32_t cp_write = g_pi[kPiFifoWrite] & kFifoAddress;
     g_cp[kCpWriteLo] = static_cast<uint16_t>(cp_write);
     g_cp[kCpWriteHi] = static_cast<uint16_t>(cp_write >> 16);
+    g_gp_fifo_base.store(base, std::memory_order_relaxed), g_gp_fifo_end.store(end & kFifoAddress, std::memory_order_relaxed);
     if (!g_gpu_threaded) return consume(c, g_gather, 32);
-    std::unique_lock l(g_gpu_lock);
+    // To the GPU thread, a few bursts at a time: a fight's frame is 13,000 of
+    // them, and each trip takes the queue's lock and may wake the thread.
     g_guest_cpu = &c;
+    std::memcpy(g_outgoing + g_outgoing_size, g_gather, 32);
+    if ((g_outgoing_size += 32) == sizeof g_outgoing) hand_over();
+}
+
+// The guest's bursts not yet in the GPU thread's queue go there now: when
+// the batch is full, and before the guest could wait for the GPU or read its
+// registers (every timer poll: poll_pe).
+void hand_over() {
+    if (g_outgoing_size == 0) return;
+    std::unique_lock l(g_gpu_lock);
     // A bounded queue, as the hardware's FIFO is: the CPU waits when it's full.
-    g_gpu_cv.wait(l, [] { return g_incoming.size() < kMaxIncoming; });
-    g_incoming.insert(g_incoming.end(), g_gather, g_gather + 32);
-    if (g_incoming.size() == 32) g_gpu_cv.notify_all();
+    if (g_incoming.size() >= kMaxIncoming) {  // (timed for the report: the guest held up by the GPU thread)
+        const auto t0 = std::chrono::steady_clock::now();
+        g_gpu_cv.wait(l, [] { return g_incoming.size() < kMaxIncoming; });
+        g_fifo_wait_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
+                                 std::memory_order_relaxed);
+    }
+    const bool was_empty = g_incoming.empty();
+    g_incoming.insert(g_incoming.end(), g_outgoing, g_outgoing + g_outgoing_size);
+    g_outgoing_size = 0;
+    if (was_empty) g_gpu_cv.notify_all();
 }
 
 // The GPU's side of the FIFO: decode what has arrived (the GPU thread, or the
@@ -664,6 +776,7 @@ void gpu_thread() {
 }
 
 uint32_t read_reg(Cpu& c, uint32_t a, unsigned size) {
+    hand_over();
     const uint32_t off = a & 0xFFFF;
     if (a >= 0xCC000000u && a < 0xCC000080u && size == 2) {  // command processor
         const unsigned i = (off & 0x7F) / 2;
@@ -749,6 +862,8 @@ void init_gpu() {
     add_timer_source(poll_pe, pe_deadline);
     if (g_gpu_threaded) std::thread(gpu_thread).detach();  // runs until the process exits
 }
+uint64_t fifo_wait_ns() { return g_fifo_wait_ns.load(std::memory_order_relaxed); }
+
 Stats gpu_stats() {
     std::lock_guard l(g_stats_lock);
     return g_gpu_threaded ? g_stats_seen : g_stats;

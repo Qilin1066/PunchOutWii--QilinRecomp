@@ -45,6 +45,8 @@ uint64_t next_timer_deadline();
 // Otherwise the end is only an upper bound and the OS's timer slack is fine.
 void idle_sleep(uint64_t ns, bool on_time = true);
 void wake_idle();
+// The time spent in idle_sleep so far (the guest with nothing to run), for the report: the rest is work.
+uint64_t idle_time_ns();
 
 // Called when the guest writes WPAR (PPCMtwpar), which resets the write-gather
 // pipe; the GPU (gpu.cpp) installs it.

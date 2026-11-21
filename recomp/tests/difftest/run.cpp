@@ -98,6 +98,24 @@ int main() {
         }
     };
 
+    // A single-precision value as an FPR holds it (lfs's conversion): edge cases, ordinary
+    // numbers of like size (the host's own arithmetic, in single mode), the bottom of the
+    // range (NI mode's zeros) and raw bit patterns.
+    auto svalue = [&]() -> uint64_t {
+        static const uint32_t special[] = {0, 0x80000000u, 0x3F800000u, 0xBF800000u, 0x7F800000u, 0xFF800000u, 0x7FC00000u, 0xFFC00001u,
+                                           0x7F800001u, 0xFFBFFFFFu, 1, 0x807FFFFFu, 0x00800000u, 0x80800000u, 0x00800001u, 0x7F7FFFFFu,
+                                           0xFF7FFFFFu, 0x3F7FFFFFu, 0x3F800001u, 0x4F000000u, 0xCF000000u};
+        uint32_t f;
+        switch (rng() % 8) {
+        case 0: f = special[rng() % std::size(special)]; break;
+        case 1: f = static_cast<uint32_t>(rng()); break;
+        case 2: f = (static_cast<uint32_t>(rng()) & 0x807FFFFFu) | ((rng() % 4) << 23); break;
+        case 3: f = (static_cast<uint32_t>(rng()) & 0x807FFFFFu) | ((60 + rng() % 10) << 23); break;
+        default: f = (static_cast<uint32_t>(rng()) & 0x807FFFFFu) | ((117 + rng() % 20) << 23); break;
+        }
+        return rt::fp::bits(rt::fp::load_single(f));
+    };
+
     unsigned failures = 0, runs = 0;
     for (unsigned k = 0; k < difftest::kCaseCount; ++k) {
         const Case& t = difftest::kCases[k];
@@ -128,10 +146,13 @@ int main() {
                 g = static_cast<uint32_t>(rng());
                 if (rng() % 16) g = (g & ~0x00070007u) | types[rng() % 5] | (types[rng() % 5] << 16);
             }
+            // Every other trial, every FPR half holds a single-precision value: the lifter's
+            // single mode (cpu.hpp) runs then, and is compared like the rest.
+            const bool singles = trial % 2 == 1;
             uint64_t f0[32], f1[32];
             for (unsigned n = 0; n < 32; ++n) {
-                f0[n] = fvalue();
-                f1[n] = fvalue();
+                f0[n] = singles ? svalue() : fvalue();
+                f1[n] = singles ? svalue() : fvalue();
                 c.ps0[n] = std::bit_cast<double>(f0[n]);
                 c.ps1[n] = std::bit_cast<double>(f1[n]);
             }

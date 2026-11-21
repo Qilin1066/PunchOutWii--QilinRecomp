@@ -488,7 +488,7 @@ size_t decode_columns(const Registers& r, const Format& f, const Plan& pl, const
     for (uint32_t i = 0; i < count; ++i) {
         V& v = out[i];
         std::memset(v.uv, 0, sizeof v.uv);
-        v.pos[2] = 0;
+        v.pos[0] = v.pos[1] = v.pos[2] = 0;  // (every byte of a vertex is written: the frame's vectors don't zero them)
         std::memcpy(v.normal, g_last_normal, 12);
         if constexpr (kFull) std::memcpy(v.tangent, g_last_tangent, 12), std::memcpy(v.binormal, g_last_binormal, 12);
         std::memset(v.color0, 255, 4), std::memset(v.color1, 255, 4);
@@ -1116,6 +1116,41 @@ void bp_written(uint32_t reg, uint32_t value, bool changed) {
         else dst[2] = s11(value), dst[1] = s11(value >> 12);                       // blue, green
     }
     g_dirty = true;
+}
+
+// The TEV colour registers and konstants as the BP writes that would set them
+// (register, then value with its type bit): one BP address holds either, so a
+// snapshot of BP memory keeps only the one written last. A frame capture
+// starts with these (gpu.cpp), the snapshot's own kind last.
+void tev_register_writes(const Registers& r, uint32_t out[16]) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < 4; ++i)
+        for (unsigned half = 0; half < 2; ++half) {
+            const uint32_t reg = 0xE0 + 2 * i + half;
+            const bool snapshot_konst = (r.bp[reg] >> 23) & 1;
+            for (int pass = 0; pass < 2; ++pass) {
+                const bool konst = pass == 0 ? !snapshot_konst : snapshot_konst;
+                const int32_t* v = konst ? g_konst[i] : g_tev_regs[i];
+                const uint32_t lo = uint32_t(half == 0 ? v[0] : v[2]) & 0x7FFu, hi = uint32_t(half == 0 ? v[3] : v[1]) & 0x7FFu;
+                out[n++] = (reg << 24) | (konst ? 0x800000u : 0u) | (hi << 12) | lo;
+            }
+        }
+}
+
+// RGB8 (0) and RGBA6 (1) are two readings of one pixel's 24 bits, and the renderer turns
+// its picture from one into the other. RGB565 (2, with 16-bit depth, the antialiased
+// modes' format) lays a pixel out differently again, in a way with no source to check
+// against: the picture is left as it is there, and said once.
+void record_pixel_format(uint32_t from, uint32_t to) {
+    if (from > 1 || to > 1) {
+        if ((from == 2 || to == 2) && from <= 2 && to <= 2) {
+            static bool said = false;
+            if (!said) rt::log("gx: the EFB's pixel format changes to or from RGB565 (%u to %u): what was drawn before is kept as it was (the console would reinterpret its bits)", from, to);
+            said = true;
+        }
+        return;
+    }
+    g_frame->packets.push_back({Packet::kConvert, from == 0 ? 0u : 1u});
 }
 
 void record_tlut_load(const Registers& r, uint32_t command) {

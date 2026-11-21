@@ -11,6 +11,8 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <new>
+#include <utility>
 #include <vector>
 
 namespace punchout::gx {
@@ -178,16 +180,39 @@ struct Texture {
     std::vector<uint8_t> rgba;  // RGBA8
 };
 
+// kConvert: the EFB's pixel format changed between RGB8 and RGBA6 (BP 0x43), and the
+// console's EFB keeps its bits: the same 24 a pixel are then read as the other format
+// (8,8,8 as 6,6,6,6 or back). A game that draws in one format on top of what it drew in
+// the other, without clearing in between, sees that. index: 0 RGB8 to RGBA6, 1 back.
 struct Packet {
-    enum Kind : uint8_t { kDraw, kCopy } kind;
+    enum Kind : uint8_t { kDraw, kCopy, kConvert } kind;
     uint32_t index;  // into draws or copies
+};
+
+// A vector's allocator that leaves new elements as they are instead of
+// zeroing them: a fight's frame holds 85,000 vertices (6.5 MB), each wholly
+// written by the decoder straight after resize() made room for it.
+template <class T>
+struct Unfilled : std::allocator<T> {
+    template <class U>
+    struct rebind {
+        using other = Unfilled<U>;
+    };
+    Unfilled() = default;
+    template <class U>
+    Unfilled(const Unfilled<U>&) {}
+    template <class U>
+    void construct(U* p) { ::new (static_cast<void*>(p)) U; }
+    template <class U, class A, class... More>
+    void construct(U* p, A&& a, More&&... more) { ::new (static_cast<void*>(p)) U(std::forward<A>(a), std::forward<More>(more)...); }
 };
 
 // One frame: everything from one XFB copy to the next.
 struct Frame {
-    std::vector<Vertex> vertices;
-    std::vector<SmallVertex> small;  // draws with PipelineKey::small_vertices index these
-    std::vector<uint32_t> indices;
+    // (The recorder writes every byte of each vertex and index it makes room for.)
+    std::vector<Vertex, Unfilled<Vertex>> vertices;
+    std::vector<SmallVertex, Unfilled<SmallVertex>> small;  // draws with PipelineKey::small_vertices index these
+    std::vector<uint32_t, Unfilled<uint32_t>> indices;
     std::vector<State> states;
     std::vector<Draw> draws;
     std::vector<Copy> copies;

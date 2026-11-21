@@ -531,6 +531,8 @@ void Menu::display_page() {
     }
     ImGui::EndDisabled();
     if (limit <= 1.0f) ImGui::TextDisabled("This GPU has no anisotropic filtering.");
+    ImGui::Checkbox("True colour", &s_.true_color);
+    ImGui::TextDisabled(s_.true_color ? "24-bit colour: smooth gradients." : "The console's 18-bit colour and its dither pattern, as on a Wii.");
 
     ImGui::SeparatorText("Graphics device");
     const std::string chosen = s_.gpu.empty() ? "The best one" : s_.gpu;

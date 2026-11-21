@@ -6,6 +6,8 @@
 // DVDFileInfo is a command block, then the file's start (in 4-byte units, as
 // the Wii's FST stores it) at +0x30, its length at +0x34 and the callback for
 // asynchronous reads at +0x38.
+#include <cstdlib>
+#include <set>
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -126,9 +128,22 @@ int32_t read_file(Cpu& c, uint32_t start, uint32_t addr, uint32_t length, uint32
         rt::fatal(&c, "DVD read past the end of %s (%u bytes at %u)", e.path.c_str(), length, offset);
     const auto host = game_folder() / "files" / e.path;
     FILE* f = std::fopen(host.string().c_str(), "rb");
-    if (!f)
+    if (!f) {
+        // Development, with part of a disc: PUNCHOUT_DEV_MISSING_FILES=<list> reads a missing file
+        // as zeros and adds its name to the list (once), to find what a scene needs.
+        if (const char* list = std::getenv("PUNCHOUT_DEV_MISSING_FILES")) {
+            static std::set<std::string> said;
+            if (said.insert(e.path).second)
+                if (FILE* out = std::fopen(list, "a")) {
+                    std::fprintf(out, "%s\n", e.path.c_str());
+                    std::fclose(out);
+                }
+            std::memset(rt::guest_ptr(addr), 0, length);
+            return static_cast<int32_t>(length);
+        }
         rt::fatal(&c, "the game reads %s, which isn't there: extract the whole disc (files/ next to sys/)",
                   host.string().c_str());
+    }
     std::memset(rt::guest_ptr(addr), 0, length);  // reads past the end of the file, up to the 32-byte unit, give zeros
     std::fseek(f, static_cast<long>(offset), SEEK_SET);
     const size_t got = std::fread(rt::guest_ptr(addr), 1, length, f);

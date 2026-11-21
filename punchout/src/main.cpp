@@ -223,7 +223,7 @@ static void start_watchdog() {
 }
 
 // The F3 readout's details (each second) and the timing log (each 5 s).
-static void report_timing(qilin::host::Display& display, punchout::Menu* menu, qilin::host::AudioOut* audio) {
+static void report_timing(qilin::host::Display* display, punchout::Menu* menu, qilin::host::AudioOut* audio) {
     namespace rt = qilin::rt;
     using clock = std::chrono::steady_clock;
     static auto next = clock::now() + std::chrono::seconds(1);
@@ -245,8 +245,11 @@ static void report_timing(qilin::host::Display& display, punchout::Menu* menu, q
     const double draw = per(now.render, last.render, now.rendered - last.rendered);
     const double gpu_ms = per(now.gpu_ns, last.gpu_ns, now.gpu_timed - last.gpu_timed);
     last = now;
-    const auto ps = display.take_present_stats();
-    const double present_wait = ps.presents ? ps.wait_ms / ps.presents : 0.0;
+    double present_wait = 0.0;
+    if (display) {
+        const auto ps = display->take_present_stats();
+        present_wait = ps.presents ? ps.wait_ms / ps.presents : 0.0;
+    }
     // Sound: kept over the 5 s for the log.
     static qilin::host::AudioOut::Stats sound{};
     static uint64_t sound_pushes = 0;
@@ -266,7 +269,7 @@ static void report_timing(qilin::host::Display& display, punchout::Menu* menu, q
         menu->set_frame_details({a, b});
     }
     if (++seconds % 5) return;
-    const auto ft = display.frame_times().summary();
+    const auto ft = display ? display->frame_times().summary() : qilin::host::FrameTimes::Summary{};
     if (ft.frames)
         rt::log("  frame times (last %.0f s): %.1f fps (%.2f ms), 1%% low %.1f fps, 0.1%% low %.1f fps, worst %.1f ms; waiting to present %.2f ms a frame",
                 ft.average_ms * double(ft.frames) / 1000.0, ft.fps, ft.average_ms, ft.low1_fps, ft.low01_fps, ft.worst_ms, present_wait);
@@ -306,6 +309,16 @@ int main(int argc, char** argv) {
         folder = argv[2];
         argc = 1;  // nothing else to read
     }
+    // --render-dff <file.dff> <out.ppm> [loops]: draw a captured frame with our renderer (below).
+    const char* render_dff = nullptr;
+    const char* render_out = nullptr;
+    unsigned render_loops = 1;
+    if (argc >= 4 && std::strcmp(argv[1], "--render-dff") == 0) {
+        render_dff = argv[2], render_out = argv[3];
+        if (argc >= 5) render_loops = unsigned(std::max(1, std::atoi(argv[4])));
+        folder = argv[2];
+        argc = 1;
+    }
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--headless") == 0) headless = true;
         else if (std::strcmp(argv[i], "--offscreen") == 0) offscreen = true;
@@ -313,14 +326,15 @@ int main(int argc, char** argv) {
         else folder = nullptr, i = argc;  // too many: usage
     }
     if (!folder) {
-        std::fprintf(stderr, "usage: punchout [--headless | --offscreen] <folder with the extracted disc: sys/main.dol, sys/boot.bin, files/>\n");
+        std::fprintf(stderr, "usage: punchout [--headless | --offscreen] <folder with the extracted disc: sys/main.dol, sys/boot.bin, files/>\n"
+                             "       punchout --bench-record <file.dff> [times] | --render-dff <file.dff> <out.ppm> [loops]\n");
         return 2;
     }
     // The log, beside the settings: punchout.log for this run, punchout.old.log
     // the run before. On Windows the console closes with the game, so after
     // a crash the file is what's left to read (or send).
     rt::install_crash_handler();
-    if (!bench_dff) {  // (a benchmark leaves the game's log alone)
+    if (!bench_dff && !render_dff) {  // (a benchmark or a replay leaves the game's log alone)
         const std::filesystem::path dir = qilin::host::user_folder(), log = dir / "punchout.log";
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
@@ -347,6 +361,47 @@ int main(int argc, char** argv) {
         const int code = punchout::bench_recording(bench_dff, bench_times);
         std::fflush(nullptr);
         std::_Exit(code);
+    }
+    if (render_dff) {
+        // A frame captured with PUNCHOUT_DFF, replayed through the recorder and drawn by the
+        // renderer with no game running: our picture of the very commands Dolphin's FIFO player
+        // draws from the same file (tools/check/picture_check.py compares the two), starting as
+        // the player starts and looping as it loops (replay_dff).
+        qilin::host::Display::Options o;
+        o.title = "Punch-Out!!";
+        o.headless = true;
+        o.picture.scaling = qilin::host::Scaling::integer;  // a pixel for a pixel
+        o.picture.smooth = false;
+        qilin::host::Display display(o);
+        unsigned scale = 1;
+        if (const char* e = std::getenv("PUNCHOUT_SCALE")) scale = static_cast<unsigned>(std::clamp(std::atoi(e), 1, 8));
+        punchout::Renderer renderer(display.gpu(), scale, 1);
+        renderer.set_true_color(std::getenv("PUNCHOUT_TRUE_COLOR") != nullptr);  // (the console's 18 bits unless asked)
+        // Shown at its own size, a pixel for a pixel (4:3 for a 640x480 picture, in the middle of
+        // the 1280x720 read back), and written so: Dolphin dumps the same pixels at its raw
+        // resolution, and the two compare without either being resampled.
+        uint32_t shown_w = 0, shown_h = 0;
+        punchout::replay_dff(render_dff, render_loops, [&](punchout::gx::Frame& f) {
+            f.captured = true;  // (PUNCHOUT_PROBE follows a pixel through a replayed frame too)
+            renderer.render(f);
+            for (const auto& c : f.copies)
+                if (const qilin::host::Image* x = c.to_xfb ? renderer.xfb(c.dest) : nullptr) {
+                    shown_w = x->width / scale, shown_h = x->height / scale;
+                    display.present_image(x->image, x->view, x->width, x->height, float(shown_w) / float(shown_h), shown_h);
+                }
+        });
+        if (!shown_w) rt::fatal(nullptr, "--render-dff: %s has no copy to the screen", render_dff);
+        if (shown_w > 1280 || shown_h > 720) rt::fatal(nullptr, "--render-dff: a %ux%u picture doesn't fit the 1280x720 read back", shown_w, shown_h);
+        const std::vector<uint8_t> px = display.read_back();
+        FILE* fp = std::fopen(render_out, "wb");
+        if (!fp) rt::fatal(nullptr, "--render-dff: %s can't be written", render_out);
+        std::fprintf(fp, "P6\n%u %u\n255\n", shown_w, shown_h);
+        const uint32_t x0 = (1280 - shown_w) / 2, y0 = (720 - shown_h) / 2;
+        for (uint32_t y = 0; y < shown_h; ++y)
+            for (uint32_t x = 0; x < shown_w; ++x) std::fwrite(&px[(size_t(y0 + y) * 1280 + x0 + x) * 4], 1, 3, fp);
+        std::fclose(fp);
+        std::fflush(nullptr);
+        std::_Exit(0);
     }
     punchout::load_game(folder);
 
@@ -397,7 +452,8 @@ int main(int argc, char** argv) {
         }
     }
     std::unique_ptr<qilin::host::AudioOut> audio;
-    if (!headless && !offscreen) {
+    // (PUNCHOUT_AUDIO=1: sound without a window too, to test its queue; SDL_AUDIO_DRIVER=dummy plays to nowhere.)
+    if ((!headless && !offscreen) || std::getenv("PUNCHOUT_AUDIO")) {
         audio = std::make_unique<qilin::host::AudioOut>();
         punchout::set_audio_sink([](const int16_t* lr, size_t frames, unsigned rate, void* out) {
             static_cast<qilin::host::AudioOut*>(out)->push(lr, frames, rate);
@@ -486,6 +542,7 @@ int main(int argc, char** argv) {
             }
         }
         if (renderer) renderer->set_anisotropy(settings.anisotropy);  // the menu's, once it's closed (unchanged: nothing to do)
+        if (renderer) renderer->set_true_color(settings.true_color);
         {  // (without a display, --headless: the scripted presses and pointer alone)
             uint32_t held = display ? display->buttons() : 0;
             const double now = punchout::frame_count() / 60.0;  // game time: see the top
@@ -517,6 +574,7 @@ int main(int argc, char** argv) {
             if (display) display->rumble(settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed));
         }
         if (!renderer) {  // headless: nothing shows the frames, so they're only waited for, not converted
+            if (audio) report_timing(nullptr, nullptr, audio.get());  // (PUNCHOUT_AUDIO: the sound queue's numbers)
             uint32_t xfb, w, h;
             punchout::take_xfb(&sequence, 10, xfb, w, h);
             continue;
@@ -560,7 +618,7 @@ int main(int argc, char** argv) {
         }
         // Every second: where a frame's time goes, for the F3 readout; every
         // 5 s, the log has it with how evenly frames reached the screen.
-        if (display) report_timing(*display, menu.get(), audio.get());
+        if (display) report_timing(display.get(), menu.get(), audio.get());
         uint32_t xfb, w, h;
         if (!punchout::take_xfb(&sequence, 0, xfb, w, h)) continue;
         if (const qilin::host::Image* x = xfb ? renderer->xfb(xfb) : nullptr) {

@@ -1,20 +1,20 @@
 {
-  "_comment": "Scenes for tools/check/picture_check.py: each is captured at `seconds` of game time from a fresh save, with `env` driving the game there (PUNCHOUT_INPUT presses, PUNCHOUT_POINTER moves; see docs/runtime.md). `max_rmse` is the largest root-mean-square difference from Dolphin's render of the same frame allowed, as a percentage of full scale, and `max_off` the largest share of pixels (percent) more than 48 of 255 off in any channel. Scenes marked slow are skipped unless --slow is given; scenes marked needs_save start from a copy of --save's saves (a profile), and are skipped without it. The scripts here are for a save with one profile (a default Mii).",
+  "_comment": "Scenes for tools/check/picture_check.py: each is captured at `seconds` of game time from a fresh save, with `env` driving the game there (PUNCHOUT_INPUT presses, PUNCHOUT_POINTER moves; see docs/runtime.md). `max_over8` is the largest share of pixels (percent) allowed to be more than 8 of 255 off Dolphin's render of the same frame in any channel, and `max_over48` the largest share more than 48 off. Scenes marked slow are skipped unless --slow is given; scenes marked needs_save start from a copy of --save's saves (a profile), and are skipped without it. The scripts here are for a save with one profile (a default Mii).",
   "scenes": [
     {
       "name": "save_notice",
       "seconds": 12,
       "env": {},
-      "max_rmse": 6.0,
-      "max_off": 4.0
+      "max_over8": 0.1,
+      "max_over48": 0.01
     },
     {
       "name": "title",
       "needs_save": true,
       "seconds": 10,
       "env": {},
-      "max_rmse": 6.0,
-      "max_off": 4.0
+      "max_over8": 0.1,
+      "max_over48": 0.01
     },
     {
       "name": "main_menu",
@@ -24,8 +24,8 @@
         "PUNCHOUT_POINTER": "0,-0.55;-0.38,0.28@24;0,-0.2@29;0.9,-0.9@33",
         "PUNCHOUT_INPUT": "Y@11,Y@15,Y@19,Y@27,Y@31"
       },
-      "max_rmse": 6.0,
-      "max_off": 4.0
+      "max_over8": 0.1,
+      "max_over48": 0.01
     },
     {
       "name": "vs_screen",
@@ -36,8 +36,20 @@
         "PUNCHOUT_POINTER": "0,-0.55;-0.38,0.28@24;0,-0.2@29;0.9,-0.9@33;0.28,0.05@38;-0.12,0.35@64;0.62,-0.68@74",
         "PUNCHOUT_INPUT": "Y@11,Y@15,Y@19,Y@27,Y@31,Y@40,Y@68,Y@78"
       },
-      "max_rmse": 6.0,
-      "max_off": 4.0
+      "max_over8": 0.1,
+      "max_over48": 0.01
+    },
+    {
+      "name": "practice_fight",
+      "slow": true,
+      "needs_save": true,
+      "seconds": 125,
+      "env": {
+        "PUNCHOUT_POINTER": "0,-0.55;-0.38,0.28@24;0,-0.2@29;0.9,-0.9@33;0.28,0.05@38;-0.12,0.35@64;0.62,-0.68@74",
+        "PUNCHOUT_INPUT": "Y@11,Y@15,Y@19,Y@27,Y@31,Y@40,Y@68,Y@78,Y@88,Y@92,Y@96,Y@100,Y@104,Y@108"
+      },
+      "max_over8": 0.1,
+      "max_over48": 0.01
     }
   ]
 }

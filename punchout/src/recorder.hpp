@@ -30,6 +30,8 @@ void bp_written(uint32_t reg, uint32_t value, bool changed = true);
 // BP 0x52: an EFB copy (to a texture, or to the external frame buffer, which
 // ends the frame).
 void record_copy(const Registers& r, uint32_t command);
+// BP 0x43 changed the EFB's pixel format (its low three bits, `from` to `to`).
+void record_pixel_format(uint32_t from, uint32_t to);
 // BP 0x65: a palette load.
 void record_tlut_load(const Registers& r, uint32_t command);
 
@@ -50,6 +52,11 @@ struct RecorderStats {
     std::atomic<uint64_t> images_made{0};             // images created since boot (the rest are reused)
 };
 RecorderStats& recorder_stats();
+
+// The TEV colour registers and konstants as BP writes (sixteen: register in the
+// top byte, value below), for a frame capture's start: BP memory keeps only
+// whichever of the two was written last at each address.
+void tev_register_writes(const Registers& r, uint32_t out[16]);
 
 // Nanoseconds on a steady clock, for the counters.
 uint64_t now_ns();

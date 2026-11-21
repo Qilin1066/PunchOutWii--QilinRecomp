@@ -528,7 +528,10 @@ void main() {
     }
     if (TevResult.a == 1) TevResult.a = 0;  // passes the test, does nothing in blending
 
-    bool rgba6 = bits(bp(0x43u), 0u, 3u) == 1u;
+    // The EFB with alpha has six bits a channel, dithered if the game asks. In
+    // true colour (pc.flags bit 8, the "true colour" setting) all eight bits
+    // are kept and nothing is dithered.
+    bool rgba6 = bits(bp(0x43u), 0u, 3u) == 1u && (pc.flags & 0x100u) == 0u;
     if (rgba6 && bits(bp(0x41u), 2u, 1u) != 0u) {  // dither, 2x2 Bayer
         ivec2 d = ivec2(gl_FragCoord.xy / pc.scale) & 1;
         TevResult.rgb = (TevResult.rgb - (TevResult.rgb >> 6)) + (d.x ^ d.y) * 2 + d.y;
@@ -562,7 +565,8 @@ void main() {
     if (rgba6) ocol0.rgb = vec3(TevResult.rgb >> 2) / 63.0;
     else ocol0.rgb = vec3(TevResult.rgb) / 255.0;
     uint dstalpha = bp(0x42u);
-    if ((dstalpha & 0x100u) != 0u && (pc.flags & 1u) == 0u) ocol0.a = float(bits(dstalpha, 0u, 8u) >> 2) / 63.0;
+    if ((dstalpha & 0x100u) != 0u && (pc.flags & 1u) == 0u)
+        ocol0.a = rgba6 ? float(bits(dstalpha, 0u, 8u) >> 2) / 63.0 : float(bits(dstalpha, 0u, 8u)) / 255.0;
     else ocol0.a = rgba6 ? float(TevResult.a >> 2) / 63.0 : float(TevResult.a) / 255.0;
 
     // A logic op on a GPU without them, as blending: some need the output

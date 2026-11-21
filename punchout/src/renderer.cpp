@@ -113,6 +113,8 @@ struct Spare {
 };
 constexpr VkImageUsageFlags kUploaded = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 constexpr VkImageUsageFlags kCopied = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;  // read back by PUNCHOUT_PROBE
+constexpr VkImageUsageFlags kEfbUsage =
+    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 constexpr VkImageUsageFlags kXfb = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;  // sampled: the window draws it through a look
 constexpr uint64_t kSpareFrames = 120;  // spares unused for two seconds are destroyed
 constexpr size_t kMaxSpares = 64;
@@ -172,8 +174,10 @@ struct Renderer::Impl {
     };
     std::vector<CopyDump>* copy_dumps = nullptr;
     float anisotropy = 1.0f;  // for filtered textures (set_anisotropy)
+    bool true_color = false;  // set_true_color: the shaders' flag
     VkFormat depth_format = VK_FORMAT_D32_SFLOAT;
     Image efb, efb_depth, white;
+    Image efb_other;  // made at the first change of pixel format: convert() draws into it, and the two swap
     Slot slots[2];
     unsigned slot = 0;
     // GPU time per frame: two timestamps a slot, where the queue has them.
@@ -318,9 +322,7 @@ struct Renderer::Impl {
         VkFormatProperties fp;
         vkGetPhysicalDeviceFormatProperties(gpu.physical, VK_FORMAT_D32_SFLOAT, &fp);
         if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) depth_format = VK_FORMAT_X8_D24_UNORM_PACK32;
-        efb = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, kColor,
-                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                                VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        efb = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, kColor, kEfbUsage);
         efb_depth = Image::create(gpu, kEfbWidth * scale, kEfbHeight * scale, depth_format,
                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
         white = Image::create(gpu, 1, 1, kColor, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
@@ -1086,6 +1088,60 @@ struct Renderer::Impl {
         return set;
     }
 
+    // The EFB's picture read as the other pixel format (gx::Packet::kConvert): drawn from
+    // the EFB into its twin by the copy shader, pixel for pixel, and the twin is the EFB from
+    // then on. (In the middle of the EFB's rendering, like a copy.)
+    void convert(VkCommandBuffer cmd, Slot& s, uint32_t kind) {
+        vkCmdEndRendering(cmd);
+        barrier(cmd);
+        if (!efb_other.image) {
+            efb_other = Image::create(gpu, efb.width, efb.height, kColor, kEfbUsage);
+            host::transition(cmd, efb_other.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        }
+        VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        color.imageView = efb_other.view;
+        color.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, {efb.width, efb.height}};
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &color;
+        vkCmdBeginRendering(cmd, &ri);
+        bind_copy(cmd, s, VkDescriptorImageInfo{efb_sampler, efb.view, VK_IMAGE_LAYOUT_GENERAL});
+        const VkViewport vp{0, 0, float(efb.width), float(efb.height), 0, 1};
+        const VkRect2D sc{{0, 0}, {efb.width, efb.height}};
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        FullscreenPush p{};
+        p.src[2] = p.src[3] = 1.0f;
+        p.format = kind == 0 ? 0xFFFEu : 0xFFFDu;
+        vkCmdPushConstants(cmd, copy_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd);
+        std::swap(efb, efb_other);
+        barrier(cmd);
+        begin_efb(cmd);
+    }
+
+    void bind_copy(VkCommandBuffer cmd, Slot& s, const VkDescriptorImageInfo& ii) {
+        if (!copy_pipeline) {
+            VkPipelineColorBlendAttachmentState b{};
+            b.colorWriteMask = 0xF;
+            copy_pipeline = make_pipeline(fs_vert, copy_frag, copy_layout, false, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, b, false, false);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, copy_pipeline);
+        VkDescriptorSet set = allocate(s, copy_set_layout);
+        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr.dstSet = set;
+        wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr.pImageInfo = &ii;
+        vkUpdateDescriptorSets(gpu.device, 1, &wr, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, copy_layout, 0, 1, &set, 0, nullptr);
+    }
+
     void copy(VkCommandBuffer cmd, Slot& s, const gx::Copy& c) {
         vkCmdEndRendering(cmd);
         barrier(cmd);
@@ -1116,22 +1172,8 @@ struct Renderer::Impl {
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &color;
         vkCmdBeginRendering(cmd, &ri);
-        if (!copy_pipeline) {
-            VkPipelineColorBlendAttachmentState b{};
-            b.colorWriteMask = 0xF;
-            copy_pipeline = make_pipeline(fs_vert, copy_frag, copy_layout, false, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, b, false, false);
-        }
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, copy_pipeline);
-        VkDescriptorSet set = allocate(s, copy_set_layout);
-        VkDescriptorImageInfo ii = c.from_depth && !c.to_xfb ? VkDescriptorImageInfo{efb_depth_sampler, efb_depth.view, VK_IMAGE_LAYOUT_GENERAL}
-                                                             : VkDescriptorImageInfo{efb_sampler, efb.view, VK_IMAGE_LAYOUT_GENERAL};
-        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        wr.dstSet = set;
-        wr.descriptorCount = 1;
-        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        wr.pImageInfo = &ii;
-        vkUpdateDescriptorSets(gpu.device, 1, &wr, 0, nullptr);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, copy_layout, 0, 1, &set, 0, nullptr);
+        bind_copy(cmd, s, c.from_depth && !c.to_xfb ? VkDescriptorImageInfo{efb_depth_sampler, efb_depth.view, VK_IMAGE_LAYOUT_GENERAL}
+                                                    : VkDescriptorImageInfo{efb_sampler, efb.view, VK_IMAGE_LAYOUT_GENERAL});
         const VkViewport vp{0, 0, float(w), float(h), 0, 1};
         const VkRect2D sc{{0, 0}, {w, h}};
         vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -1142,7 +1184,7 @@ struct Renderer::Impl {
         p.src[2] = float(c.src[2]) / kEfbWidth;
         p.src[3] = float(c.src[3]) / kEfbHeight;
         p.format = c.to_xfb ? 0xFFFFu : c.format;
-        p.flags = (c.half_scale ? 1u : 0u) | (c.from_depth && !c.to_xfb ? 2u : 0u) | (c.efb_alpha ? 4u : 0u);
+        p.flags = (c.half_scale ? 1u : 0u) | (c.from_depth && !c.to_xfb ? 2u : 0u) | (c.efb_alpha ? 4u : 0u) | (true_color ? 8u : 0u);
         p.gamma = c.gamma;
         for (int i = 0; i < 3; ++i) p.filter[i] = c.filter[i];
         // Without the clamp bits the hardware reads past the rectangle, into the EFB around it.
@@ -1224,10 +1266,10 @@ struct Renderer::Impl {
         const auto at = [&](size_t i) { return data + i * 8; };
         for (size_t i = 0; i < f.copies.size(); ++i) {
             const gx::Copy& c = f.copies[i];
-            rt::log("copy %llu: %s src %d,%d %dx%d -> %ux%u format %X%s gamma %.1f filter %u/%u/%u%s%s%s%s texture %d", static_cast<unsigned long long>(i),
+            rt::log("copy %llu: %s src %d,%d %dx%d -> %ux%u format %X%s gamma %.1f filter %u/%u/%u%s%s%s%s texture %d at %08X", static_cast<unsigned long long>(i),
                     c.to_xfb ? "XFB" : "texture", c.src[0], c.src[1], c.src[2], c.src[3], c.dest_width, c.dest_height, c.format,
                     c.half_scale ? " half" : "", c.gamma, c.filter[0], c.filter[1], c.filter[2], c.from_depth ? " depth" : "",
-                    c.efb_alpha ? " alpha" : "", c.clamp_top ? " clamp-top" : "", c.clamp_bottom ? " clamp-bottom" : "", c.texture);
+                    c.efb_alpha ? " alpha" : "", c.clamp_top ? " clamp-top" : "", c.clamp_bottom ? " clamp-bottom" : "", c.texture, c.dest);
         }
         for (size_t i = 0; i + 1 <= count && i < f.packets.size(); ++i) {
             const uint8_t *a = at(i), *b = at(i + 1);
@@ -1235,6 +1277,11 @@ struct Renderer::Impl {
             float za, zb;
             std::memcpy(&za, a + 4, 4), std::memcpy(&zb, b + 4, 4);
             const gx::Packet& pk = f.packets[i];
+            if (pk.kind == gx::Packet::kConvert) {
+                rt::log("probe #%llu the pixel format, %s: rgba %u,%u,%u,%u -> %u,%u,%u,%u", static_cast<unsigned long long>(i),
+                        pk.index == 0 ? "RGB8 to RGBA6" : "RGBA6 to RGB8", a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]);
+                continue;
+            }
             if (pk.kind == gx::Packet::kCopy) {
                 const gx::Copy& c = f.copies[pk.index];
                 rt::log("probe #%llu copy%s: rgba %u,%u,%u,%u -> %u,%u,%u,%u  z %.7f -> %.7f", static_cast<unsigned long long>(i), c.clear ? " (clears)" : "",
@@ -1271,8 +1318,8 @@ struct Renderer::Impl {
                         reg(0xF6 + t / 2));
             for (int m = 0; m < 8; ++m)
                 if (d.textures[m] >= 0)
-                    rt::log("    texmap %d: id %d, image0 %06X mode0 %06X mode1 %06X", m, d.textures[m], reg((m < 4 ? 0x88 : 0xA8) + m % 4),
-                            reg((m < 4 ? 0x80 : 0xA0) + m % 4), reg((m < 4 ? 0x84 : 0xA4) + m % 4));
+                    rt::log("    texmap %d: id %d, image0 %06X mode0 %06X mode1 %06X at %08X", m, d.textures[m], reg((m < 4 ? 0x88 : 0xA8) + m % 4),
+                            reg((m < 4 ? 0x80 : 0xA0) + m % 4), reg((m < 4 ? 0x84 : 0xA4) + m % 4), (reg((m < 4 ? 0x94 : 0xB4) + m % 4) & 0xFFFFFF) << 5);
         }
     }
 
@@ -1396,8 +1443,9 @@ struct Renderer::Impl {
         for (const gx::Packet& pk : f.packets) {
             if (probing && probe_i > 0) probe(probe_i);
             if (probing) ++probe_i;
-            if (pk.kind == gx::Packet::kCopy) {
-                copy(cmd, s, f.copies[pk.index]);
+            if (pk.kind != gx::Packet::kDraw) {
+                if (pk.kind == gx::Packet::kCopy) copy(cmd, s, f.copies[pk.index]);
+                else convert(cmd, s, pk.index);
                 bound = VK_NULL_HANDLE;
                 blend_set = false;
                 same_valid = false;
@@ -1499,6 +1547,7 @@ struct Renderer::Impl {
             const auto reads_src_alpha = [](uint8_t factor) { return factor == VK_BLEND_FACTOR_SRC_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; };
             if (d.pipeline.blend && (reads_src_alpha(d.pipeline.src) || reads_src_alpha(d.pipeline.dst))) push.flags |= 1u;
             if (d.pipeline.logic && !gpu.logic_op) push.flags |= kLogicBlend[d.pipeline.logic - 1u].help << 4;
+            if (true_color) push.flags |= 0x100u;
             vkCmdPushConstants(cmd, gx_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof push, &push);
             if (d.direct) {
                 // Lists and strips need no indices: the topology says which.
@@ -1588,6 +1637,7 @@ struct Renderer::Impl {
         for (VkShaderModule m : gx_frag_stages) vkDestroyShaderModule(gpu.device, m, nullptr);
         if (timestamps) vkDestroyQueryPool(gpu.device, timestamps, nullptr);
         efb.destroy(gpu);
+        if (efb_other.image) efb_other.destroy(gpu);
         efb_depth.destroy(gpu);
         white.destroy(gpu);
     }
@@ -1599,6 +1649,7 @@ Renderer::Renderer(host::Gpu& gpu, unsigned scale, unsigned anisotropy) : impl_(
     impl_->set_anisotropy(anisotropy);
 }
 void Renderer::set_anisotropy(unsigned level) { impl_->set_anisotropy(level); }
+void Renderer::set_true_color(bool on) { impl_->true_color = on; }
 void Renderer::save_now() {
     std::vector<uint8_t> keys;
     {

@@ -5,6 +5,7 @@
 // The rate is 60 Hz: the console's settings report EuRGB60 (sc.cpp), which
 // this game supports, so it runs at the NTSC rate. VIGetTvFormat says so too.
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 
 #include "boot.hpp"
@@ -69,6 +70,21 @@ void report() {
                 static_cast<unsigned long long>(g_late.late_1ms), static_cast<unsigned long long>(g_late.late_4ms),
                 static_cast<unsigned long long>(g_late.resyncs));
         g_late = {};
+    }
+    // The game's own work a retrace: all the time its threads weren't idle. Near a
+    // retrace's 16.7 ms, the game can't keep up and retraces come late.
+    {
+        static auto t_last = std::chrono::steady_clock::now();
+        static uint64_t idle_last = 0, fifo_last = 0;
+        static uint32_t retraces_last = 0;
+        const auto t = std::chrono::steady_clock::now();
+        const uint64_t idle = idle_time_ns(), fifo = fifo_wait_ns();
+        const double n = double(std::max<uint32_t>(1, g_retraces - retraces_last));
+        const double wall = std::chrono::duration<double, std::milli>(t - t_last).count();
+        const double busy = std::max(0.0, wall - double(idle - idle_last) / 1e6);
+        rt::log("  the game's threads: %.2f ms of work a retrace (%.0f%% of one), of which waiting for the GPU thread %.2f ms",
+                busy / n, busy / wall * 100.0, double(fifo - fifo_last) / 1e6 / n);
+        t_last = t, idle_last = idle, fifo_last = fifo, retraces_last = g_retraces;
     }
     // Drawing: per frame, the guest thread's recording and the main thread's drawing.
     struct Drawing {

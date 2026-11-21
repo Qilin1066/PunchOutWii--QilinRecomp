@@ -478,6 +478,117 @@ inline uint32_t quantize(unsigned type, unsigned scale, double value) {
     return static_cast<uint32_t>(i) & (quant_size(type) == 1 ? 0xFFu : 0xFFFFu);
 }
 
+// ---- single mode: an FPR half kept as a float.
+//
+// A function whose floating point is all single precision (lfs, psq_l, the
+// paired-single and "s" instructions: an engine's vector code) is lifted with
+// its FPRs as float locals instead of doubles (lift.cpp). A float f stands
+// for the double load_single(bits of f): exactly what the register would hold,
+// as every single-precision result is such a double. Each operation below
+// gives, bit for bit, what the double helpers above give for those doubles:
+// the host's own float arithmetic where the result is an ordinary number
+// (IEEE's rounding of a float operation is the single rounding Broadway does,
+// and two floats' product or sum is exact enough in a double for that to hold
+// there too), and the double helpers themselves for everything else (NaNs,
+// infinities, results at or below the smallest normal single, where NI mode
+// and the NaN rules differ from the host's). Tested against the double
+// helpers on random and edge operands (qilin_tests), and with them against
+// the reference interpreter (qilin_difftest).
+inline uint32_t fbits(float f) { return std::bit_cast<uint32_t>(f); }
+inline float ffrom(uint32_t b) { return std::bit_cast<float>(b); }
+QILIN_INLINE double to_d(float f) { return load_single(fbits(f)); }
+QILIN_INLINE float to_f(double d) { return ffrom(store_single(d)); }
+// A register's double as a float, and whether that loses nothing (it holds a single-precision value).
+QILIN_INLINE bool to_f_exact(double d, float& f) {
+    const uint32_t b = store_single(d);
+    f = ffrom(b);
+    return bits(load_single(b)) == bits(d);
+}
+// A result the host's arithmetic gave as Broadway would: zero, or a normal
+// number above the smallest normal single (at it, the value before rounding
+// may have been below it: a zero in NI mode).
+QILIN_INLINE bool ordinary(float r) {
+    const uint32_t m = fbits(r) & 0x7FFFFFFFu;
+    return m == 0 || m - 0x00800001u < 0x7F800000u - 0x00800001u;
+}
+QILIN_COLD_OUTLINE float add_s_rare(float a, float b) { return to_f(single(add(to_d(a), to_d(b)))); }
+QILIN_COLD_OUTLINE float sub_s_rare(float a, float b) { return to_f(single(sub(to_d(a), to_d(b)))); }
+QILIN_COLD_OUTLINE float mul_s_rare(float a, float c) { return to_f(single(mul(to_d(a), round25(to_d(c))))); }
+QILIN_COLD_OUTLINE float div_s_rare(float a, float b) { return to_f(single(div(to_d(a), to_d(b)))); }
+QILIN_COLD_OUTLINE float madd_s_rare(float a, float c, float b, bool subtract) {
+    return to_f(single(madd_single(to_d(a), to_d(c), to_d(b), subtract)));
+}
+QILIN_INLINE float add_s(float a, float b) {
+    const float r = a + b;
+    return ordinary(r) ? r : add_s_rare(a, b);
+}
+QILIN_INLINE float sub_s(float a, float b) {
+    const float r = a - b;
+    return ordinary(r) ? r : sub_s_rare(a, b);
+}
+QILIN_INLINE float mul_s(float a, float c) {  // (a single frC is its own 25-bit rounding)
+    const float r = a * c;
+    return ordinary(r) ? r : mul_s_rare(a, c);
+}
+QILIN_INLINE float div_s(float a, float b) {
+    const float r = a / b;
+    return ordinary(r) ? r : div_s_rare(a, b);
+}
+// a * c + b (or - b), rounded once. Without a fused multiply-add: the product
+// is exact as a double and the sum rounds once to double; rounding that to
+// single is the single rounding of the exact value unless the double sits
+// exactly halfway between two singles and the sum's own rounding put it there
+// (it didn't if the sum was exact, which its error term tells: a weight of 1
+// or a half times a float, plus a float, is such a sum, and often a true
+// tie). Then the careful way decides. `fast` is false when it's needed.
+QILIN_INLINE float madd_by_double(float a, float c, float b, bool subtract, bool& fast) {
+    const double p = static_cast<double>(a) * static_cast<double>(c), bs = static_cast<double>(subtract ? -b : b);
+    const double d = p + bs;
+    const float r = static_cast<float>(d);
+    fast = ordinary(r);
+    if ((bits(d) & 0x1FFFFFFFull) == 0x10000000ull) {
+        const double bb = d - p;
+        if ((p - (d - bb)) + (bs - bb) != 0.0) fast = false;  // the sum was rounded: two roundings
+    }
+    return r;
+}
+#if defined(__FMA__) || defined(__aarch64__) || defined(_M_ARM64) || (defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__))
+#define QILIN_FUSED_FLOAT 1
+QILIN_INLINE float madd_fused(float a, float c, float b, bool subtract, bool& fast) {
+#if defined(_MSC_VER) && !defined(__clang__) && defined(__AVX2__)
+    const float r = _mm_cvtss_f32(_mm_fmadd_ss(_mm_set_ss(a), _mm_set_ss(c), _mm_set_ss(subtract ? -b : b)));
+#else
+    const float r = std::fma(a, c, subtract ? -b : b);
+#endif
+    fast = ordinary(r);
+    return r;
+}
+#endif
+QILIN_INLINE float madd_s(float a, float c, float b, bool subtract) {
+    bool fast;
+#if defined(QILIN_FUSED_FLOAT)
+    const float r = madd_fused(a, c, b, subtract, fast);
+#else
+    const float r = madd_by_double(a, c, b, subtract, fast);
+#endif
+    return fast ? r : madd_s_rare(a, c, b, subtract);
+}
+QILIN_INLINE float neg_s(float f) { return ffrom(fbits(f) ^ 0x80000000u); }
+QILIN_INLINE float abs_s(float f) { return ffrom(fbits(f) & 0x7FFFFFFFu); }
+QILIN_INLINE float nabs_s(float f) { return ffrom(fbits(f) | 0x80000000u); }
+QILIN_INLINE float neg_unless_nan_s(float f) { return f != f ? f : neg_s(f); }
+// frsp on a single (and ps_sum's moved half): itself, but a denormal becomes a signed zero and a signalling NaN quiet.
+QILIN_INLINE float single_s(float f) {
+    const uint32_t m = fbits(f) & 0x7FFFFFFFu;
+    return (m == 0 || m - 0x00800000u < 0x7F000000u) ? f : to_f(single(to_d(f)));
+}
+QILIN_INLINE float res_s(float f) { return to_f(estimate_reciprocal(to_d(f))); }
+QILIN_INLINE float rsqrte_s(float f) { return to_f(single(estimate_rsqrt(to_d(f)))); }
+QILIN_INLINE uint32_t compare_s(float a, float b) {
+    if (a != a || b != b) return 1;  // unordered
+    return a < b ? 8u : a > b ? 4u : 2u;
+}
+
 }  // namespace fp
 
 // psq_l / psq_st over guest memory, with GQR i. w: one element (ps1 = 1.0 on load).
@@ -519,6 +630,33 @@ QILIN_INLINE void psq_store(Cpu& c, uint32_t ea, unsigned i, bool w, double ps0,
         return;
     }
     psq_store_quantized(c, ea, i, w, ps0, ps1);
+}
+
+// Single mode's psq_l and psq_st (fp's single mode, above): floats move as their bits.
+QILIN_INLINE void psq_load_s(Cpu& c, uint32_t ea, unsigned i, bool w, float& ps0, float& ps1) {
+    if (((c.gqr[i] >> 16) & 7) == 0) [[likely]] {
+        const float v0 = fp::ffrom(read32(c, ea));
+        const float v1 = w ? 1.0f : fp::ffrom(read32(c, ea + 4));
+        ps0 = v0;
+        ps1 = v1;
+        return;
+    }
+    double d0, d1;
+    psq_load_quantized(c, ea, i, w, d0, d1);
+    ps0 = fp::to_f(d0);
+    ps1 = fp::to_f(d1);
+}
+QILIN_INLINE uint32_t psq_bits_s(float f) {  // a value in the single-subnormal range is stored as a signed zero
+    const uint32_t b = fp::fbits(f);
+    return (b & 0x7F800000u) ? b : b & 0x80000000u;
+}
+QILIN_INLINE void psq_store_s(Cpu& c, uint32_t ea, unsigned i, bool w, float ps0, float ps1) {
+    if ((c.gqr[i] & 7) == 0) [[likely]] {
+        write32(c, ea, psq_bits_s(ps0));
+        if (!w) write32(c, ea + 4, psq_bits_s(ps1));
+        return;
+    }
+    psq_store_quantized(c, ea, i, w, fp::to_d(ps0), w ? 0.0 : fp::to_d(ps1));
 }
 
 }  // namespace qilin::rt

@@ -56,6 +56,7 @@ struct Settings {
     unsigned mask = 30;               // CRT: the phosphor stripes, 0-100
     unsigned scale = 1;               // internal_scale: the EFB at 1-8x the console's 640x528; 0: auto (main.cpp)
     unsigned anisotropy = 1;          // texture filtering: 1 (the console's), 2, 4, 8 or 16
+    bool true_color = true;           // 24-bit colour; false: the console's 18 bits, dithered (the "original" preset)
     bool vsync = true;                // at the display's refresh (no tearing); off: the lowest latency
     std::string gpu;                  // the graphics device's name (empty: the best one)
     bool performance_overlay = false; // frame rate, 1% and 0.1% lows and frame times in a corner (F3 switches it)

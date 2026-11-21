@@ -148,8 +148,10 @@ Settings default_settings() {
 bool apply_preset(Settings& s, const std::string& name) {
     if (name == "original" || name == "low-end") {  // the console's picture: 1x, its filtering (a Pi 4 does exactly this)
         s.scale = 1, s.anisotropy = 1, s.vsync = true;
+        s.true_color = name == "low-end";  // original: the console's 18-bit colour and its dither; low-end: 24 bits (no cost)
     } else if (name == "desktop") {  // a desktop GPU: 3x (1920x1584 frame buffer), 16x anisotropic
         s.scale = 0, s.anisotropy = 16, s.vsync = true;  // scale: auto (the screen's height)
+        s.true_color = true;
     } else {
         return false;
     }
@@ -243,6 +245,8 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
             } else if (name == "anisotropy") {
                 if (!number(s.anisotropy, 1, 16)) return false;
                 if (s.anisotropy & (s.anisotropy - 1)) return fail("anisotropy is 1, 2, 4, 8 or 16");
+            } else if (name == "true_color") {
+                if (!boolean(s.true_color)) return false;
             } else if (name == "vsync") {
                 if (!boolean(s.vsync)) return false;
             } else if (name == "gpu") {
@@ -255,7 +259,7 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
                 if (!boolean(s.variable_refresh)) return false;
             } else {
                 return fail("[display] has no '" + name +
-                            "' (preset fullscreen monitor scaling smooth look scanlines mask internal_scale anisotropy vsync gpu "
+                            "' (preset fullscreen monitor scaling smooth look scanlines mask internal_scale anisotropy true_color vsync gpu "
                             "performance_overlay match_refresh variable_refresh)");
             }
             continue;
@@ -329,6 +333,9 @@ std::string settings_text(const Settings& s) {
         "internal_scale = " + (s.scale ? std::to_string(s.scale) : std::string("auto")) + "\n"
         "# Texture filtering at an angle: 1 (the console's), 2, 4, 8 or 16.\n"
         "anisotropy = " + std::to_string(s.anisotropy) + "\n"
+        "# Colour depth: true, 24-bit colour (smooth gradients); false, the console's 18 bits with its dither\n"
+        "# pattern, as on a Wii (the game draws fights that way).\n"
+        "true_color = " + b(s.true_color) + "\n"
         "# vsync: true, no tearing; false, the lowest latency.\n"
         "vsync = " + b(s.vsync) + "\n"
         "# The graphics device, by name (empty: the best one).\n"
