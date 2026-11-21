@@ -163,10 +163,16 @@ void __OSMaskInterrupts(Cpu& c) {  // (mask) -> the mask before
     dsp_interrupt_enables(g_mask);
     c.r[3] = was;
 }
+uint32_t g_held = 0;  // raised while masked: the hardware's line stays up, so they arrive when unmasked
 void __OSUnmaskInterrupts(Cpu& c) {
     const uint32_t was = g_mask;
     g_mask &= ~c.r[3];
     dsp_interrupt_enables(g_mask);
+    for (uint32_t due = g_held & ~g_mask, n = 0; due; ++n)
+        if (due & (0x80000000u >> n)) {
+            due &= ~(0x80000000u >> n), g_held &= ~(0x80000000u >> n);
+            raise_interrupt(n);
+        }
     c.r[3] = was;
 }
 // Contexts: the guest's thread switching is native, so only bookkeeping is left.
@@ -338,8 +344,7 @@ bool call_interrupt_handler(Cpu& c, uint32_t n) {
 }
 void raise_interrupt(uint32_t n) {
     post_interrupt([n](Cpu& c) {
-        if (!call_interrupt_handler(c, n))  // masked: lost, as nothing re-raises it yet
-            rt::log("interrupt %u arrived masked and was dropped", n);
+        if (!call_interrupt_handler(c, n)) g_held |= 0x80000000u >> n;  // masked: held until it's unmasked
     });
 }
 bool interrupts_enabled() { return g_enabled; }

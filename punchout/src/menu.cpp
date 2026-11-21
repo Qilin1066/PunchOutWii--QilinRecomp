@@ -373,10 +373,25 @@ void Menu::controls_page() {
     if (n == 0) ImGui::TextDisabled("None connected: the keyboard and mouse play the Wii Remote.");
     for (int i = 0; i < n; ++i) {
         const char* name = SDL_GetGamepadNameForID(ids[i]);
-        ImGui::BulletText("%s%s", name ? name : "A controller", i == 0 ? " (plays the Wii Remote)" : "");
+        ImGui::BulletText("%s", name ? name : "A controller");
     }
     SDL_free(ids);
     ImGui::Checkbox("Rumble", &s_.rumble);
+    ImGui::SameLine();
+    ImGui::Checkbox("Wii Remote speaker", &s_.speaker);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The sounds the game plays on the remote's own speaker, from the PC's speakers.");
+    // A second player (Head-to-Head): a controller as a second Wii Remote, with the same pad buttons.
+    static const char* const kSecond[] = {"None: every controller is player one's", "The second controller to press a button",
+                                          "The first controller (player one on the keyboard)"};
+    int second = static_cast<int>(std::min(s_.second_player, 2u));
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22);
+    if (ImGui::Combo("Second player", &second, kSecond, 3)) s_.second_player = static_cast<unsigned>(second);
+    if (s_.second_player == 1)
+        ImGui::TextDisabled("Player one: the first controller to have a button pressed, and the keyboard and mouse. "
+                            "Player two: the next controller. Now: %d of 2 have pressed one.", std::min(display_.joined_pads(), 2));
+    else if (s_.second_player == 2)
+        ImGui::TextDisabled("Player one: the keyboard and mouse. Player two: the first controller to have a button pressed%s.",
+                            display_.joined_pads() > 0 ? " (it has)" : "");
 
     ImGui::SeparatorText("The Wii Remote's buttons (held sideways)");
     ImGuiIO& io = ImGui::GetIO();

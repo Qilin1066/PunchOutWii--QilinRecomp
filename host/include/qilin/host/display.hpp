@@ -39,9 +39,19 @@ public:
 
     // Handle the window's events. False once the player has closed it.
     bool poll();
-    // The pad's buttons and the mouse's left button held now (PadButton bits),
-    // as of the last poll.
+    // Every controller SDL lists is opened (the first listed can be a virtual
+    // pad or a wheel's base, with the player's real one after it).
+    // The buttons held on all of them together and the mouse's left button
+    // (PadButton bits), as of the last poll.
     uint32_t buttons() const;
+    // For more than one player: the controllers in the order each first had a
+    // button pressed (a controller nobody touches never joins; one unplugged
+    // leaves, and those after it move up). How many have joined, and one's
+    // buttons now (0 for a place nobody has).
+    int joined_pads() const;
+    uint32_t pad_buttons(int place) const;
+    // That controller's right stick (as right_stick, which is whichever controller's is pushed furthest).
+    void pad_right_stick(int place, float& x, float& y) const;
     // A key by its SDL name ("X", "Space", "Left Shift"): a code for key_down,
     // or -1 if there's no such key. Whether it's held, as of the last poll
     // (never, headless).
@@ -52,8 +62,9 @@ public:
     // If the mouse moved over the window since the last poll: where, over the
     // picture last presented, -1 to 1 each way (y up; beyond 1 off the picture).
     bool mouse_moved(float& x, float& y) const;
-    // Rumble on the first pad, on or off.
+    // Rumble, on or off: on every controller, or on the one at a place.
     void rumble(bool on);
+    void rumble_pad(int place, bool on);
     // Show a frame of RGBA8 pixels, at `aspect` (displayed width / height);
     // `lines`: the console picture's height in its own pixels (whole
     // multiples and the CRT's raster go by it). Black around it.

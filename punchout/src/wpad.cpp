@@ -1,11 +1,14 @@
-// The Wii Remote library's replacements (revolution/wpad): one sideways Wii
-// Remote on channel 0, buttons only, from the player's pad or keyboard.
+// The Wii Remote library's replacements (revolution/wpad): a sideways Wii
+// Remote on channel 0, buttons only, from the player's pad or keyboard, and a
+// second on channel 1 while a second player's controller is there (input.hpp,
+// g_player2: Head-to-Head).
 //
 // The decision for this port: buttons, no motion controls, no Nunchuk, no
-// Balance Board (docs/roadmap-and-design-targets.md, "Audio/Input"). So the
-// remote reports itself as a bare core controller, resting flat, with nothing
-// in view of its pointer, and the other three channels as empty. KPAD and WBC
-// stay lifted and see exactly that.
+// Balance Board (docs/roadmap-and-design-targets.md, "Audio/Input"). So a
+// remote reports itself as a bare core controller, resting flat; the first
+// points where the mouse or the right stick does, the second where its own
+// controller's right stick does, and the other channels are empty. KPAD and
+// WBC stay lifted and see exactly that.
 //
 // The mapping is the player's, from settings.ini (settings.hpp); by default
 //   pad D-pad or left stick -> cross pad (dodge, duck, block)
@@ -13,10 +16,13 @@
 //   Start -> +, View -> -, Guide -> HOME
 // Held sideways, the remote's cross pad is turned a quarter: the player's up
 // is its RIGHT, left its UP, down its LEFT, right its DOWN.
+#include <algorithm>
+
 #include "boot.hpp"
 #include "input.hpp"
 #include "os.hpp"
 #include "settings.hpp"
+#include "speaker.hpp"
 
 namespace punchout {
 namespace rt = qilin::rt;
@@ -37,17 +43,21 @@ constexpr uint64_t kSampleTicks = kTimerHz / 200;  // the remote reports at 200 
 
 uint32_t g_connect_cb[4] = {}, g_extension_cb[4] = {}, g_sampling_cb[4] = {};
 uint32_t g_format[4] = {};
-bool g_connected = false;  // channel 0, once its connect callback has run
+constexpr uint32_t kRemotes = 2;
+bool g_connected[kRemotes] = {};  // once the channel's connect callback has run
 bool g_motor_enabled = true, g_dpd[4] = {}, g_speaker[4] = {};
 uint8_t g_speaker_volume = 0x40;
-uint64_t g_next_sample = 0;
+uint64_t g_next_sample[kRemotes] = {};
+uint64_t g_next_look = 0;  // when to look again for the second player's controller coming or going
 
-uint16_t wii_buttons() {
+bool here(uint32_t ch) { return ch < kRemotes && g_connected[ch]; }
+
+uint16_t wii_buttons(uint32_t ch) {
     static constexpr uint16_t kBits[kControlCount] = {
         kRight, kLeft, kUp, kDown,  // the player's up, down, left, right: the cross pad turned a quarter
         kOne, kTwo, kA, kPlus, kMinus, kHome,
     };
-    const uint32_t held = g_controls.load(std::memory_order_relaxed);
+    const uint32_t held = (ch == 0 ? g_controls : g_controls2).load(std::memory_order_relaxed);
     uint16_t b = 0;
     for (unsigned i = 0; i < kControlCount; ++i)
         if (held & (1u << i)) b |= kBits[i];
@@ -59,14 +69,52 @@ void later(uint32_t cb, uint32_t a0, uint32_t a1) {
     if (cb) post_interrupt([cb, a0, a1](Cpu& c) { guest_callback(c, cb, a0, a1); });
 }
 
-void poll_samples() {
-    if (!g_connected || !g_sampling_cb[0]) return;
+// A remote comes on: its connect callback, then its extension callback (none attached). Also
+// when a callback is set on a remote that is already on: the console's remotes take seconds to
+// connect, after everything has set its callback, so each one set learns of the remote.
+void connect(uint32_t ch) {
+    post_interrupt([ch](Cpu& c) {
+        if (!g_connected[ch]) g_next_sample[ch] = 0;
+        g_connected[ch] = true;
+        if (g_connect_cb[ch]) guest_callback(c, g_connect_cb[ch], ch, kErrNone);
+        if (g_extension_cb[ch]) guest_callback(c, g_extension_cb[ch], ch, kDevCore);
+    });
+}
+void disconnect(uint32_t ch) {
+    post_interrupt([ch](Cpu& c) {
+        if (!g_connected[ch]) return;
+        g_connected[ch] = false;
+        g_dpd[ch] = g_speaker[ch] = false;
+        if (g_connect_cb[ch]) guest_callback(c, g_connect_cb[ch], ch, kErrNoController);
+    });
+}
+
+void poll_remotes() {
     const uint64_t now = time_base();
-    if (g_next_sample == 0) g_next_sample = now;
-    while (now >= g_next_sample) {
-        g_next_sample += kSampleTicks;
-        later(g_sampling_cb[0], 0, 0);
+    // The second player's controller, coming or going (looked for 20 times a second).
+    if (now >= g_next_look) {
+        g_next_look = now + kTimerHz / 20;
+        const bool there = g_player2.load(std::memory_order_relaxed);
+        if (there && !g_connected[1] && g_connect_cb[1]) connect(1);
+        if (!there && g_connected[1]) {
+            g_rumble2.store(false, std::memory_order_relaxed);
+            disconnect(1);
+        }
     }
+    for (uint32_t ch = 0; ch < kRemotes; ++ch) {
+        if (!g_connected[ch] || !g_sampling_cb[ch]) continue;
+        if (g_next_sample[ch] == 0) g_next_sample[ch] = now;
+        while (now >= g_next_sample[ch]) {
+            g_next_sample[ch] += kSampleTicks;
+            later(g_sampling_cb[ch], ch, 0);
+        }
+    }
+}
+uint64_t remotes_deadline() {
+    uint64_t t = g_next_look;
+    for (uint32_t ch = 0; ch < kRemotes; ++ch)
+        if (g_connected[ch] && g_sampling_cb[ch]) t = std::min(t, g_next_sample[ch]);
+    return t;
 }
 
 // ---- set-up
@@ -74,7 +122,7 @@ void WPADInit(Cpu&) {
     static bool done = false;
     if (done) return;
     done = true;
-    add_timer_source(poll_samples, [] { return g_connected && g_sampling_cb[0] ? g_next_sample : UINT64_MAX; });
+    add_timer_source(poll_remotes, remotes_deadline);
 }
 void WPADGetStatus(Cpu& c) { c.r[3] = kStateSetup; }
 void returns_zero(Cpu& c) { c.r[3] = 0; }
@@ -85,7 +133,7 @@ void WPADSetSimpleSyncCallback(Cpu& c) {
     g_simple_sync_cb = c.r[3];
     c.r[3] = was;
 }
-void WPADGetRadioSensitivity(Cpu& c) { c.r[3] = c.r[3] == 0 ? 100 : 0; }  // (chan): a strong signal
+void WPADGetRadioSensitivity(Cpu& c) { c.r[3] = here(c.r[3]) ? 100 : 0; }  // (chan): a strong signal
 void WPADGetSensorBarPosition(Cpu& c) { c.r[3] = 0; }  // below the TV
 
 // ---- connection
@@ -93,13 +141,8 @@ void WPADSetConnectCallback(Cpu& c) {  // (chan, cb) -> the previous one
     const uint32_t ch = c.r[3] & 3, was = g_connect_cb[ch];
     g_connect_cb[ch] = c.r[4];
     c.r[3] = was;
-    if (ch == 0 && g_connect_cb[0]) {  // the remote is already on: it connects
-        post_interrupt([](Cpu& cc) {
-            g_connected = true;
-            if (g_connect_cb[0]) guest_callback(cc, g_connect_cb[0], 0, kErrNone);
-            if (g_extension_cb[0]) guest_callback(cc, g_extension_cb[0], 0, kDevCore);
-        });
-    }
+    // A remote that is already on connects: the first always is, the second while its player's controller is there.
+    if (g_connect_cb[ch] && (ch == 0 || (ch == 1 && g_player2.load(std::memory_order_relaxed)))) connect(ch);
 }
 void WPADSetExtensionCallback(Cpu& c) {
     const uint32_t ch = c.r[3] & 3, was = g_extension_cb[ch];
@@ -112,30 +155,30 @@ void WPADSetSamplingCallback(Cpu& c) {
     c.r[3] = was;
 }
 void WPADProbe(Cpu& c) {  // (chan, u32* type) -> error
-    const bool here = c.r[3] == 0;
-    if (c.r[4]) rt::poke32(c.r[4], here ? kDevCore : kDevNotFound);
-    c.r[3] = here ? kErrNone : kErrNoController;
+    const bool on = here(c.r[3]);
+    if (c.r[4]) rt::poke32(c.r[4], on ? kDevCore : kDevNotFound);
+    c.r[3] = on ? kErrNone : kErrNoController;
 }
-void WPADDisconnect(Cpu& c) { c.r[3] = c.r[3] == 0 ? kErrNone : kErrNoController; }
+void WPADDisconnect(Cpu& c) { c.r[3] = here(c.r[3]) ? kErrNone : kErrNoController; }  // (the player's controller stays: so does the remote)
 void WPADGetDataFormat(Cpu& c) { c.r[3] = g_format[c.r[3] & 3]; }
 void WPADSetDataFormat(Cpu& c) {
     g_format[c.r[3] & 3] = c.r[4];
-    c.r[3] = c.r[3] == 0 ? kErrNone : kErrNoController;
+    c.r[3] = here(c.r[3]) ? kErrNone : kErrNoController;
 }
 void WPADGetInfoAsync(Cpu& c) {  // (chan, WPADInfo*, cb) -> error
     const uint32_t ch = c.r[3], info = c.r[4], cb = c.r[5];
-    if (ch != 0) {
+    if (!here(ch)) {
         c.r[3] = kErrNoController;
         return;
     }
-    rt::poke32(info + 0, g_dpd[0]);
-    rt::poke32(info + 4, g_speaker[0]);
+    rt::poke32(info + 0, g_dpd[ch]);
+    rt::poke32(info + 4, g_speaker[ch]);
     rt::poke32(info + 8, 0);   // nothing attached
     rt::poke32(info + 12, 0);  // battery not low
     rt::poke32(info + 16, 0);
     rt::poke8(info + 20, 4);   // battery: full
-    rt::poke8(info + 21, 1);   // LED 1
-    later(cb, 0, kErrNone);
+    rt::poke8(info + 21, static_cast<uint8_t>(1u << ch));  // LED 1, or LED 2
+    later(cb, ch, kErrNone);
     c.r[3] = kErrNone;
 }
 void WPADGetAccGravityUnit(Cpu& c) {  // (chan, type, WPADAcc*): 1 g on each axis
@@ -151,11 +194,12 @@ void WPADGetAccGravityUnit(Cpu& c) {  // (chan, type, WPADAcc*): 1 g on each axi
 // Dolphin's camera emulation (WiimoteEmu/Camera.cpp): a 1024x768 camera with
 // a 42 by 31.5 degree view, the bar's lights 20 cm apart, seen from 2 m; the
 // remote turns to point. Each object is x, y (camera pixels), a size and a trace id.
-void write_dots(uint32_t at) {
-    if (!g_pointer_on.load(std::memory_order_relaxed)) return;  // pointing off the screen: no lights
+void write_dots(uint32_t at, uint32_t ch) {
+    if (ch == 0 && !g_pointer_on.load(std::memory_order_relaxed)) return;  // pointing off the screen: no lights
     constexpr double kPi = 3.14159265358979323846, kDeg = kPi / 180.0;
     constexpr double kDistance = 2.0, kHalfSeparation = 0.1;
-    const double px = g_pointer_x.load(std::memory_order_relaxed) / 1000.0, py = g_pointer_y.load(std::memory_order_relaxed) / 1000.0;
+    const double px = (ch == 0 ? g_pointer_x : g_pointer2_x).load(std::memory_order_relaxed) / 1000.0,
+                 py = (ch == 0 ? g_pointer_y : g_pointer2_y).load(std::memory_order_relaxed) / 1000.0;
     // Measured against the game's cursor: 8.7 degrees either way spans the
     // screen, and with the bar below the TV (the console's default) the
     // remote points 4.5 degrees up to reach the middle.
@@ -178,10 +222,10 @@ void write_dots(uint32_t at) {
 void WPADRead(Cpu& c) {
     const uint32_t ch = c.r[3], s = c.r[4];
     std::memset(rt::guest_ptr(s), 0, 0x2A);
-    if (ch == 0 && g_connected) {
-        rt::poke16(s, wii_buttons());
+    if (here(ch)) {
+        rt::poke16(s, wii_buttons(ch));
         rt::poke16(s + 6, static_cast<uint16_t>(kOneG));  // resting flat: 1 g on z
-        if (g_dpd[0]) write_dots(s + 8);
+        if (g_dpd[ch]) write_dots(s + 8, ch);
         rt::poke8(s + 0x28, kDevCore);
     } else {
         rt::poke8(s + 0x28, kDevNotFound);
@@ -192,11 +236,11 @@ void WPADIsUsedCallbackByKPAD(Cpu& c) { c.r[3] = 0; }
 
 // ---- rumble
 void WPADControlMotor(Cpu& c) {  // (chan, cmd): 1 on, 0 off
-    if (c.r[3] == 0) g_rumble.store(g_motor_enabled && c.r[4] == 1, std::memory_order_relaxed);
+    if (here(c.r[3])) (c.r[3] == 0 ? g_rumble : g_rumble2).store(g_motor_enabled && c.r[4] == 1, std::memory_order_relaxed);
 }
 void WPADEnableMotor(Cpu& c) {
     g_motor_enabled = c.r[3] != 0;
-    if (!g_motor_enabled) g_rumble.store(false, std::memory_order_relaxed);
+    if (!g_motor_enabled) g_rumble.store(false, std::memory_order_relaxed), g_rumble2.store(false, std::memory_order_relaxed);
 }
 void WPADIsMotorEnabled(Cpu& c) { c.r[3] = g_motor_enabled; }
 void WPADSaveConfig(Cpu& c) {  // (cb) -> BOOL
@@ -204,36 +248,54 @@ void WPADSaveConfig(Cpu& c) {  // (cb) -> BOOL
     c.r[3] = 1;
 }
 
-// ---- the speaker: accepted and dropped (to become a host sound source)
+// ---- the speaker: its sound is decoded and mixed into the PC's (speaker.hpp)
 void WPADIsSpeakerEnabled(Cpu& c) { c.r[3] = g_speaker[c.r[3] & 3]; }
 void WPADControlSpeaker(Cpu& c) {  // (chan, cmd, cb): 0 off, 1 on, others mute/play/...
     const uint32_t ch = c.r[3];
-    if (ch != 0) {
+    if (!here(ch)) {
         c.r[3] = kErrNoController;
         return;
     }
-    if (c.r[4] == 0) g_speaker[0] = false;
-    if (c.r[4] == 1) g_speaker[0] = true;
-    later(c.r[5], 0, kErrNone);
+    // WPAD's commands: 0 off, 1 on, 2 mute, 3 unmute, 4 play, 5 (a register write). On, the remote's
+    // decoder starts afresh, as the game's encoder does with the first block it sends after.
+    switch (c.r[4]) {
+    case 0: g_speaker[ch] = false, g_speakers[ch].reset(); break;
+    case 1: g_speaker[ch] = true, g_speakers[ch].reset(); break;
+    case 2: g_speakers[ch].set_muted(true); break;
+    case 3: g_speakers[ch].set_muted(false); break;
+    default: break;
+    }
+    later(c.r[5], ch, kErrNone);
     c.r[3] = kErrNone;
 }
 void WPADGetSpeakerVolume(Cpu& c) { c.r[3] = g_speaker_volume; }
-void WPADSetSpeakerVolume(Cpu& c) { g_speaker_volume = static_cast<uint8_t>(c.r[3]); }
-void WPADCanSendStreamData(Cpu& c) { c.r[3] = c.r[3] == 0; }
-void WPADSendStreamData(Cpu& c) { c.r[3] = c.r[3] == 0 ? kErrNone : kErrNoController; }
-
-// ---- the pointer: never anything in view
+void WPADSetSpeakerVolume(Cpu& c) {
+    g_speaker_volume = static_cast<uint8_t>(c.r[3]);
+    for (Speaker& s : g_speakers) s.set_volume(g_speaker_volume);
+}
+void WPADCanSendStreamData(Cpu& c) { c.r[3] = here(c.r[3]); }
+void WPADSendStreamData(Cpu& c) {  // (chan, data, length): 20 bytes of 4-bit ADPCM, 40 samples at 6 kHz
+    const uint32_t ch = c.r[3], n = c.r[5];
+    if (!here(ch)) {
+        c.r[3] = kErrNoController;
+        return;
+    }
+    if (n > 64) rt::fatal(&c, "WPADSendStreamData(%u, %08X, %u): more than a report holds", ch, c.r[4], n);
+    if (g_speaker[ch]) g_speakers[ch].send(rt::guest_ptr(c.r[4]), n);
+    c.r[3] = kErrNone;
+}
+// ---- the pointer's camera
 void WPADGetDpdSensitivity(Cpu& c) { c.r[3] = 3; }
 void WPADIsDpdEnabled(Cpu& c) { c.r[3] = g_dpd[c.r[3] & 3]; }
 void WPADGetDpdFormat(Cpu& c) { c.r[3] = 0; }
 void WPADControlDpd(Cpu& c) {  // (chan, cmd, cb)
     const uint32_t ch = c.r[3];
-    if (ch != 0) {
+    if (!here(ch)) {
         c.r[3] = kErrNoController;
         return;
     }
-    g_dpd[0] = c.r[4] != 0;
-    later(c.r[5], 0, kErrNone);
+    g_dpd[ch] = c.r[4] != 0;
+    later(c.r[5], ch, kErrNone);
     c.r[3] = kErrNone;
 }
 

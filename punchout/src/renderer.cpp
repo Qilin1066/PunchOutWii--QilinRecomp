@@ -1350,11 +1350,13 @@ struct Renderer::Impl {
         ensure(s.vertices, zeros_at + 64, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         ensure(s.indices, std::max<size_t>(1, f.indices.size()) * 4, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
         ensure(s.states, std::max<size_t>(1, f.states.size()) * sizeof(gx::State), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        std::memcpy(s.vertices.mapped, f.vertices.data(), full_bytes);
-        std::memcpy(static_cast<uint8_t*>(s.vertices.mapped) + small_at, f.small.data(), small_bytes);
+        // (An empty vector's data() may be null, which memcpy mustn't be given even for no bytes.)
+        const auto put = [](void* to, const void* from, size_t bytes) { if (bytes) std::memcpy(to, from, bytes); };
+        put(s.vertices.mapped, f.vertices.data(), full_bytes);
+        put(static_cast<uint8_t*>(s.vertices.mapped) + small_at, f.small.data(), small_bytes);
         std::memset(static_cast<uint8_t*>(s.vertices.mapped) + zeros_at, 0, 64);
-        std::memcpy(s.indices.mapped, f.indices.data(), f.indices.size() * 4);
-        std::memcpy(s.states.mapped, f.states.data(), f.states.size() * sizeof(gx::State));
+        put(s.indices.mapped, f.indices.data(), f.indices.size() * 4);
+        put(s.states.mapped, f.states.data(), f.states.size() * sizeof(gx::State));
 
         check(vkResetFences(gpu.device, 1, &s.fence), "vkResetFences");
         check(vkResetCommandBuffer(s.cmd, 0), "vkResetCommandBuffer");

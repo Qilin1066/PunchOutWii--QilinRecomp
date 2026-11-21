@@ -40,6 +40,7 @@ constexpr uint32_t kCreateThread = 0x802085CCu, kResumeThread = 0x80208C3Cu, kSu
                    kTicksToCalendarTime = 0x802095BCu, kShutdownSystem = 0x80206B84u, kRestart = 0x80206CA0u;
 
 // Guest memory the tests use (MEM1, clear of the addresses the OS fixes).
+constexpr uint32_t kThreadC = 0x80100800u, kStackC = 0x80128000u;
 constexpr uint32_t kThreadA = 0x80100000u, kThreadB = 0x80100400u, kStackA = 0x80110000u, kStackB = 0x80120000u,
                    kStackSize = 0x8000u, kMutex = 0x80130000u, kCond = 0x80130100u, kQueue = 0x80130200u,
                    kQueueArray = 0x80130300u, kAlarm = 0x80130400u, kOut = 0x80130500u, kCalendar = 0x80130600u;
@@ -80,7 +81,7 @@ void expect(const char* test, const std::vector<std::string>& want) {
 // ---- the guest functions, at made-up addresses in the function table.
 constexpr uint32_t kFnHigh = 0x80004000u, kFnLowSender = 0x80004010u, kFnMutexTaker = 0x80004020u,
                    kFnCounter = 0x80004030u, kFnExiter = 0x80004040u, kFnAlarm = 0x80004050u,
-                   kFnSelf = 0x80004060u;
+                   kFnSelf = 0x80004060u, kFnHolder = 0x80004070u, kFnWanter = 0x80004080u, kFnMiddle = 0x80004090u;
 
 void fn_high(Cpu& c) {  // runs as soon as it's resumed, and returns a value
     note("high " + std::to_string(c.r[3]));
@@ -125,6 +126,30 @@ void fn_self(Cpu& c) {  // suspends itself; main resumes it
     c.r[3] = 0;
 }
 
+// Priority inversion: a low thread holds a mutex a high one wants, and a middle one is ready.
+void fn_holder(Cpu& c) {  // low
+    os(c, kLockMutex, kMutex);
+    note("low-locks");
+    os(c, kResumeThread, kThreadB);  // the high one: runs at once, and blocks on the mutex
+    note("low-goes-on");
+    os(c, kResumeThread, kThreadC);  // the middle one: must not run before the mutex is free
+    note("low-unlocks");
+    os(c, kUnlockMutex, kMutex);
+    note("low-done");
+    c.r[3] = 0;
+}
+void fn_wanter(Cpu& c) {  // high
+    note("high-wants");
+    os(c, kLockMutex, kMutex);
+    note("high-has-mutex");
+    os(c, kUnlockMutex, kMutex);
+    c.r[3] = 0;
+}
+void fn_middle(Cpu& c) {
+    note("middle");
+    c.r[3] = 0;
+}
+
 // What qilin lift generates for a replaced function: a stub in the function
 // table that hands the call to the runtime's registry.
 template <uint32_t A>
@@ -141,6 +166,9 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     {kFnExiter, fn_exiter},
     {kFnAlarm, fn_alarm},
     {kFnSelf, fn_self},
+    {kFnHolder, fn_holder},
+    {kFnWanter, fn_wanter},
+    {kFnMiddle, fn_middle},
     STUB(kCreateAlarm),
     STUB(kSetAlarm),
     STUB(kInitMessageQueue),
@@ -223,6 +251,19 @@ void test_mutex_and_condition(Cpu& c) {
     os(c, kJoinThread, kThreadA, 0);
     expect("a mutex blocks its taker; waiting on a condition releases it, recursion included",
            {"taker", "main-waits", "taker-has-mutex", "taker-done", "main-woke owner=1 count=1"});
+}
+
+void test_priority_inheritance(Cpu& c) {
+    os(c, kInitMutex, kMutex);
+    create(c, kThreadA, kFnHolder, 0, kStackA, 20);
+    create(c, kThreadB, kFnWanter, 0, kStackB, 8);
+    create(c, kThreadC, kFnMiddle, 0, kStackC, 12);
+    os(c, kResumeThread, kThreadA);  // below main: runs when main waits for it
+    os(c, kJoinThread, kThreadA, 0);
+    os(c, kJoinThread, kThreadB, 0);
+    os(c, kJoinThread, kThreadC, 0);
+    expect("a mutex's waiter lends its priority to the owner: no thread in between runs first",
+           {"low-locks", "high-wants", "low-goes-on", "low-unlocks", "high-has-mutex", "middle", "low-done"});
 }
 
 void test_yield_and_suspend(Cpu& c) {
@@ -382,6 +423,7 @@ int main(int argc, char** argv) {
     test_preemption(c);
     test_message_queue(c);
     test_mutex_and_condition(c);
+    test_priority_inheritance(c);
     test_yield_and_suspend(c);
     test_exit(c);
     test_alarm_and_sleep(c);

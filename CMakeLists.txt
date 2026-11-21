@@ -43,6 +43,20 @@ if(NOT MSVC)
     add_compile_options(-ffp-contract=off)
 endif()
 
+# Sanitizers (GCC and Clang): -DQILIN_SANITIZE=address,undefined builds everything with them,
+# and the first report stops the program. The code lifted from the game is left out unless
+# QILIN_SANITIZE_LIFTED is on (32 large files: several times the build time); the lifter's output
+# is covered either way by the differential test, whose lifted code always gets them.
+set(QILIN_SANITIZE "" CACHE STRING "Sanitizers to build with, e.g. address,undefined (GCC, Clang)")
+option(QILIN_SANITIZE_LIFTED "With QILIN_SANITIZE: the game's lifted code too" OFF)
+if(QILIN_SANITIZE)
+    if(MSVC)
+        message(FATAL_ERROR "QILIN_SANITIZE is for GCC and Clang")
+    endif()
+    add_compile_options(-fsanitize=${QILIN_SANITIZE} -fno-sanitize-recover=all -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${QILIN_SANITIZE})
+endif()
+
 # For this machine's own CPU (a build that runs only here, as
 # tools/build-punchout.sh makes): the Raspberry Pi 4's Cortex-A72, say,
 # instead of the baseline ARMv8.0 or x86-64. Off by default (CI, downloads).
@@ -332,7 +346,11 @@ if(QILIN_GAME_DOL)
         # Lifted code calls nest as deeply as the guest's: a large host stack.
         target_link_options(punchout PRIVATE /STACK:16777216)
     else()
-        set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w")
+        if(QILIN_SANITIZE AND NOT QILIN_SANITIZE_LIFTED)
+            set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w;-fno-sanitize=all;-g0")
+        else()
+            set_source_files_properties(${gen_sources} PROPERTIES COMPILE_OPTIONS "-w")
+        endif()
     endif()
 endif()
 

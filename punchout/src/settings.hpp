@@ -64,6 +64,11 @@ struct Settings {
     bool variable_refresh = false;    // a G-Sync/FreeSync/VRR display: no mode switch, no locking to the refresh
     // [controls]
     bool rumble = true;  // the Wii Remote's rumble on the controller
+    // A second player's Wii Remote (Head-to-Head): 0 none, every controller plays the first remote;
+    // 1 the second controller to have a button pressed, the first playing the first remote with the
+    // keyboard and mouse; 2 the first controller, player one on the keyboard and mouse alone.
+    unsigned second_player = 0;
+    bool speaker = true;  // the Wii Remote speaker's sounds, from the PC's speakers
     std::vector<Binding> controls[kControlCount];
     // [console]: what the game reads as the Wii's own settings
     unsigned language = 1;   // 1 English, 2 German, 3 French, 4 Spanish, 5 Italian (the PAL disc's)

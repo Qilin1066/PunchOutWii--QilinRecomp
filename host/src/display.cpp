@@ -123,30 +123,55 @@ struct Display::Impl {
     uint64_t present_id = 0, waitable_id = 0;
     PresentStats present_stats;
     uint32_t buttons = 0;
-    SDL_Gamepad* pad = nullptr;
-    bool rumbling = false;
-    bool pad_pressed = false;  // a button seen since the pad was opened (said once)
+    struct Pad {
+        SDL_Gamepad* pad = nullptr;
+        SDL_JoystickID id = 0;
+        uint32_t buttons = 0;
+        float stick_x = 0, stick_y = 0;
+        bool rumbling = false;
+        bool pressed = false;  // a button seen since it was opened (said once; it has joined)
+    };
+    std::vector<Pad> pads;                // every controller, as opened
+    std::vector<SDL_JoystickID> joined;   // in the order each first had a button pressed
     bool log_input = false;    // PUNCHOUT_INPUT_LOG: every change of the buttons
     uint32_t logged = 0;
 
-    // Play with this one (the first, or the one just connected if there's none).
+    // Every controller is played with: the first SDL lists can be a virtual pad or a wheel's base.
     void open_pad(SDL_JoystickID id) {
-        if (pad) return;
-        pad = SDL_OpenGamepad(id);
-        pad_pressed = false;
+        for (const Pad& p : pads)
+            if (p.id == id) return;
+        SDL_Gamepad* pad = SDL_OpenGamepad(id);
         if (!pad) {
             say("controllers: can't open \"%s\": %s", SDL_GetGamepadNameForID(id) ? SDL_GetGamepadNameForID(id) : "?", SDL_GetError());
             return;
         }
+        pads.push_back({pad, id});
         const char* name = SDL_GetGamepadName(pad);
-        say("controllers: playing with \"%s\" (press a button to check it)", name ? name : "a controller");
+        say("controllers: \"%s\" connected (press a button to check it)", name ? name : "a controller");
     }
-    void open_first_pad() {
+    void close_pad(SDL_JoystickID id) {
+        for (size_t i = 0; i < pads.size(); ++i)
+            if (pads[i].id == id) {
+                const char* name = SDL_GetGamepadName(pads[i].pad);
+                say("controllers: \"%s\" disconnected", name ? name : "the controller");
+                SDL_CloseGamepad(pads[i].pad);
+                pads.erase(pads.begin() + static_cast<std::ptrdiff_t>(i));
+                std::erase(joined, id);
+                return;
+            }
+    }
+    void open_all_pads() {
         int n = 0;
         if (SDL_JoystickID* ids = SDL_GetGamepads(&n)) {
-            for (int i = 0; i < n && !pad; ++i) open_pad(ids[i]);
+            for (int i = 0; i < n; ++i) open_pad(ids[i]);
             SDL_free(ids);
         }
+    }
+    Pad* pad_at(int place) {
+        if (place < 0 || static_cast<size_t>(place) >= joined.size()) return nullptr;
+        for (Pad& p : pads)
+            if (p.id == joined[static_cast<size_t>(place)]) return &p;
+        return nullptr;
     }
     float stick_x = 0, stick_y = 0;
     bool moved = false;
@@ -434,7 +459,7 @@ Display::Display(const Options& options) : impl_(std::make_unique<Impl>()) {
         if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) die("SDL can't start: %s", SDL_GetError());
         d.log_input = std::getenv("PUNCHOUT_INPUT_LOG") != nullptr;
         list_controllers();
-        d.open_first_pad();  // those already connected (not only the ones SDL announces later)
+        d.open_all_pads();  // those already connected (not only the ones SDL announces later)
         const SDL_DisplayID on = display_named(options.monitor);
         SDL_PropertiesID props = SDL_CreateProperties();
         SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, options.title);
@@ -515,13 +540,7 @@ bool Display::poll() {
         if (e.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) d.need_rebuild = true;
         if (e.type == SDL_EVENT_JOYSTICK_ADDED && !SDL_IsGamepad(e.jdevice.which)) list_controllers();  // say why it isn't used
         if (e.type == SDL_EVENT_GAMEPAD_ADDED) d.open_pad(e.gdevice.which);
-        if (e.type == SDL_EVENT_GAMEPAD_REMOVED && d.pad && SDL_GetGamepadID(d.pad) == e.gdevice.which) {
-            say("controllers: \"%s\" disconnected", SDL_GetGamepadName(d.pad) ? SDL_GetGamepadName(d.pad) : "the controller");
-            SDL_CloseGamepad(d.pad);
-            d.pad = nullptr;
-            d.rumbling = false;
-            d.open_first_pad();  // another takes over, if there is one
-        }
+        if (e.type == SDL_EVENT_GAMEPAD_REMOVED) d.close_pad(e.gdevice.which);
         // Full screen, whatever else is going on.
         if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
             (e.key.key == SDLK_F11 || (e.key.key == SDLK_RETURN && (e.key.mod & SDL_KMOD_ALT)))) {
@@ -537,7 +556,9 @@ bool Display::poll() {
         }
     }
     uint32_t b = 0;
-    if (SDL_Gamepad* p = d.pad) {
+    d.stick_x = d.stick_y = 0;
+    for (Impl::Pad& pad : d.pads) {
+        SDL_Gamepad* p = pad.pad;
         struct Map {
             SDL_GamepadButton sdl;
             uint32_t bit;
@@ -552,27 +573,32 @@ bool Display::poll() {
             {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, kPadRB},  {SDL_GAMEPAD_BUTTON_LEFT_STICK, kPadL3},
             {SDL_GAMEPAD_BUTTON_RIGHT_STICK, kPadR3},
         };
+        uint32_t held = 0;
         for (const Map& m : kMap)
-            if (SDL_GetGamepadButton(p, m.sdl)) b |= m.bit;
-        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16384) b |= kPadLT;
-        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16384) b |= kPadRT;
+            if (SDL_GetGamepadButton(p, m.sdl)) held |= m.bit;
+        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16384) held |= kPadLT;
+        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16384) held |= kPadRT;
         const int x = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
-        if (x < -16384) b |= kPadLeft;
-        if (x > 16384) b |= kPadRight;
-        if (y < -16384) b |= kPadUp;
-        if (y > 16384) b |= kPadDown;
+        if (x < -16384) held |= kPadLeft;
+        if (x > 16384) held |= kPadRight;
+        if (y < -16384) held |= kPadUp;
+        if (y > 16384) held |= kPadDown;
         const auto axis = [](int v) {  // a dead zone of a quarter, then linear to 1
             const float f = std::clamp(v / 32767.0f, -1.0f, 1.0f);
             return std::fabs(f) < 0.25f ? 0.0f : (f - std::copysign(0.25f, f)) / 0.75f;
         };
-        d.stick_x = axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX));
-        d.stick_y = -axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY));
-    } else {
-        d.stick_x = d.stick_y = 0;
-    }
-    if (d.pad && !d.pad_pressed && (b & ~uint32_t(kPadClick))) {
-        d.pad_pressed = true;
-        say("controllers: \"%s\" works (buttons 0x%x)", SDL_GetGamepadName(d.pad) ? SDL_GetGamepadName(d.pad) : "the controller", b);
+        pad.stick_x = axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX));
+        pad.stick_y = -axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY));
+        // The right stick is whichever controller's is pushed furthest.
+        if (pad.stick_x * pad.stick_x + pad.stick_y * pad.stick_y > d.stick_x * d.stick_x + d.stick_y * d.stick_y)
+            d.stick_x = pad.stick_x, d.stick_y = pad.stick_y;
+        pad.buttons = held;
+        b |= held;
+        if (!pad.pressed && held) {
+            pad.pressed = true;
+            d.joined.push_back(pad.id);
+            say("controllers: \"%s\" works (buttons 0x%x)", SDL_GetGamepadName(p) ? SDL_GetGamepadName(p) : "the controller", held);
+        }
     }
     if (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) b |= kPadClick;
     if (d.log_input && b != d.logged) say("input: buttons 0x%05x", b);
@@ -604,11 +630,30 @@ bool Display::mouse_moved(float& x, float& y) const {
     return true;
 }
 
+int Display::joined_pads() const { return static_cast<int>(impl_->joined.size()); }
+uint32_t Display::pad_buttons(int place) const {
+    const Impl::Pad* p = impl_->pad_at(place);
+    return p ? p->buttons : 0;
+}
+
+void Display::pad_right_stick(int place, float& x, float& y) const {
+    const Impl::Pad* p = impl_->pad_at(place);
+    x = p ? p->stick_x : 0.0f;
+    y = p ? p->stick_y : 0.0f;
+}
+
+namespace {
+void set_rumble(SDL_Gamepad* pad, bool& rumbling, bool on) {
+    if (on == rumbling) return;
+    rumbling = on;
+    SDL_RumbleGamepad(pad, on ? 0xFFFF : 0, on ? 0xFFFF : 0, on ? 60000 : 0);
+}
+}  // namespace
 void Display::rumble(bool on) {
-    Impl& d = *impl_;
-    if (!d.pad || on == d.rumbling) return;
-    d.rumbling = on;
-    SDL_RumbleGamepad(d.pad, on ? 0xFFFF : 0, on ? 0xFFFF : 0, on ? 60000 : 0);
+    for (Impl::Pad& p : impl_->pads) set_rumble(p.pad, p.rumbling, on);
+}
+void Display::rumble_pad(int place, bool on) {
+    if (Impl::Pad* p = impl_->pad_at(place)) set_rumble(p->pad, p->rumbling, on);
 }
 
 void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh, float aspect, uint32_t lines) {

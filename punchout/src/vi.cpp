@@ -11,6 +11,7 @@
 #include "boot.hpp"
 #include "recorder.hpp"
 #include "audio.hpp"
+#include "speaker.hpp"
 #include "gpu.hpp"
 #include "video.hpp"
 #include "os.hpp"
@@ -64,6 +65,12 @@ void report() {
             static_cast<unsigned long long>(a.voices - a_last.voices), static_cast<unsigned long long>(a.mails_in - a_last.mails_in),
             static_cast<unsigned long long>(a.mails_out - a_last.mails_out));
     a_last = a;
+    for (int r = 0; r < 2; ++r) {
+        uint64_t blocks, loud;
+        g_speakers[r].take_counts(blocks, loud);
+        if (loud) rt::log("  the Wii Remote %d's speaker: %llu blocks of sound, %llu of them not silent", r + 1, static_cast<unsigned long long>(blocks),
+                          static_cast<unsigned long long>(loud));
+    }
     if (g_late.retraces) {
         rt::log("  retraces on time: average %.2f ms late, worst %.2f ms; %llu over 1 ms late, %llu over 4 ms; %llu a frame behind (restarted)",
                 double(g_late.total_us) / 1000.0 / double(g_late.retraces), double(g_late.worst_us) / 1000.0,

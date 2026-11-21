@@ -283,10 +283,21 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
             if (!boolean(s.rumble)) return false;
             continue;
         }
+        if (name == "speaker") {
+            if (!boolean(s.speaker)) return false;
+            continue;
+        }
+        if (name == "second_player") {
+            if (v == "off") s.second_player = 0;
+            else if (v == "second controller") s.second_player = 1;
+            else if (v == "first controller") s.second_player = 2;
+            else return fail("second_player is off, second controller or first controller");
+            continue;
+        }
         unsigned c = 0;
         while (c < kControlCount && name != kControlNames[c]) ++c;
         if (c == kControlCount)
-            return fail("'" + name + "' isn't a Wii Remote button (up down left right one two a plus minus home) or rumble");
+            return fail("'" + name + "' isn't a Wii Remote button (up down left right one two a plus minus home), rumble, speaker or second_player");
         if (seen[c]) return fail("'" + name + "' is set twice");
         seen[c] = true;
         s.controls[c].clear();
@@ -352,6 +363,14 @@ std::string settings_text(const Settings& s) {
         "[controls]\n"
         "# The Wii Remote's rumble, on the controller.\n"
         "rumble = " + b(s.rumble) + "\n"
+        "# The sounds the game plays on the Wii Remote's own speaker, from the PC's speakers.\n"
+        "speaker = " + b(s.speaker) + "\n"
+        "# A second player (Head-to-Head), with a controller as a second Wii Remote, by the same pad buttons:\n"
+        "#   off                every controller plays the first Wii Remote\n"
+        "#   second controller  the first controller to have a button pressed plays the first Wii Remote (with\n"
+        "#                      the keyboard and mouse), the next one the second\n"
+        "#   first controller   player one has the keyboard and mouse, the controller is the second Wii Remote\n"
+        "second_player = " + std::string(s.second_player == 1 ? "second controller" : s.second_player == 2 ? "first controller" : "off") + "\n"
         "# The Wii Remote held sideways, buttons only. Each of its buttons takes a list of inputs, separated by\n"
         "# commas; an empty list leaves it unused. The settings menu's Controls page sets them by pressing them.\n"
         "#   pad:<button>  a gamepad's button by an Xbox pad's names: Up Down Left Right A B X Y Start Back Guide\n"

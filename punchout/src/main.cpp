@@ -41,6 +41,8 @@
 #include "priority.hpp"
 #include "profile.hpp"
 #include "settings.hpp"
+#include "speaker.hpp"
+#include "build.hpp"
 #include "qilin/host/paths.hpp"
 #include "qilin/rt/report.hpp"
 #include "renderer.hpp"
@@ -287,6 +289,67 @@ static void report_timing(qilin::host::Display* display, punchout::Menu* menu, q
     }
 }
 
+// --check-speaker: the remote speaker's decoder (speaker.hpp) against the encoder in the game's
+// own code (the SDK's WENC, lifted: (state, 0 first or 1 going on, samples, count, bytes out)).
+// The encoder keeps the signal as the remote will decode it, and its step, in its state: after
+// every block of every test signal both must be exactly the decoder's, and they are looked for
+// there (wherever the SDK keeps them). No game runs: only that one function.
+static int check_speaker_decoder() {
+    namespace rt = qilin::rt;
+    constexpr uint32_t kEncode = 0x802166B4u, kState = 0x80F00000u, kPcm = 0x80F00100u, kOut = 0x80F00200u;
+    rt::Cpu c = rt::new_cpu();
+    rt::set_thread_cpu(&c);
+    unsigned blocks = 0, exact = 0;
+    double worst = 0;
+    int where_signal = -1, where_step = -1;
+    for (int signal = 0; signal < 5; ++signal) {
+        punchout::SpeakerDecoder d;
+        std::memset(rt::guest_ptr(kState), 0, 0x100);
+        uint32_t noise = 12345;
+        for (int block = 0; block < 400; ++block) {
+            int16_t pcm[40];
+            for (int i = 0; i < 40; ++i) {
+                const double t = (block * 40 + i) / 6000.0;
+                noise = noise * 1664525u + 1013904223u;
+                const double v = signal == 0   ? 20000 * std::sin(6.283185307179586 * 440 * t)
+                                 : signal == 1 ? 32767 * std::sin(6.283185307179586 * (100 + 2000 * t) * t)
+                                 : signal == 2 ? (int32_t(noise >> 16) - 32768) * 0.9
+                                 : signal == 3 ? ((block / 3) % 2 ? 32767.0 : -32768.0)
+                                               : 0.0;
+                pcm[i] = static_cast<int16_t>(std::clamp(v, -32768.0, 32767.0));
+                rt::poke16(kPcm + 2 * uint32_t(i), static_cast<uint16_t>(pcm[i]));
+            }
+            c.r[1] = punchout::build::kStackTop - 0x100, c.r[2] = punchout::build::kSdaBase2, c.r[13] = punchout::build::kSdaBase;
+            c.r[3] = kState, c.r[4] = block == 0 ? 0 : 1, c.r[5] = kPcm, c.r[6] = 40, c.r[7] = kOut;
+            rt::call(c, kEncode);
+            int16_t out[40];
+            d.decode(rt::guest_ptr(kOut), 20, out);
+            for (int i = 0; i < 40; ++i) worst = std::max(worst, std::fabs(double(out[i]) - pcm[i]));
+            // The decoder's signal and step, somewhere in the encoder's state (32-bit words).
+            ++blocks;
+            bool has_signal = false, has_step = false;
+            for (int at = 0; at < 0x40; at += 4) {
+                const auto word = static_cast<int32_t>(rt::peek32(kState + uint32_t(at)));
+                if (word == d.signal && (where_signal < 0 || where_signal == at) && !has_signal) {
+                    if (d.signal != 0) where_signal = at;
+                    has_signal = true;
+                }
+                if (word == d.step && (where_step < 0 || where_step == at)) where_step = at, has_step = true;
+            }
+            if (has_signal && has_step) ++exact;
+            else if (blocks - exact <= 3)
+                std::printf("  signal %d, block %d: the decoder has signal %d and step %d; the encoder's state: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                            signal, block, d.signal, d.step, rt::peek32(kState), rt::peek32(kState + 4), rt::peek32(kState + 8),
+                            rt::peek32(kState + 12), rt::peek32(kState + 16), rt::peek32(kState + 20), rt::peek32(kState + 24), rt::peek32(kState + 28));
+        }
+    }
+    std::printf("the speaker's decoder against the game's encoder: %u blocks of 40 samples, %u with the encoder's signal and step exactly the "
+                "decoder's (kept at +%d and +%d of its state); the codec's own largest error, on a full-scale square wave: %.0f\n",
+                blocks, exact, where_signal, where_step, worst);
+    std::fflush(nullptr);
+    return blocks == exact ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     namespace rt = qilin::rt;
     punchout::set_command_line(argc, argv);  // for the game's reset
@@ -320,15 +383,19 @@ int main(int argc, char** argv) {
         folder = argv[2];
         argc = 1;
     }
+    // --check-speaker <disc>: the Wii Remote speaker's decoder against the game's own encoder (below).
+    bool check_speaker = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--headless") == 0) headless = true;
+        if (std::strcmp(argv[i], "--check-speaker") == 0) check_speaker = headless = true;
+        else if (std::strcmp(argv[i], "--headless") == 0) headless = true;
         else if (std::strcmp(argv[i], "--offscreen") == 0) offscreen = true;
         else if (!folder) folder = argv[i];
         else folder = nullptr, i = argc;  // too many: usage
     }
     if (!folder) {
         std::fprintf(stderr, "usage: punchout [--headless | --offscreen] <folder with the extracted disc: sys/main.dol, sys/boot.bin, files/>\n"
-                             "       punchout --bench-record <file.dff> [times] | --render-dff <file.dff> <out.ppm> [loops]\n");
+                             "       punchout --bench-record <file.dff> [times] | --render-dff <file.dff> <out.ppm> [loops]\n"
+                             "       punchout --check-speaker <folder>\n");
         return 2;
     }
     // The log, beside the settings: punchout.log for this run, punchout.old.log
@@ -405,6 +472,7 @@ int main(int argc, char** argv) {
         std::_Exit(0);
     }
     punchout::load_game(folder);
+    if (check_speaker) std::_Exit(check_speaker_decoder());
 
     const std::filesystem::path data = qilin::host::user_folder();
     punchout::Settings settings = punchout::load_settings(data);
@@ -489,31 +557,40 @@ int main(int argc, char** argv) {
     const char* every_text = std::getenv("PUNCHOUT_DUMP_EVERY");
     const uint64_t every = every_text ? std::max<uint64_t>(1, std::strtoull(every_text, nullptr, 10)) : 60;
     const std::vector<Press> presses = scripted_input(std::getenv("PUNCHOUT_INPUT"));
+    // PUNCHOUT_INPUT2: a second player's controller and its presses (the second Wii Remote is there from the start).
+    const bool scripted_player2 = std::getenv("PUNCHOUT_INPUT2") != nullptr;
+    const std::vector<Press> presses2 = scripted_input(std::getenv("PUNCHOUT_INPUT2"));
     const auto t0 = std::chrono::steady_clock::now();
-    float cursor_x = 0, cursor_y = 0;
+    float cursor_x = 0, cursor_y = 0, cursor2_x = 0, cursor2_y = 0;  // the second player's: from the middle
     struct Point {
         double at;
         float x, y;
     };
-    std::vector<Point> points;  // PUNCHOUT_POINTER's schedule, in time order
-    if (const char* p = std::getenv("PUNCHOUT_POINTER")) {
+    // PUNCHOUT_POINTER's schedule, in time order, and PUNCHOUT_POINTER2's for the second player.
+    const auto pointer_script = [](const char* variable, float& start_x, float& start_y) {
+        std::vector<Point> points;
+        const char* p = std::getenv(variable);
+        if (!p) return points;
         for (const char* at = p; *at;) {
             Point pt{0, 0, 0};
             int used = 0;
             if (std::sscanf(at, "%f,%f%n", &pt.x, &pt.y, &used) != 2)
-                rt::fatal(nullptr, "PUNCHOUT_POINTER: expected x,y at \"%s\"", at);
+                rt::fatal(nullptr, "%s: expected x,y at \"%s\"", variable, at);
             at += used;
             if (*at == '@') {
-                if (std::sscanf(at + 1, "%lf%n", &pt.at, &used) != 1) rt::fatal(nullptr, "PUNCHOUT_POINTER: expected seconds after @");
+                if (std::sscanf(at + 1, "%lf%n", &pt.at, &used) != 1) rt::fatal(nullptr, "%s: expected seconds after @", variable);
                 at += 1 + used;
             }
-            if (!points.empty() && pt.at < points.back().at) rt::fatal(nullptr, "PUNCHOUT_POINTER: times must increase");
+            if (!points.empty() && pt.at < points.back().at) rt::fatal(nullptr, "%s: times must increase", variable);
             points.push_back(pt);
             if (*at == ';') ++at;
-            else if (*at) rt::fatal(nullptr, "PUNCHOUT_POINTER: unexpected \"%s\"", at);
+            else if (*at) rt::fatal(nullptr, "%s: unexpected \"%s\"", variable, at);
         }
-        if (!points.empty()) cursor_x = points[0].x, cursor_y = points[0].y;
-    }
+        if (!points.empty()) start_x = points[0].x, start_y = points[0].y;
+        return points;
+    };
+    const std::vector<Point> points = pointer_script("PUNCHOUT_POINTER", cursor_x, cursor_y);
+    const std::vector<Point> points2 = pointer_script("PUNCHOUT_POINTER2", cursor2_x, cursor2_y);
     auto last = t0;
     uint64_t sequence = 0, shown = 0;
     std::vector<uint8_t> rgba;
@@ -537,6 +614,7 @@ int main(int argc, char** argv) {
             if (menu->take_controls_changed()) look_up_controls();
             if (menu->is_open()) {  // the game is parked: the last picture, with the menu over it
                 punchout::g_controls.store(0, std::memory_order_relaxed);
+                punchout::g_controls2.store(0, std::memory_order_relaxed);
                 display->rumble(false);
                 display->present_again();
                 if (!settings.vsync) SDL_Delay(8);  // without vsync the menu needn't spin
@@ -546,20 +624,33 @@ int main(int argc, char** argv) {
         }
         if (renderer) renderer->set_anisotropy(settings.anisotropy);  // the menu's, once it's closed (unchanged: nothing to do)
         if (renderer) renderer->set_true_color(settings.true_color);
+        punchout::g_speakers_on = settings.speaker;  // (read by the guest's sound thread: a bool, set from here alone)
         {  // (without a display, --headless: the scripted presses and pointer alone)
-            uint32_t held = display ? display->buttons() : 0;
+            // Whose controller is whose (settings.hpp, second_player): with one player every
+            // controller is theirs; with two, controllers go by the order each first had a
+            // button pressed, and the keyboard and mouse are always player one's.
+            const unsigned two = scripted_player2 ? 1 : settings.second_player;
+            const int place1 = two == 0 ? -1 : two == 1 ? 0 : -2, place2 = two == 1 ? 1 : two == 2 ? 0 : -2;  // -1 all, -2 none
+            const uint32_t all = display ? display->buttons() : 0;
+            uint32_t held = (place1 == -1 ? all : place1 >= 0 && display ? display->pad_buttons(place1) : 0) | (all & qilin::host::kPadClick);
+            uint32_t held2 = place2 >= 0 && display ? display->pad_buttons(place2) : 0;
             const double now = punchout::frame_count() / 60.0;  // game time: see the top
             for (const Press& p : presses)
                 if (now >= p.at && now < p.at + 0.2) held |= p.button;
-            uint32_t controls = 0;
+            for (const Press& p : presses2)
+                if (now >= p.at && now < p.at + 0.2) held2 |= p.button;
+            uint32_t controls = 0, controls2 = 0;
             for (unsigned c = 0; c < punchout::kControlCount; ++c)
                 for (const Input& in : bindings[c]) {
                     const bool on = in.kind == punchout::Binding::kPad     ? (held & in.pad) != 0
                                     : in.kind == punchout::Binding::kMouse ? (held & qilin::host::kPadClick) != 0
                                                                            : display && display->key_down(in.key);
                     if (on) controls |= 1u << c;
+                    if (in.kind == punchout::Binding::kPad && (held2 & in.pad)) controls2 |= 1u << c;  // the same pad buttons
                 }
             punchout::g_controls.store(controls, std::memory_order_relaxed);
+            punchout::g_controls2.store(controls2, std::memory_order_relaxed);
+            punchout::g_player2.store(scripted_player2 || (place2 >= 0 && display && display->joined_pads() > place2), std::memory_order_relaxed);
             // The pointer: the mouse where it moves, the right stick at a screen's width a second.
             const auto tick = std::chrono::steady_clock::now();
             const float dt = std::chrono::duration<float>(tick - last).count();
@@ -568,13 +659,32 @@ int main(int argc, char** argv) {
             if (display && display->mouse_moved(mx, my)) cursor_x = mx, cursor_y = my;
             for (const Point& p : points)
                 if (now >= p.at && now < p.at + 0.2) cursor_x = p.x, cursor_y = p.y;
-            if (display) display->right_stick(sx, sy);
+            // (With two players each controller's stick moves its own player's pointer; the mouse is player one's.)
+            if (display && place1 == -1) display->right_stick(sx, sy);
+            else if (display) display->pad_right_stick(place1, sx, sy);
             cursor_x = std::clamp(cursor_x + sx * dt * 2.0f, -1.2f, 1.2f);
             cursor_y = std::clamp(cursor_y + sy * dt * 2.0f, -1.2f, 1.2f);
             punchout::g_pointer_x.store(int32_t(cursor_x * 1000), std::memory_order_relaxed);
             punchout::g_pointer_y.store(int32_t(cursor_y * 1000), std::memory_order_relaxed);
+            float sx2 = 0, sy2 = 0;
+            if (display) display->pad_right_stick(place2, sx2, sy2);
+            for (const Point& p : points2)
+                if (now >= p.at && now < p.at + 0.2) cursor2_x = p.x, cursor2_y = p.y;
+            cursor2_x = std::clamp(cursor2_x + sx2 * dt * 2.0f, -1.0f, 1.0f);  // (kept on the screen: it has no mouse to bring it back)
+            cursor2_y = std::clamp(cursor2_y + sy2 * dt * 2.0f, -1.0f, 1.0f);
+            punchout::g_pointer2_x.store(int32_t(cursor2_x * 1000), std::memory_order_relaxed);
+            punchout::g_pointer2_y.store(int32_t(cursor2_y * 1000), std::memory_order_relaxed);
             punchout::g_pointer_on.store(std::fabs(cursor_x) <= 1.1f && std::fabs(cursor_y) <= 1.1f, std::memory_order_relaxed);
-            if (display) display->rumble(settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed));
+            if (display) {
+                const bool r1 = settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed);
+                const bool r2 = settings.rumble && punchout::g_rumble2.load(std::memory_order_relaxed);
+                if (place1 == -1) {
+                    display->rumble(r1);
+                } else {
+                    display->rumble_pad(place1, r1);  // (a place nobody has: nothing)
+                    display->rumble_pad(place2, r2);
+                }
+            }
         }
         if (!renderer) {  // headless: nothing shows the frames, so they're only waited for, not converted
             if (audio) report_timing(nullptr, nullptr, audio.get());  // (PUNCHOUT_AUDIO: the sound queue's numbers)

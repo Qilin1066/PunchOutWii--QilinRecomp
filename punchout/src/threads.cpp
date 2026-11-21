@@ -21,6 +21,7 @@
 #include <cstring>
 #include <deque>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -68,7 +69,8 @@ struct Thread {
     uint32_t guest = 0;
     Cpu* cpu = nullptr;          // the main thread's lives in start_game
     std::unique_ptr<Cpu> own;    // other threads' here
-    int priority = 16;
+    int priority = 16;           // the one it runs at: its own, or a higher one lent by a mutex's waiter
+    int base = 16;               // its own
     int suspend = 0;
     uint16_t state = kReady;
     bool detached = false;
@@ -308,7 +310,7 @@ void OSCreateThread(Cpu& c) {  // (thread, func, param, stack, stackSize, priori
     th->guest = t;
     th->own = std::make_unique<Cpu>(rt::new_cpu());
     th->cpu = th->own.get();
-    th->priority = prio;
+    th->priority = th->base = prio;
     th->suspend = 1;
     th->state = kReady;
     th->detached = attr & 1;
@@ -424,10 +426,42 @@ void OSSleepTicks(Cpu& c) {  // (OSTime ticks): r3:r4
     sleep_on(c, g_current->guest + kQueue);
 }
 
-// ---- mutexes: queue (+0), owner (+8), count (+0xC). No priority inheritance yet.
+// ---- mutexes: queue (+0), owner (+8), count (+0xC).
+// Priority inheritance, as the OS's (__OSPromoteThread, __OSGetEffectivePriority): a thread
+// that blocks on a mutex lends its priority to the owner, and on through whatever mutex the
+// owner is itself waiting for, so a thread in between can't keep the owner (and with it the
+// waiter) off the CPU; releasing a mutex takes the owner back to its own priority, or the
+// best still lent to it through the mutexes it keeps.
+std::set<uint32_t> g_owned;  // the mutexes that have an owner
+
+void set_priority(Thread* t, int priority) {
+    if (t->priority == priority) return;
+    const bool queued = t->state == kReady && t->suspend == 0 && t != g_current;
+    if (queued) unready(t);
+    t->priority = priority;
+    if (queued) g_ready[priority].push_back(t);
+    store(t);
+}
+void lend_priority(Cpu& c, Thread* owner, int priority) {
+    for (int hops = 0; owner && owner->priority > priority; ++hops) {
+        if (hops == 64) rt::fatal(&c, "mutexes wait on each other in a ring (a deadlock in the game)");
+        set_priority(owner, priority);
+        if (owner->state != kWaiting || !g_owned.contains(owner->waiting_on)) break;
+        owner = thread_at(c, rt::peek32(owner->waiting_on + 8));
+    }
+}
+int own_or_lent_priority(const Thread* t) {
+    int p = t->base;
+    for (uint32_t m : t->mutexes)
+        if (const auto it = g_waiters.find(m); it != g_waiters.end())
+            for (const Thread* w : it->second) p = std::min(p, w->priority);
+    return p;
+}
+
 void OSInitMutex(Cpu& c) {
     std::memset(rt::guest_ptr(c.r[3]), 0, 0x18);
     g_waiters.erase(c.r[3]);
+    g_owned.erase(c.r[3]);
 }
 void lock_mutex(Cpu& c, uint32_t m) {
     Thread* me = g_current;
@@ -437,12 +471,14 @@ void lock_mutex(Cpu& c, uint32_t m) {
             rt::poke32(m + 8, me->guest);
             rt::poke32(m + 0xC, 1);
             me->mutexes.push_back(m);
+            g_owned.insert(m);
             return;
         }
         if (owner == me->guest) {
             rt::poke32(m + 0xC, rt::peek32(m + 0xC) + 1);
             return;
         }
+        lend_priority(c, thread_at(c, owner), me->priority);
         sleep_on(c, m);
     }
 }
@@ -450,6 +486,8 @@ void release_mutex(Thread* me, uint32_t m) {
     rt::poke32(m + 8, 0);
     rt::poke32(m + 0xC, 0);
     std::erase(me->mutexes, m);
+    g_owned.erase(m);
+    set_priority(me, own_or_lent_priority(me));
 }
 void OSLockMutex(Cpu& c) { lock_mutex(c, c.r[3]); }
 void OSUnlockMutex(Cpu& c) {

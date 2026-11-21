@@ -6,7 +6,7 @@ A static recompilation of **Punch-Out!!** (Next Level Games / Nintendo, Wii, 200
 
 ## Status
 
-Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime (step 3) runs the game's front end with sound; the renderer (step 4) draws it on Vulkan, up to the intro movie.
+Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime (step 3) runs the game, with sound, from boot through the menus into fights, and the renderer (step 4) draws it on Vulkan. Still to do: a play-through of every opponent and mode, and Head-to-Head played by two people (a second controller is a second Wii Remote; a scripted two-player fight runs) (`docs/runtime.md`, "Where the game stands").
 
 | Piece | State |
 |---|---|
@@ -19,7 +19,8 @@ Analysis (roadmap step 1) and the recompiler core (step 2) are done; the runtime
 | Hardware-access profile, exception tables, timing model | ✅ lifted code touches no hardware register or uncached mirror, but writes the GX FIFO directly (803 stores in the engine's mesh drawers), so the FIFO decoder is required; no C++ exception can be thrown; one frame per retrace, gameplay driven by a time step in seconds (`docs/runtime-analysis.md`) |
 | Lifter → C++, differential test | ✅ integer code, floating point and paired singles with GQR quantisation (bit-exact with Broadway: NI mode, NaN rules, single rounding, the estimate tables): 13,392 of 13,487 functions (99.3%) lifted, every one in the libraries we lift; the 95 stubs, all in code we replace or drop, trap with the reason; all of it compiles and links; 323,904 differential runs against an independent reference interpreter and known-answer tests from hardware data, 0 differences (`docs/recompiler-core.md`) |
 | Runtime skeleton: the game built from your own `main.dol`, booted as `__start` boots it, a replacement registry that names anything missing; OS (threads, mutexes, message queues, alarms, interrupts, time, locked cache), DVD from the extracted disc, VI's retrace, console settings | ✅ runs the front end at 59 frames a second from the extracted disc: GX lifted with its command stream decoded, NAND saves, input, and sound (AI/AX/DSP lifted, the DSP's AX microcode emulated, out through SDL3) (`docs/runtime.md`) |
-| GX on Vulkan (the renderer) | 🚧 draws the boot screens and the save dialog: vertices, XF lighting, TEV as one precompiled ubershader, every texture format, EFB copies on the GPU; the pointer works (`docs/runtime.md`) |
+| GX on Vulkan (the renderer) | ✅ menus, movies and fights: vertices, XF lighting, TEV as a precompiled ubershader with specialised pipelines, every texture format, EFB copies and the EFB's pixel formats on the GPU, 1x to 8x internal resolution. Checked pixel for pixel against Dolphin on five scenes, a fight among them, in the console's 18-bit colour and in true colour: no pixel more than 8 of 255 off (`docs/runtime.md`, "Comparing a frame with Dolphin") |
+| The whole game, start to credits | 🚧 the front end, Exhibition and practice fights are played and tested; Career through every opponent and a Head-to-Head fight are not yet |
 
 ## Versions and changes
 
@@ -89,14 +90,14 @@ build-game/punchout "<extracted disc>"
 On Windows, with Visual Studio's Developer PowerShell, for example:
 
 ```powershell
-cmake -S . -B build-game -DQILIN_GAME_DOL="D:\PunchOutWii Project\ROM\ROM Extract\sys\main.dol"
+cmake -S . -B build-game -DQILIN_GAME_DOL="D:\Games\PunchOut disc\sys\main.dol"
 cmake --build build-game --config Release --parallel --target punchout
-build-game\Release\punchout.exe "D:\PunchOutWii Project\ROM\ROM Extract"
+build-game\Release\punchout.exe "D:\Games\PunchOut disc"
 ```
 
 The first build lifts the whole game to C++ and compiles it, which takes several minutes.
 
-**Controls:** a gamepad (Xbox names) or the keyboard, standing in for a Wii Remote held sideways. Buttons only: there are no motion controls.
+**Controls:** a gamepad (Xbox names; every one connected works) or the keyboard, standing in for a Wii Remote held sideways. Buttons only: there are no motion controls.
 
 | Wii Remote | Pad | Keyboard |
 |---|---|---|
@@ -109,9 +110,11 @@ The first build lifts the whole game to C++ and compiles it, which takes several
 
 **The settings menu:** F1 or Esc (a controller: Back and Start together) opens it over the game, which pauses; closing it saves. It's the same menu as the other Qilin recomps (Dear ImGui), with three pages:
 
-- **Controls:** each Wii Remote button's inputs. Press *Add* on a row, then the key, the pad's button (shoulders and triggers too) or a click; an input already on another button moves over. Click an input to remove it. Rumble on or off.
-- **Display:** full screen (also F11 or Alt+Enter) and which display; the picture's size (whole multiples, the sharpest; fit; or fill the window), smooth or sharp, and its look: plain, or a **CRT television** (raster lines on the console's own 480 lines, with phosphor stripes; both adjustable). *Look at the picture* hides the menu to see it. Vsync. The enhancement preset (original, low-end, desktop), the internal resolution (1-8x, from the next start) and anisotropic filtering (at once). The graphics device (from the next start). Frame times: F3 shows the frame rate, 1% and 0.1% lows and a frame-time graph in a corner.
-- **Game:** the Wii's own settings the game reads: language (English, German, French, Spanish, Italian), widescreen or 4:3, mono or stereo (from the next start). Quit.
+- **Controls:** each Wii Remote button's inputs. Press *Add* on a row, then the key, the pad's button (shoulders and triggers too) or a click; an input already on another button moves over. Click an input to remove it. Rumble on or off, the Wii Remote speaker's sounds on or off. A second player for Head-to-Head: a controller as a second Wii Remote (the second controller to press a button, or the first with player one on the keyboard).
+- **Display:** full screen (also F11 or Alt+Enter) and which display; the picture's size (whole multiples, the sharpest; fit; or fill the window), smooth or sharp, and its look: plain, or a **CRT television** (raster lines on the console's own 480 lines, with phosphor stripes; both adjustable). *Look at the picture* hides the menu to see it. Vsync. The enhancement preset (original, low-end, desktop), the internal resolution (auto or 1-8x, from the next start), anisotropic filtering and true colour (at once; off is the console's 18-bit colour with its dither). The graphics device (from the next start). Frame times: F3 shows the frame rate, 1% and 0.1% lows and a frame-time graph in a corner.
+- **Game:** the Wii's own settings the game reads: language (English, German, French, Spanish, Italian), widescreen or 4:3, mono or stereo (from the next start).
+
+Close and Quit are at the top of every page.
 
 Everything is kept in `punchout.ini` in the game's data folder, `qilin/punchout` in your per-user application data (Windows: `%LOCALAPPDATA%\qilin\punchout`), with the saves (`nand/`), the pipeline cache and the log (`punchout.log`, with `punchout.old.log` from the run before: send it with any bug report), as the other Qilin recomps keep theirs. The file has `[display]`, `[controls]` and `[console]` sections and comments, and can be edited by hand. Up to v0.17.0 the folder was `%APPDATA%\Qilin\PunchOut-QilinComp` and the file `settings.ini`: the first run of v0.18.0 moves the folder and carries the file's controls and scale over (Escape, now the menu's, becomes H for HOME).
 

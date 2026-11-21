@@ -648,7 +648,12 @@ const bool g_gpu_threaded = [] {
 // Bytes queued before the guest waits. Small, as the hardware's lag is: with
 // 1 MB the decoder fell whole draws behind and read vertex arrays and
 // matrices the game had already rewritten (corrupt fights); at 16 KB it trails
-// by a few draws, which the game allows for.
+// by a few draws, which the game allows for. Measured since (2026-11-21, 7,800
+// frames, fights among them): when the decoder reaches a frame's draw-done the
+// game has written at most 359 bytes past it, state and no draws, so it waits
+// there every frame before sending the next one's; and no captured frame reads
+// any memory twice with different contents. Within a frame the lag is then
+// harmless, and the bound stays as the margin it was chosen for.
 constexpr size_t kMaxIncoming = 16u << 10;
 std::mutex g_gpu_lock;
 std::condition_variable g_gpu_cv;

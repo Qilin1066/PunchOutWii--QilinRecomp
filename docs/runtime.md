@@ -107,7 +107,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
     - exit values, detached threads, mutexes released on exit;
     - an alarm firing while every thread waits;
     - `OSSleepTicks`.
-  - **Not yet:** priority inheritance on mutexes.
+  - **Priority inheritance:** a thread that blocks on a mutex lends its priority to the owner, and on through any mutex the owner is itself waiting for (the OS's `__OSPromoteThread`); releasing a mutex takes the owner back to its own priority, or the best still lent through the mutexes it keeps.
 - **Interrupts and callbacks** (`os.hpp`):
   - **Safe points:** completions are queued and delivered at safe points, which are whenever the guest enables interrupts and inside every replacement that waits or polls. Each is entered with the guest's registers written back, so a delivery is the same as an interrupt arriving at that instruction. If a delivery wakes a thread of higher priority, the switch happens right after it.
   - **Callbacks:** run on a fresh frame below the interrupted thread's stack, with every register restored afterwards.
@@ -130,7 +130,7 @@ Replacements take arguments in `r3`–`r10` and return in `r3` (with `r4` for 64
   - **Rumble** reaches the pad.
   - **Speaker:** its stream is accepted and dropped for now.
   - **Names:** five one-instruction WPAD functions are branches into WUD, and their targets name them. The size-matched names had them one off.
-- **Interrupt handlers:** `__OSSetInterruptHandler`, `__OSGetInterruptHandler`, `__OSMaskInterrupts` and `__OSUnmaskInterrupts` keep the OS's table and mask. `raise_interrupt(n)` runs a handler as an interrupt; a masked one is dropped for now. Context and shutdown bookkeeping are no-ops, as is the write-gather pipe's address register (its "not yet sent" bit always reads clear).
+- **Interrupt handlers:** `__OSSetInterruptHandler`, `__OSGetInterruptHandler`, `__OSMaskInterrupts` and `__OSUnmaskInterrupts` keep the OS's table and mask. `raise_interrupt(n)` runs a handler as an interrupt; a masked one is held and arrives when the OS unmasks it, as the hardware's line stays up (none has been seen masked in play). Context and shutdown bookkeeping are no-ops, as is the write-gather pipe's address register (its "not yet sent" bit always reads clear).
 
 ## The GPU's front end (`gpu.cpp`, v0.8.0)
 
@@ -221,13 +221,17 @@ WPAD is replaced, and KPAD is lifted on top of it. The remote is held sideways a
 - Back: −;
 - Guide: HOME.
 
+Every controller SDL lists is opened and their buttons are added up (the first listed can be a virtual pad or a wheel's base). **A second player** (`[controls] second_player`, off by default) takes one controller as a second remote on channel 1, with the same pad buttons: `second controller` gives player one the first controller to have a button pressed (with the keyboard and mouse) and player two the next; `first controller` leaves player one on the keyboard and mouse and gives player two the first controller. The second remote connects when its controller has pressed a button and disconnects when it's unplugged (the game's connect callback, as a remote coming and going); it has buttons, rumble and a pointer of its own, moved by its controller's right stick (Head-to-Head's menus ask player two to choose). `PUNCHOUT_INPUT2` and `PUNCHOUT_POINTER2` script them in tests.
+
+**The speaker** (`speaker.hpp`, `[controls] speaker`): the game mixes each remote's sound in AX at 6 kHz, encodes it 40 samples at a time with the SDK's encoder and sends the 20 bytes with `WPADSendStreamData`, 150 times a second. The remote's side is here: Yamaha's 4-bit ADPCM decoder (a step's eighth plus a whole, half and quarter of it for the code's bits, each rounded down), a queue of one to four blocks per remote, and each audio DMA buffer adds the queued sound, resampled linearly and scaled by the remote's volume, to both channels. `WPADControlSpeaker`'s "on" resets the decoder, as the game's encoder starts afresh after it; mute and unmute are kept. `punchout --check-speaker <disc>` calls the game's own lifted encoder on five test signals (2,000 blocks) and checks that the signal and step it keeps are the decoder's after every block.
+
 The keyboard's defaults are the arrows, Z and X for 1 and 2, C or Space for A, Enter for +, Backspace for − and H for HOME. The pointer is real input, since the menus need it. The runtime places the sensor bar's two lights where the remote's camera would see them, after Dolphin's camera geometry. KPAD then works out the pointer from them as on hardware. The mouse over the picture moves the pointer, and its left button is A. The right stick also moves it, a screen's width a second. The angles are calibrated so the pointer lands where the mouse is, with the bar below the TV, the console's default setting.
 
 ## Settings (`settings.cpp`, v0.13.2; rebuilt in v0.18.0)
 
 `punchout.ini` sits in the game's data folder, next to the saves. The first run writes it with every key and comments; the settings menu (`menu.cpp`) changes it and saves it back through a temporary file. Its layout follows the other Qilin recomps (BeatTheBeat's `beatthebeat.ini`):
 - `[display]`: `preset` (original, low-end, desktop: sets `internal_scale`, `anisotropy`, `vsync` and `true_color`; keys after it override it), `fullscreen`, `monitor`, `scaling` (integer, fit, stretch), `smooth`, `look` (plain, crt), `scanlines` and `mask` (0-100), `internal_scale` (1-8; `PUNCHOUT_SCALE` overrides it), `anisotropy` (1, 2, 4, 8, 16), `true_color` (on: every pixel keeps its 24 bits, as Dolphin's "Force 24-Bit Color"; off: the console's 18-bit colour with its dither wherever the game draws with alpha, and its copies narrowed as the console narrows them), `vsync`, `gpu`.
-- `[controls]`: `rumble`, and each of the remote's buttons, in the player's terms (`up down left right one two a plus minus home`), with a comma-separated list of inputs:
+- `[controls]`: `rumble`, `second_player` (off, second controller, first controller), and each of the remote's buttons, in the player's terms (`up down left right one two a plus minus home`), with a comma-separated list of inputs:
   - `pad:<Xbox name>` (Up Down Left Right A B X Y Start Back Guide LB RB LT RT L3 R3);
   - `key:<SDL key name>` (not Escape, F1 or F11, which are the program's);
   - `mouse`, its left button.
@@ -278,16 +282,20 @@ AI, AX and DSP are lifted; the hardware under them is emulated.
 
 Code that waits for an interrupt by spinning, as in `while (flag == 0) {}` or `while (RFLGetAsyncStatus() == BUSY) {}`, would never see it, because interrupts arrive at safe points. The lifter finds such loops (`recomp/src/idle.*`): a loop is a poll when no pass can tell itself from the last. It may only load, compute into registers, store into its own stack frame, and call pure getters. Nothing may be carried from one pass to the next, in registers or stack slots, on any path. Their back edges call the runtime's idle hook, which delivers what's due or sleeps until the next timed event (at most 1 ms). In this game: the DSP mailbox waits, AX's start-up and the Mii library's status loops (49 back edges, 11 functions). A scan such as `while (*p++)` isn't one, and the unit tests say so.
 
-## Where boot stands
+## Where the game stands
 
-The game boots, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, enables the locked cache, sets its error handlers and reads the console settings. `GXInit` runs, lifted, and its command stream decodes cleanly. It loads its scripts and global data, sets up the front end, brings up WPAD and KPAD, opens the save system, runs its frame loop and shows its boot flow. Then:
-- Wwise starts AX; the DSP boots the AX microcode and mixes every 3 ms;
-- the HOME Button Menu loads its archives and sounds;
-- the Mii library reads its database;
-- the front end runs: 59 frames a second, about 900 draws and 15,000 vertices a second, with sound playing;
-- the renderer draws the strap screen and the save dialog; pointing at OK and pressing A creates the save (`banner.bin`, `save_games`), and the game goes on to its intro movie.
+The game boots as `__start` boots it, runs its static constructors (which bring up the OS, DVD, VI and the heaps through the lifted OSAlloc), enters `main`, and runs: Wwise on AX with the DSP's AX microcode mixing every 3 ms, the HOME Button Menu's archives, the Mii library, NAND saves, the pointer and buttons. From the strap screen it goes through the save dialog, the intro movie, the title and the menus into fights, at the console's 60 frames a second, with sound.
 
-From there it needs more of the disc: its Wwise sound bank's files (`files/art/wwiseaudio`, about 1 GB) and the movies.
+Tested (2026-11-21):
+- scripted runs from a fresh save and from a profile into the Exhibition practice fight and through its first rounds, headless and drawn, for 215 s at a time;
+- pictures of five scenes against Dolphin, pixel for pixel (above);
+- the owner's own play on Windows, fights included.
+
+Not yet:
+- **Every opponent and mode played through.** Career past the first fights, title defence, the credits: anything they reach that nothing so far has (a replaced function with no native code stops the game and names itself).
+- **Head-to-Head by two people.** A scripted run (both players' presses and pointers: `PUNCHOUT_INPUT2`, `PUNCHOUT_POINTER2`) registers the second remote, picks player two's Mii, and plays the split-screen fight; its frame matches Dolphin's. Two people at one PC haven't played it.
+- **The Wii Remote's speaker in use.** Its sound is decoded and mixed in (`speaker.hpp`; the decoder is exact against the game's own encoder), but in every scene played here the game sends it only silence: when the game does use it is unconfirmed.
+- Smaller, where the console's behaviour isn't modelled: the DSP's polyphase resampler is linear unless the console's coefficient table (`dsp_coef.bin`, which isn't on the disc) is in the user folder, texture offsets for lines and points.
 
 ## Next
 

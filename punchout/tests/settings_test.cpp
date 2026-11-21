@@ -20,7 +20,7 @@ void check(bool ok, const char* what) {
 bool same(const punchout::Settings& a, const punchout::Settings& b) {
     if (a.scale != b.scale || a.preset != b.preset || a.fullscreen != b.fullscreen || a.monitor != b.monitor ||
         a.scaling != b.scaling || a.smooth != b.smooth || a.look != b.look || a.scanlines != b.scanlines || a.mask != b.mask ||
-        a.anisotropy != b.anisotropy || a.true_color != b.true_color || a.vsync != b.vsync || a.gpu != b.gpu || a.rumble != b.rumble ||
+        a.anisotropy != b.anisotropy || a.true_color != b.true_color || a.vsync != b.vsync || a.gpu != b.gpu || a.rumble != b.rumble || a.second_player != b.second_player || a.speaker != b.speaker ||
         a.language != b.language || a.widescreen != b.widescreen || a.sound != b.sound)
         return false;
     for (unsigned c = 0; c < punchout::kControlCount; ++c) {
@@ -124,7 +124,7 @@ int main() {
         punchout::Settings s = d;
         s.preset = "desktop", s.fullscreen = true, s.monitor = "DELL U2720Q", s.scaling = qilin::host::Scaling::integer;
         s.smooth = false, s.look = qilin::host::Look::crt, s.scanlines = 80, s.mask = 0, s.scale = 5, s.anisotropy = 8;
-        s.vsync = false, s.gpu = "AMD Radeon RX 6600", s.rumble = false, s.language = 3, s.widescreen = false, s.sound = 0;
+        s.vsync = false, s.gpu = "AMD Radeon RX 6600", s.rumble = false, s.second_player = 1, s.speaker = false, s.language = 3, s.widescreen = false, s.sound = 0;
         s.controls[punchout::kCtlOne] = {{Binding::kPad, host::kPadLT, {}}, {Binding::kKey, 0, "Left Shift"}};
         punchout::Settings back;
         std::string e;
@@ -134,6 +134,13 @@ int main() {
     check(error_of("[display]\nscanlines = 101\n").find("from 0 to 100") != std::string::npos, "scanlines out of range");
     check(error_of("[console]\nlanguage = 0\n").find("language is 1 (English)") != std::string::npos, "a language not on the disc");
     check(error_of("[controls]\nrumble = maybe\n").find("rumble is true or false") != std::string::npos, "a boolean that isn't");
+    check(error_of("[controls]\nsecond_player = third controller\n").find("second_player is off") != std::string::npos, "a second player that isn't");
+    {
+        punchout::Settings t;
+        std::string e;
+        check(punchout::parse_settings("[controls]\nsecond_player = first controller\n", t, e) && t.second_player == 2 && d.second_player == 0,
+              "a second player on the first controller; none by default");
+    }
     check(error_of("scale = 2\n").rfind("line 1: 'scale' comes before any [section]", 0) == 0, "a setting outside a section");
     check(error_of("[audio]\n").rfind("line 1: there's no section [audio]", 0) == 0, "an unknown section");
     {

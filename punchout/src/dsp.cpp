@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "audio.hpp"
+#include "speaker.hpp"
 #include "hw.hpp"
 #include "os.hpp"
 
@@ -222,6 +223,10 @@ void play(Cpu* c, uint32_t source, uint32_t blocks) {
         out[2 * i] = s(4 * i + 2);
         out[2 * i + 1] = s(4 * i);
     }
+    // The Wii Remotes' speakers, which the console plays from the remotes in the player's hands:
+    // here from the PC's speakers, with the rest.
+    const bool speakers = g_speakers_on.load(std::memory_order_relaxed);
+    for (Speaker& sp : g_speakers) sp.mix(out.data(), frames, g_dma_rate, speakers);
     g_sink(out.data(), frames, g_dma_rate, g_sink_user);
 }
 
