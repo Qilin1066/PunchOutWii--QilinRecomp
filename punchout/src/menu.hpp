@@ -21,6 +21,7 @@
 
 #include "qilin/host/display.hpp"
 #include "settings.hpp"
+#include "save_history.hpp"
 
 namespace punchout {
 
@@ -75,6 +76,8 @@ private:
     uint32_t capture_held_ = 0;  // the pad's buttons held when it began (they don't count)
     bool wait_release_ = false;  // after a pad button was taken: gamepad navigation back once it's let go
     std::string note_;           // said under the table (what moved where)
+    bool history_loaded_ = false;
+    std::vector<SaveBackup> save_history_;
     unsigned running_scale_ = 1;
 };
 

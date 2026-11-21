@@ -63,6 +63,10 @@ struct Settings {
     bool match_refresh = true;        // fullscreen: a refresh that's a multiple of 60 Hz when the desktop's isn't
     bool variable_refresh = false;    // a G-Sync/FreeSync/VRR display: no mode switch, no locking to the refresh
     // [controls]
+    std::string controller1, controller2;  // device identity; empty: automatic assignment
+    unsigned stick_threshold = 50, trigger_threshold = 50, pointer_deadzone = 25, rumble_strength = 100;
+    unsigned volume = 100;
+    bool mute_unfocused = false;
     bool rumble = true;  // the Wii Remote's rumble on the controller
     // A second player's Wii Remote (Head-to-Head): 0 none, every controller plays the first remote;
     // 1 the second controller to have a button pressed, the first playing the first remote with the

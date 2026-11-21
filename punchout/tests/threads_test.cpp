@@ -31,7 +31,7 @@ namespace {
 
 // The OS functions, at their addresses in the supported build (threads.cpp).
 constexpr uint32_t kCreateThread = 0x802085CCu, kResumeThread = 0x80208C3Cu, kSuspendThread = 0x80208ED4u,
-                   kYieldThread = 0x80208590u, kExitThread = 0x80208838u, kJoinThread = 0x80208AFCu,
+                   kCancelThread = 0x8020891Cu, kYieldThread = 0x80208590u, kExitThread = 0x80208838u, kJoinThread = 0x80208AFCu,
                    kGetCurrentThread = 0x80208024u, kInitMutex = 0x802064A4u, kLockMutex = 0x802064DCu,
                    kUnlockMutex = 0x802065B8u, kInitCond = 0x802066ECu, kWaitCond = 0x802066F0u,
                    kSignalCond = 0x802067CCu, kInitMessageQueue = 0x80205A98u, kSendMessage = 0x80205AF8u,
@@ -81,7 +81,7 @@ void expect(const char* test, const std::vector<std::string>& want) {
 // ---- the guest functions, at made-up addresses in the function table.
 constexpr uint32_t kFnHigh = 0x80004000u, kFnLowSender = 0x80004010u, kFnMutexTaker = 0x80004020u,
                    kFnCounter = 0x80004030u, kFnExiter = 0x80004040u, kFnAlarm = 0x80004050u,
-                   kFnSelf = 0x80004060u, kFnHolder = 0x80004070u, kFnWanter = 0x80004080u, kFnMiddle = 0x80004090u;
+                   kFnSelf = 0x80004060u, kFnHolder = 0x80004070u, kFnWanter = 0x80004080u, kFnMiddle = 0x80004090u, kFnCancelled = 0x800040A0u, kFnOldSleep = 0x800040B0u, kFnNewSleep = 0x800040C0u, kFnChain = 0x800040D0u, kFnChainWaiter = 0x800040E0u;
 
 void fn_high(Cpu& c) {  // runs as soon as it's resumed, and returns a value
     note("high " + std::to_string(c.r[3]));
@@ -150,6 +150,35 @@ void fn_middle(Cpu& c) {
     c.r[3] = 0;
 }
 
+void fn_cancelled(Cpu& c) {
+    os(c, kLockMutex, kMutex);
+    note("cancel-owner");
+    os(c, kSuspendThread, os(c, kGetCurrentThread));
+    note("FAIL cancelled thread resumed");
+}
+void fn_old_sleep(Cpu& c) {
+    const uint64_t ticks = punchout::kTimerHz / 1000;
+    os(c, kSleepTicks, uint32_t(ticks >> 32), uint32_t(ticks));
+    note("FAIL old sleeper resumed");
+}
+
+void fn_new_sleep(Cpu& c) {
+    const uint64_t ticks = punchout::kTimerHz / 50; // 20 ms, later than the cancelled sleeper
+    const auto start = std::chrono::steady_clock::now();
+    os(c, kSleepTicks, uint32_t(ticks >> 32), uint32_t(ticks));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    note(elapsed >= std::chrono::milliseconds(10) ? "new-sleep-complete" : "FAIL new sleep woke at old deadline");
+}
+
+void fn_chain(Cpu& c) {
+    os(c, kLockMutex, kMutex + 0x40);
+    os(c, kLockMutex, kMutex);
+    note("chain-runs");
+    os(c, kUnlockMutex, kMutex);
+    os(c, kUnlockMutex, kMutex + 0x40);
+}
+void fn_chain_waiter(Cpu& c) { os(c, kLockMutex, kMutex + 0x40); os(c, kUnlockMutex, kMutex + 0x40); }
+
 // What qilin lift generates for a replaced function: a stub in the function
 // table that hands the call to the runtime's registry.
 template <uint32_t A>
@@ -169,6 +198,8 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     {kFnHolder, fn_holder},
     {kFnWanter, fn_wanter},
     {kFnMiddle, fn_middle},
+    {kFnCancelled, fn_cancelled}, {kFnOldSleep, fn_old_sleep}, {kFnNewSleep, fn_new_sleep},
+    {kFnChain, fn_chain}, {kFnChainWaiter, fn_chain_waiter},
     STUB(kCreateAlarm),
     STUB(kSetAlarm),
     STUB(kInitMessageQueue),
@@ -187,6 +218,7 @@ const rt::FunctionEntry kFunctions[] = {  // sorted by address
     STUB(kYieldThread),
     STUB(kCreateThread),
     STUB(kExitThread),
+    STUB(kCancelThread),
     STUB(kJoinThread),
     STUB(kResumeThread),
     STUB(kSuspendThread),
@@ -309,6 +341,73 @@ void test_exit(Cpu& c) {
            {"exiter", "owner 0", "join 1 99", "high 4", "join 0"});
 }
 
+void test_cancellation(Cpu& c) {
+    // Cancellation must unlock held mutexes, and the native thread must keep
+    // its object alive while it unwinds even if the guest address is reused.
+    for (int i = 0; i < 64; ++i) {
+        os(c, kInitMutex, kMutex);
+        create(c, kThreadA, kFnCancelled, 0, kStackA, 8);
+        os(c, kResumeThread, kThreadA);
+        os(c, kCancelThread, kThreadA);
+        if (rt::peek32(kMutex + 8) != 0 || rt::peek32(kMutex + 0xC) != 0)
+            note("FAIL cancelled owner kept mutex");
+        os(c, kLockMutex, kMutex);
+        os(c, kUnlockMutex, kMutex);
+        create(c, kThreadA, kFnHigh, 5, kStackA, 8);
+        os(c, kResumeThread, kThreadA);
+        os(c, kJoinThread, kThreadA, 0);
+    }
+    std::vector<std::string> expected;
+    for (int i = 0; i < 64; ++i) { expected.push_back("cancel-owner"); expected.push_back("high 5"); }
+    expect("cancelled owners release mutexes and thread addresses can be reused immediately", expected);
+
+    // Cancel a timed sleeper, reuse its address for a self-suspended thread,
+    // then let the old deadline pass. It must still need an explicit resume.
+    create(c, kThreadA, kFnOldSleep, 0, kStackA, 8);
+    os(c, kResumeThread, kThreadA);
+    os(c, kCancelThread, kThreadA);
+    create(c, kThreadA, kFnSelf, 0, kStackA, 8);
+    os(c, kResumeThread, kThreadA);
+    const uint64_t ticks = punchout::kTimerHz / 200;
+    os(c, kSleepTicks, uint32_t(ticks >> 32), uint32_t(ticks));
+    note("main-resumes-new");
+    os(c, kResumeThread, kThreadA);
+    os(c, kJoinThread, kThreadA, 0);
+    expect("cancelled sleep deadline cannot resume a replacement thread",
+           {"self-suspend", "main-resumes-new", "self-resumed"});
+    create(c, kThreadA, kFnOldSleep, 0, kStackA, 8);
+    os(c, kResumeThread, kThreadA);
+    os(c, kCancelThread, kThreadA);
+    create(c, kThreadA, kFnNewSleep, 0, kStackA, 8);
+    os(c, kResumeThread, kThreadA);
+    os(c, kJoinThread, kThreadA, 0);
+    expect("a replacement sleeper keeps its own deadline", {"new-sleep-complete"});
+}
+
+void test_donation_withdrawal(Cpu& c) {
+    os(c, kInitMutex, kMutex);
+    os(c, kInitMutex, kMutex + 0x40);
+    os(c, kLockMutex, kMutex);
+    const uint32_t me = os(c, kGetCurrentThread);
+    create(c, kThreadA, kFnChain, 0, kStackA, 12);
+    os(c, kResumeThread, kThreadA);
+    note("base-donation " + std::to_string(rt::peek32(me + 0x2D0)));
+    create(c, kThreadB, kFnChainWaiter, 0, kStackB, 8);
+    os(c, kResumeThread, kThreadB);
+    note("chain-donation " + std::to_string(rt::peek32(me + 0x2D0)));
+    os(c, kSuspendThread, kThreadB);
+    note("suspended " + std::to_string(rt::peek32(me + 0x2D0)));
+    os(c, kResumeThread, kThreadB);
+    note("resumed " + std::to_string(rt::peek32(me + 0x2D0)));
+    os(c, kCancelThread, kThreadB);
+    note("cancelled " + std::to_string(rt::peek32(me + 0x2D0)));
+    os(c, kCancelThread, kThreadA);
+    note("restored " + std::to_string(rt::peek32(me + 0x2D0)));
+    os(c, kUnlockMutex, kMutex);
+    expect("priority donations propagate and withdraw across a chain",
+           {"base-donation 12", "chain-donation 8", "suspended 12", "resumed 8", "cancelled 12", "restored 16"});
+}
+
 void test_alarm_and_sleep(Cpu& c) {
     // An alarm in 1 ms; main sleeps 5 ms with nothing else to run: the alarm's
     // handler runs while every thread waits, then main wakes on time.
@@ -426,6 +525,8 @@ int main(int argc, char** argv) {
     test_priority_inheritance(c);
     test_yield_and_suspend(c);
     test_exit(c);
+    test_cancellation(c);
+    test_donation_withdrawal(c);
     test_alarm_and_sleep(c);
     test_calendar(c);
     test_memory_map(c);

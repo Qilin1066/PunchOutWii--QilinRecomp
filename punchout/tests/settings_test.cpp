@@ -21,7 +21,9 @@ bool same(const punchout::Settings& a, const punchout::Settings& b) {
     if (a.scale != b.scale || a.preset != b.preset || a.fullscreen != b.fullscreen || a.monitor != b.monitor ||
         a.scaling != b.scaling || a.smooth != b.smooth || a.look != b.look || a.scanlines != b.scanlines || a.mask != b.mask ||
         a.anisotropy != b.anisotropy || a.true_color != b.true_color || a.vsync != b.vsync || a.gpu != b.gpu || a.rumble != b.rumble || a.second_player != b.second_player || a.speaker != b.speaker ||
-        a.language != b.language || a.widescreen != b.widescreen || a.sound != b.sound)
+        a.controller1 != b.controller1 || a.controller2 != b.controller2 || a.stick_threshold != b.stick_threshold ||
+        a.trigger_threshold != b.trigger_threshold || a.pointer_deadzone != b.pointer_deadzone || a.rumble_strength != b.rumble_strength ||
+        a.volume != b.volume || a.mute_unfocused != b.mute_unfocused || a.language != b.language || a.widescreen != b.widescreen || a.sound != b.sound)
         return false;
     for (unsigned c = 0; c < punchout::kControlCount; ++c) {
         if (a.controls[c].size() != b.controls[c].size()) return false;
@@ -125,6 +127,9 @@ int main() {
         s.preset = "desktop", s.fullscreen = true, s.monitor = "DELL U2720Q", s.scaling = qilin::host::Scaling::integer;
         s.smooth = false, s.look = qilin::host::Look::crt, s.scanlines = 80, s.mask = 0, s.scale = 5, s.anisotropy = 8;
         s.vsync = false, s.gpu = "AMD Radeon RX 6600", s.rumble = false, s.second_player = 1, s.speaker = false, s.language = 3, s.widescreen = false, s.sound = 0;
+        s.controller1 = "guid:n:70616431:0", s.controller2 = "guid:n:70616432:0";
+        s.stick_threshold = 20, s.trigger_threshold = 30, s.pointer_deadzone = 10, s.rumble_strength = 45;
+        s.volume = 65, s.mute_unfocused = true;
         s.controls[punchout::kCtlOne] = {{Binding::kPad, host::kPadLT, {}}, {Binding::kKey, 0, "Left Shift"}};
         punchout::Settings back;
         std::string e;
@@ -165,6 +170,12 @@ int main() {
     check(error_of("[controls]\na = pad:A\na = pad:B\n").rfind("line 3: 'a' is set twice", 0) == 0, "a control set twice");
     check(error_of("[controls]\r\na = pad:A\r\n").empty(), "Windows line endings");
 
+    check(error_of("[controls]\ncontroller1 = same\ncontroller2 = same\n").find("same explicit controller") != std::string::npos,
+          "one device cannot be assigned to both players");
+    check(error_of("[controls]\nstick_threshold = 0\n").find("from 5 to 95") != std::string::npos, "stick threshold range");
+    check(error_of("[controls]\nvolume = 101\n").find("from 0 to 100") != std::string::npos, "volume range");
+    check(error_of("[display]\nvsync = true\nVSYNC = false\n").find("set twice") != std::string::npos, "duplicate scalar settings rejected");
+    check(error_of("\xEF\xBB\xBF[display]\ninternal_scale = AUTO\n").empty(), "BOM and case-insensitive auto");
     std::printf("%s\n", g_failures ? "FAILED" : "all passed");
     return g_failures ? 1 : 0;
 }

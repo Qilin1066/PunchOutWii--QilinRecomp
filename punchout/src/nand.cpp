@@ -12,19 +12,17 @@
 // /tmp, and the close swaps it in with one rename (after flushing it to the
 // disk), so a crash or power cut mid-save leaves the old save whole. Copies
 // left by such a stop are deleted at the next start.
-#if defined(_WIN32)
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
 #include <system_error>
 #include <vector>
+#include <limits>
 
 #include "boot.hpp"
+#include "save_history.hpp"
+#include "qilin/rt/file.hpp"
 #include "os.hpp"
 #include "qilin/host/paths.hpp"
 
@@ -41,20 +39,11 @@ constexpr const char* kHomeDir = "/title/00010000/52375050/data";
 
 fs::path g_root;
 std::string g_current = kHomeDir;
+std::vector<bool> g_write_failed, g_dirty;
 std::vector<FILE*> g_files;  // by descriptor
+std::vector<fs::path> g_paths;
 std::vector<fs::path> g_safe_targets;  // by descriptor: for a safe open's copy, the file it replaces on close
 constexpr const char* kSafeSuffix = ".safe";
-
-// Flush a file to the disk itself (not just the OS's cache): before a rename
-// makes it the save.
-bool sync_file(FILE* f) {
-    if (std::fflush(f) != 0) return false;
-#if defined(_WIN32)
-    return _commit(_fileno(f)) == 0;
-#else
-    return fsync(fileno(f)) == 0;
-#endif
-}
 
 std::string guest_string(uint32_t a) { return reinterpret_cast<const char*>(rt::guest_ptr(a)); }
 
@@ -121,8 +110,7 @@ int32_t do_create(const std::string& path) {
     if (!fs::is_directory(p.parent_path(), ec)) return kNoExists;
     FILE* f = std::fopen(p.string().c_str(), "wb");
     if (!f) return kAccess;
-    std::fclose(f);
-    return kOk;
+    return std::fclose(f) == 0 ? kOk : kAccess;
 }
 int32_t do_delete(const std::string& path) {
     const fs::path p = host_path(path);
@@ -133,13 +121,15 @@ int32_t do_delete(const std::string& path) {
 }
 // mode: 1 read, 2 write, 3 both. `safe` (and writing): through a copy, swapped in on close.
 int32_t do_open(const std::string& path, uint32_t info, uint32_t mode, bool safe = false) {
+    if (mode < 1 || mode > 3) return kInvalid;
     const fs::path p = host_path(path);
     std::error_code ec;
     if (!fs::is_regular_file(p, ec)) return fs::exists(p, ec) ? kInvalid : kNoExists;
     size_t fd = 0;
     while (fd < g_files.size() && g_files[fd]) ++fd;
     if (fd >= 15) return kMaxFd;  // the Wii's limit on open files
-    if (fd == g_files.size()) g_files.push_back(nullptr), g_safe_targets.emplace_back();
+    if (fd == g_files.size()) { g_files.push_back(nullptr); g_safe_targets.emplace_back(); g_paths.emplace_back(); g_write_failed.push_back(false); g_dirty.push_back(false); }
+    g_write_failed[fd] = g_dirty[fd] = false;
     safe = safe && mode != 1;
     fs::path open_path = p;
     if (safe) {
@@ -150,6 +140,7 @@ int32_t do_open(const std::string& path, uint32_t info, uint32_t mode, bool safe
     FILE* f = std::fopen(open_path.string().c_str(), mode == 1 ? "rb" : "r+b");
     if (!f) return kAccess;
     g_files[fd] = f;
+    g_paths[fd] = p;
     g_safe_targets[fd] = safe ? p : fs::path{};
     rt::poke32(info, static_cast<uint32_t>(fd));
     return kOk;
@@ -162,43 +153,58 @@ int32_t do_close(Cpu& c, uint32_t info) {
     g_files[fd] = nullptr;
     rt::poke32(info, 0xFFFFFFFFu);
     if (target.empty()) {
-        std::fclose(f);
-        return kOk;
+        return std::fclose(f) == 0 && !g_write_failed[fd] ? kOk : kAccess;
     }
     // A safe write: on the disk first, then one rename makes it the save.
     const fs::path copy = g_root / "tmp" / (target.filename().string() + "." + std::to_string(fd) + kSafeSuffix);
-    const bool synced = sync_file(f);
-    std::fclose(f);
+    bool synced = rt::sync_file(f) && !g_write_failed[fd];
+    synced = std::fclose(f) == 0 && synced;
     std::error_code ec;
+    if (!g_dirty[fd] && synced) { fs::remove(copy, ec); return ec ? kAccess : kOk; }
+    if (synced) {
+        std::string error;
+        if (!backup_save(g_root, target, error)) { rt::log("saves: %s", error.c_str()); synced = false; }
+    }
     if (synced) fs::rename(copy, target, ec);
     if (!synced || ec) {
         rt::log("saves: %s couldn't be written (%s): the one before it is kept", target.string().c_str(),
-                synced ? ec.message().c_str() : "flushing it to the disk failed");
+                synced ? ec.message().c_str() : "writing, flushing or backing it up failed");
         fs::remove(copy, ec);
         return kAccess;
     }
     return kOk;
 }
 int32_t do_read(Cpu& c, uint32_t info, uint32_t buf, uint32_t len) {
-    return static_cast<int32_t>(std::fread(rt::guest_ptr(buf), 1, len, file_of(c, info)));
+    FILE* f = file_of(c, info);
+    const size_t n = std::fread(rt::guest_ptr(buf), 1, len, f);
+    return std::ferror(f) ? kAccess : static_cast<int32_t>(n);
 }
 int32_t do_write(Cpu& c, uint32_t info, uint32_t buf, uint32_t len) {
     FILE* f = file_of(c, info);
+    const uint32_t fd = rt::peek32(info);
+    if (len && !g_dirty[fd] && g_safe_targets[fd].empty()) {
+        std::string error;
+        if (!backup_save(g_root, g_paths[fd], error)) { rt::log("saves: %s", error.c_str()); return kAccess; }
+    }
     const size_t n = std::fwrite(rt::guest_ptr(buf), 1, len, f);
-    std::fflush(f);
-    return n == len ? static_cast<int32_t>(n) : kAccess;
+    const bool flushed = std::fflush(f) == 0;
+    if (len) g_dirty[fd] = true;
+    if (!flushed || n != len) g_write_failed[fd] = true;
+    return flushed && n == len ? static_cast<int32_t>(n) : kAccess;
 }
 int32_t do_seek(Cpu& c, uint32_t info, int32_t offset, uint32_t whence) {  // 0 start, 1 current, 2 end
     FILE* f = file_of(c, info);
-    if (whence > 2 || std::fseek(f, offset, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END) != 0) return kInvalid;
-    return static_cast<int32_t>(std::ftell(f));
+    if (whence > 2 || !rt::seek_file(f, offset, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END)) return kInvalid;
+    const int64_t at = rt::tell_file(f);
+    return at < 0 || at > std::numeric_limits<int32_t>::max() ? kInvalid : static_cast<int32_t>(at);
 }
 int32_t do_length(Cpu& c, uint32_t info, uint32_t out) {
     FILE* f = file_of(c, info);
-    const long at = std::ftell(f);
-    std::fseek(f, 0, SEEK_END);
-    rt::poke32(out, static_cast<uint32_t>(std::ftell(f)));
-    std::fseek(f, at, SEEK_SET);
+    const int64_t at = rt::tell_file(f);
+    if (at < 0 || !rt::seek_file(f, 0, SEEK_END)) return kAccess;
+    const int64_t size = rt::tell_file(f);
+    if (!rt::seek_file(f, at, SEEK_SET) || size < 0 || uint64_t(size) > std::numeric_limits<uint32_t>::max()) return kAccess;
+    rt::poke32(out, static_cast<uint32_t>(size));
     return kOk;
 }
 int32_t do_move(const std::string& path, const std::string& dir) {

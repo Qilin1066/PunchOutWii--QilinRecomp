@@ -46,9 +46,18 @@ public:
     uint32_t buttons() const;
     // For more than one player: the controllers in the order each first had a
     // button pressed (a controller nobody touches never joins; one unplugged
-    // leaves, and those after it move up). How many have joined, and one's
+    // leaves its slot reserved, so the other player does not change places). How many have joined, and one's
     // buttons now (0 for a place nobody has).
     int joined_pads() const;
+    struct Controller { std::string key, name; uint32_t id; };
+    std::vector<Controller> controllers() const;
+    void set_player_controllers(const std::string& first, const std::string& second);
+    void reset_player_order();
+    bool pad_connected(int place) const;
+    std::string player_controller_name(int place) const;
+    bool focused() const;
+    void set_input_thresholds(unsigned stick, unsigned trigger, unsigned pointer);
+    void set_rumble_strength(unsigned percent);
     uint32_t pad_buttons(int place) const;
     // That controller's right stick (as right_stick, which is whichever controller's is pushed furthest).
     void pad_right_stick(int place, float& x, float& y) const;

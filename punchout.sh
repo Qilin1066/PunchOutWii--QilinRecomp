@@ -36,6 +36,8 @@ stop() { printf '\nStopped: %s\n' "$1" >&2; exit 1; }
 if [ -z "$disc" ] && [ -f "$disc_file" ]; then disc=$(cat "$disc_file"); fi
 [ -n "$disc" ] || stop "which disc? Run ./punchout.sh --disc <the extracted disc's folder> (the one with sys/ and files/)"
 disc=$(cd "$disc" 2>/dev/null && pwd) || stop "the disc folder isn't there"
+[ -d "$disc/files" ] || stop "$disc has no files folder: extract the whole disc"
+[ -f "$disc/sys/fst.bin" ] || stop "$disc has no sys/fst.bin: extract the whole disc"
 [ -f "$disc/sys/main.dol" ] || stop "$disc has no sys/main.dol: extract the whole disc (Dolphin: Extract Entire Disc)"
 
 exe="$build/punchout"
@@ -56,10 +58,12 @@ if [ -z "${CXX:-}" ]; then
     done
 fi
 [ -n "${CXX:-}" ] || stop "no C++ compiler: sudo apt install g++-14 (GCC 14 or newer, or Clang 19 or newer)"
+if [ -z "${CC:-}" ]; then
 case "$CXX" in
     *clang++*) CC=$(echo "$CXX" | sed 's/clang++/clang/') ;;
     *) CC=$(echo "$CXX" | sed 's/g++/gcc/') ;;
 esac
+fi
 export CC CXX
 
 # SDL3 is built in, from source: on Linux it needs the window system's and the
@@ -75,17 +79,30 @@ fi
 # Parallel compiles: one per core, at most one per 1.5 GB of memory.
 jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
 if [ -r /proc/meminfo ]; then
-    mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+    mem_kb=$(awk '/^MemAvailable:/ {available=$2} /^MemTotal:/ {total=$2} END {print available ? available : total}' /proc/meminfo)
+    # Containers can see the host's RAM but only use their cgroup allowance.
+    if [ -r /sys/fs/cgroup/memory.max ]; then
+        limit=$(cat /sys/fs/cgroup/memory.max)
+        used=$(cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0)
+        case "$limit" in
+            max|*[!0-9]*|"") ;;
+            *) left=$(((limit - used) / 1024)); [ "$left" -ge 0 ] || left=0
+               [ "$mem_kb" -le "$left" ] || mem_kb=$left ;;
+        esac
+    fi
     by_mem=$((mem_kb / 1500000))
     [ "$by_mem" -ge 1 ] || by_mem=1
     [ "$jobs" -le "$by_mem" ] || jobs=$by_mem
 fi
 
 mkdir -p "$build"
-printf '%s' "$disc" > "$disc_file"
 echo "Building Punch-Out!! with $CXX, $jobs at a time (the first build lifts the whole game to C++)."
 cmake -S "$root" -B "$build" -DCMAKE_BUILD_TYPE=Release -DQILIN_NATIVE=ON -DQILIN_GAME_DOL="$disc/sys/main.dol" >/dev/null ||
     stop "CMake couldn't configure the build (its messages are above)"
 cmake --build "$build" --target punchout --parallel "$jobs" || stop "the build failed (its messages are above)"
+# Remember only a successfully built disc. A failed change of disc must not
+# make the fast path launch the old executable against the new disc next time.
+printf '%s' "$disc" > "$disc_file.tmp"
+mv -f "$disc_file.tmp" "$disc_file"
 [ "$mode" = build ] && { echo "Built: $exe"; exit 0; }
 exec "$exe" "$disc"

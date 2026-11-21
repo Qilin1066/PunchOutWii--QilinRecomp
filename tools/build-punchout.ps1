@@ -30,16 +30,23 @@ $build = Join-Path $root "build-game"
 $discFile = Join-Path $build "disc-folder.txt"
 $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or $IsWindows   # Windows PowerShell 5.1 has no $IsWindows
 
-if ($Play) {
+if ($Play -and -not $Disc -and -not $ChooseDisc -and -not $Pull) {
     $built = Join-Path $build "Release\punchout.exe"
-    if ((Test-Path $built) -and (Test-Path $discFile)) {
+    if ((Test-Path $built -PathType Leaf) -and (Test-Path $discFile -PathType Leaf)) {
         $last = (Get-Content $discFile -Raw).Trim()
+        if (-not (Test-Path (Join-Path $last "sys/main.dol") -PathType Leaf) -or
+            -not (Test-Path (Join-Path $last "sys/fst.bin") -PathType Leaf) -or
+            -not (Test-Path (Join-Path $last "files") -PathType Container)) {
+            throw "The remembered disc is incomplete or moved: use -ChooseDisc to select an extracted disc."
+        }
         Start-Process -FilePath $built -ArgumentList "`"$last`"" -WorkingDirectory (Split-Path -Parent $built)
         exit 0
     }
     Write-Host "Punch-Out!! isn't built yet: building it now. The first build takes 10 to 40 minutes."
     $Run = $true
 }
+
+if ($Play) { $Run = $true }
 
 function Invoke-Step([string]$what, [string]$exe, [string[]]$arguments) {
     Write-Host "== $what" -ForegroundColor Cyan
@@ -80,10 +87,12 @@ if ($Pull) {
 
 # The extracted disc: the one used last, else ask.
 if (-not $Disc -and -not $ChooseDisc -and (Test-Path $discFile)) { $Disc = (Get-Content $discFile -Raw).Trim() }
-while (-not $Disc -or -not (Test-Path (Join-Path $Disc "sys\main.dol"))) {
+while (-not $Disc -or -not (Test-Path (Join-Path $Disc "sys/main.dol") -PathType Leaf) -or
+       -not (Test-Path (Join-Path $Disc "sys/fst.bin") -PathType Leaf) -or
+       -not (Test-Path (Join-Path $Disc "files") -PathType Container)) {
     if ($Disc) {
         if ((Split-Path -Leaf $Disc) -eq "sys" -and (Test-Path (Join-Path $Disc "main.dol"))) { $Disc = Split-Path -Parent $Disc; continue }
-        Write-Host "$Disc has no sys\main.dol: choose the folder Dolphin's Extract Entire Disc made (it holds sys and files)." -ForegroundColor Yellow
+        Write-Host "$Disc is incomplete: choose the folder Dolphin's Extract Entire Disc made (it holds sys/main.dol, sys/fst.bin and files)." -ForegroundColor Yellow
     }
     if (-not $onWindows) { throw "give the extracted disc with -Disc <folder>" }
     Add-Type -AssemblyName System.Windows.Forms
@@ -93,7 +102,7 @@ while (-not $Disc -or -not (Test-Path (Join-Path $Disc "sys\main.dol"))) {
     if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { throw "no disc folder chosen" }
     $Disc = $dialog.SelectedPath
 }
-$Disc = $Disc.TrimEnd('\')
+$Disc = (Resolve-Path -LiteralPath $Disc).Path
 $dol = Join-Path $Disc "sys\main.dol"
 
 # Built for this PC's own processor (QILIN_NATIVE: AVX2 and FMA where it has them).
@@ -101,12 +110,14 @@ $configure = @("-S", $root, "-B", $build, "-DQILIN_GAME_DOL=$dol", "-DQILIN_NATI
 if ($onWindows -and -not (Test-Path (Join-Path $build "CMakeCache.txt"))) { $configure += @("-G", "Visual Studio 17 2022", "-A", "x64") }
 if (-not $onWindows) { $configure += "-DCMAKE_BUILD_TYPE=Release" }
 Invoke-Step "Configuring" "cmake" $configure
-Set-Content -Path $discFile -Value $Disc -Encoding UTF8
 Invoke-Step "Building Punch-Out!! (the first time lifts and compiles the whole game: 10 to 40 minutes)" "cmake" @("--build", $build, "--config", "Release", "--target", "punchout", "--parallel")
 $exe = if ($onWindows) { ".exe" } else { "" }
 $game = @((Join-Path $build "Release/punchout$exe"), (Join-Path $build "punchout$exe")) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $game) { throw "built, but punchout$exe isn't where it should be" }
 
+# Commit the selection only after both compilation and finding the output succeed.
+Set-Content -LiteralPath "$discFile.tmp" -Value $Disc -Encoding UTF8
+Move-Item -LiteralPath "$discFile.tmp" -Destination $discFile -Force
 Write-Host "Built: $game" -ForegroundColor Green
 if ($Run) {
     Write-Host "Starting Punch-Out!!..."

@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <span>
 #include <thread>
@@ -41,6 +42,7 @@
 #include "priority.hpp"
 #include "profile.hpp"
 #include "settings.hpp"
+#include "save_history.hpp"
 #include "speaker.hpp"
 #include "build.hpp"
 #include "qilin/host/paths.hpp"
@@ -471,6 +473,9 @@ int main(int argc, char** argv) {
         std::fflush(nullptr);
         std::_Exit(0);
     }
+    std::string restore_error;
+    if (!punchout::apply_save_restore(qilin::host::user_folder(), restore_error))
+        rt::fatal(nullptr, "save recovery: %s (the restore request is restore-save.txt in the save folder)", restore_error.c_str());
     punchout::load_game(folder);
     if (check_speaker) std::_Exit(check_speaker_decoder());
 
@@ -554,6 +559,13 @@ int main(int argc, char** argv) {
     look_up_controls();
 
     const char* dump = offscreen ? std::getenv("PUNCHOUT_DUMP") : nullptr;
+    std::ofstream dump_index;
+    if (dump) {
+        std::filesystem::create_directories(dump);
+        dump_index.open(std::filesystem::path(dump) / "frames.csv", std::ios::trunc);
+        if (!dump_index) rt::fatal(nullptr, "cannot write capture frame index");
+        dump_index << "file,vi_retrace\n";
+    }
     const char* every_text = std::getenv("PUNCHOUT_DUMP_EVERY");
     const uint64_t every = every_text ? std::max<uint64_t>(1, std::strtoull(every_text, nullptr, 10)) : 60;
     const std::vector<Press> presses = scripted_input(std::getenv("PUNCHOUT_INPUT"));
@@ -592,11 +604,20 @@ int main(int argc, char** argv) {
     const std::vector<Point> points = pointer_script("PUNCHOUT_POINTER", cursor_x, cursor_y);
     const std::vector<Point> points2 = pointer_script("PUNCHOUT_POINTER2", cursor2_x, cursor2_y);
     auto last = t0;
+    bool wait_control_release = false;
     uint64_t sequence = 0, shown = 0;
     std::vector<uint8_t> rgba;
     if (display) start_watchdog();
     for (;;) {
         g_main_passes.fetch_add(1, std::memory_order_relaxed);
+        const unsigned player_mode = scripted_player2 ? 1 : settings.second_player;
+        if (display) {
+            if (player_mode == 2) display->set_player_controllers(settings.controller2, "");
+            else display->set_player_controllers(settings.controller1, player_mode == 1 ? settings.controller2 : "");
+            display->set_input_thresholds(settings.stick_threshold, settings.trigger_threshold, settings.pointer_deadzone);
+            display->set_rumble_strength(settings.rumble_strength);
+        }
+        if (audio) audio->set_volume(settings.volume, settings.mute_unfocused && display && display->sdl_window() && !display->focused());
         if (display && !display->poll()) {
             rt::log("window closed");
             punchout::before_exit();
@@ -613,6 +634,7 @@ int main(int argc, char** argv) {
             }
             if (menu->take_controls_changed()) look_up_controls();
             if (menu->is_open()) {  // the game is parked: the last picture, with the menu over it
+                wait_control_release = true;
                 punchout::g_controls.store(0, std::memory_order_relaxed);
                 punchout::g_controls2.store(0, std::memory_order_relaxed);
                 display->rumble(false);
@@ -629,8 +651,8 @@ int main(int argc, char** argv) {
             // Whose controller is whose (settings.hpp, second_player): with one player every
             // controller is theirs; with two, controllers go by the order each first had a
             // button pressed, and the keyboard and mouse are always player one's.
-            const unsigned two = scripted_player2 ? 1 : settings.second_player;
-            const int place1 = two == 0 ? -1 : two == 1 ? 0 : -2, place2 = two == 1 ? 1 : two == 2 ? 0 : -2;  // -1 all, -2 none
+            const unsigned two = player_mode;
+            const int place1 = two == 0 ? (settings.controller1.empty() ? -1 : 0) : two == 1 ? 0 : -2, place2 = two == 1 ? 1 : two == 2 ? 0 : -2;  // -1 all, -2 none
             const uint32_t all = display ? display->buttons() : 0;
             uint32_t held = (place1 == -1 ? all : place1 >= 0 && display ? display->pad_buttons(place1) : 0) | (all & qilin::host::kPadClick);
             uint32_t held2 = place2 >= 0 && display ? display->pad_buttons(place2) : 0;
@@ -648,12 +670,16 @@ int main(int argc, char** argv) {
                     if (on) controls |= 1u << c;
                     if (in.kind == punchout::Binding::kPad && (held2 & in.pad)) controls2 |= 1u << c;  // the same pad buttons
                 }
+            if (wait_control_release) {
+                if (!(controls | controls2)) wait_control_release = false;
+                controls = controls2 = 0;
+            }
             punchout::g_controls.store(controls, std::memory_order_relaxed);
             punchout::g_controls2.store(controls2, std::memory_order_relaxed);
-            punchout::g_player2.store(scripted_player2 || (place2 >= 0 && display && display->joined_pads() > place2), std::memory_order_relaxed);
+            punchout::g_player2.store(scripted_player2 || (place2 >= 0 && display && display->pad_connected(place2)), std::memory_order_relaxed);
             // The pointer: the mouse where it moves, the right stick at a screen's width a second.
             const auto tick = std::chrono::steady_clock::now();
-            const float dt = std::chrono::duration<float>(tick - last).count();
+            const float dt = std::clamp(std::chrono::duration<float>(tick - last).count(), 0.0f, 0.05f);
             last = tick;
             float mx, my, sx = 0, sy = 0;
             if (display && display->mouse_moved(mx, my)) cursor_x = mx, cursor_y = my;
@@ -674,7 +700,7 @@ int main(int argc, char** argv) {
             cursor2_y = std::clamp(cursor2_y + sy2 * dt * 2.0f, -1.0f, 1.0f);
             punchout::g_pointer2_x.store(int32_t(cursor2_x * 1000), std::memory_order_relaxed);
             punchout::g_pointer2_y.store(int32_t(cursor2_y * 1000), std::memory_order_relaxed);
-            punchout::g_pointer_on.store(std::fabs(cursor_x) <= 1.1f && std::fabs(cursor_y) <= 1.1f, std::memory_order_relaxed);
+            punchout::g_pointer_on.store((!display || !display->sdl_window() || display->focused()) && std::fabs(cursor_x) <= 1.1f && std::fabs(cursor_y) <= 1.1f, std::memory_order_relaxed);
             if (display) {
                 const bool r1 = settings.rumble && punchout::g_rumble.load(std::memory_order_relaxed);
                 const bool r2 = settings.rumble && punchout::g_rumble2.load(std::memory_order_relaxed);
@@ -749,6 +775,9 @@ int main(int argc, char** argv) {
                 std::fprintf(fp, "P6\n1280 720\n255\n");
                 for (size_t i = 0; i + 3 < px.size(); i += 4) std::fwrite(&px[i], 1, 3, fp);
                 std::fclose(fp);
+                dump_index << std::filesystem::path(name).filename().string() << ',' << sequence << '\n';
+                dump_index.flush();
+                if (!dump_index) rt::fatal(nullptr, "capture frame index write failed");
                 rt::log("dumped %s at %.1f s of game time", name, punchout::frame_count() / 60.0);
             }
         }

@@ -35,7 +35,11 @@ $onWindows = ($PSVersionTable.PSEdition -eq "Desktop") -or $IsWindows   # Window
 # into the C library, and whatever else it has). So a build is for one CPU:
 # it's built again if the folder moves to a PC with a different one.
 $cpu = if ($onWindows) { "$env:PROCESSOR_IDENTIFIER" } else { "cross" }
-$builtFor = "$kitVersion | $cpu"
+# Content identity matters while changes share an Unreleased version number.
+$identityParts = @("lib/libpunchout_kit.a", "qilin.exe", "plan.tsv", "kit.ninja") | ForEach-Object {
+    (Get-FileHash -LiteralPath (Join-Path $kit $_) -Algorithm SHA256).Hash
+}
+$builtFor = "$kitVersion | $cpu | $($identityParts -join ':')"
 # Off Windows (testing the download under Wine), QILIN_KIT_RUNNER runs the kit's programs.
 $runner = $env:QILIN_KIT_RUNNER
 
@@ -64,7 +68,8 @@ function Test-Disc([string]$folder) {
         if ((Split-Path -Leaf $folder) -eq "sys" -and (Test-Path (Join-Path $folder "main.dol"))) { return "pick the folder above sys" }
         return "there's no sys\main.dol in it (extract the whole disc with Dolphin: right-click the game, Extract Entire Disc)"
     }
-    if (-not (Test-Path (Join-Path $folder "files"))) { return "there's no files folder in it (extract the whole disc, not just main.dol)" }
+    if (-not (Test-Path (Join-Path $folder "sys/fst.bin") -PathType Leaf)) { return "there's no sys/fst.bin (extract the whole disc)" }
+    if (-not (Test-Path (Join-Path $folder "files") -PathType Container)) { return "there's no files folder in it (extract the whole disc, not just main.dol)" }
     $report = Read-Kit $qilin @("info", $dol)
     if ($report.code -ne 0) { return "qilin can't read its main.dol: $($report.text.Trim())" }
     $info = $report.text | ConvertFrom-Json
@@ -95,7 +100,6 @@ while ($true) {
 }
 $disc = $disc.TrimEnd('\')
 New-Item -ItemType Directory -Force -Path $work | Out-Null
-Set-Content -Path $discFile -Value $disc -Encoding UTF8
 
 # Up to date: just play.
 $built = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { "" }
@@ -154,7 +158,16 @@ $jobs = [Math]::Max(1, [Environment]::ProcessorCount)
 if ($onWindows) { $code = Invoke-Kit $ninja @("-C", $work, "-j", "$jobs") }
 else { & $ninja -C $work -j $jobs | Out-Host; $code = $LASTEXITCODE }
 if ($code -ne 0) { throw "compiling failed" }
-Copy-Item (Join-Path $work "Punch-Out.exe") $game -Force
+# Stage beside the destination; a failed copy leaves the old executable intact.
+$staged = "$game.new"
+Copy-Item -LiteralPath (Join-Path $work "Punch-Out.exe") -Destination $staged -Force
+if (Test-Path -LiteralPath $game -PathType Leaf) {
+    [System.IO.File]::Replace($staged, $game, "$game.previous", $true)
+} else {
+    [System.IO.File]::Move($staged, $game)
+}
+Set-Content -LiteralPath "$discFile.tmp" -Value $disc -Encoding UTF8
+Move-Item -LiteralPath "$discFile.tmp" -Destination $discFile -Force
 Set-Content -Path $stamp -Value $builtFor -Encoding ASCII
 Write-Host ""
 Write-Host "Built: $game" -ForegroundColor Green

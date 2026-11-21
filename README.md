@@ -45,6 +45,8 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
+Ordinary builds also compile and link every runtime source in `punchout_runtime_check`, with empty game-function tables; it is a build check, not a playable executable. Audio callback, scheduler, save-recovery and timing-tool tests need no game data. Linux CI runs graphics/controller tests with Xvfb and Mesa and runs the reliability tests with ASan/UBSan. The timing tool's image probes need Pillow (`python3 -m pip install Pillow`).
+
 ## Playing
 
 **On Windows, the download (nothing to install).** Each release has `PunchOutWii--QilinRecomp-<version>-windows-x64.zip` (about 80 MB; GitHub builds it, `.github/workflows/player-kit.yml`), as the APB recomp has. Unpack it and double-click **`Play Punch-Out.bat`**: the first time it asks for your extracted disc folder and builds the game from it (a few minutes: 3 on an 8-core PC), with the compiler inside the download (LLVM-MinGW: Clang, free and open source); after that it starts the game at once. The download has everything but the game's own code, prebuilt: the recompiler, the runtime, the renderer, SDL3, the menu. The code made from the disc is made on the player's PC, from their own copy, and never distributed. See `tools/player-kit/` (`package.sh` builds the download on Linux; `play.ps1` is what Play runs).
@@ -110,11 +112,15 @@ The first build lifts the whole game to C++ and compiles it, which takes several
 
 **The settings menu:** F1 or Esc (a controller: Back and Start together) opens it over the game, which pauses; closing it saves. It's the same menu as the other Qilin recomps (Dear ImGui), with three pages:
 
-- **Controls:** each Wii Remote button's inputs. Press *Add* on a row, then the key, the pad's button (shoulders and triggers too) or a click; an input already on another button moves over. Click an input to remove it. Rumble on or off, the Wii Remote speaker's sounds on or off. A second player for Head-to-Head: a controller as a second Wii Remote (the second controller to press a button, or the first with player one on the keyboard).
+- **Controls:** optional remembered assignments for each player's controller, stick/trigger press thresholds with hysteresis, pointer dead zone, rumble strength, volume and optional background muting. Automatic player slots stay reserved while unplugged; input and rumble stop while unfocused. Each Wii Remote button's inputs. Press *Add* on a row, then the key, the pad's button (shoulders and triggers too) or a click; an input already on another button moves over. Click an input to remove it. Rumble on or off, the Wii Remote speaker's sounds on or off. A second player for Head-to-Head: a controller as a second Wii Remote (the second controller to press a button, or the first with player one on the keyboard).
 - **Display:** full screen (also F11 or Alt+Enter) and which display; the picture's size (whole multiples, the sharpest; fit; or fill the window), smooth or sharp, and its look: plain, or a **CRT television** (raster lines on the console's own 480 lines, with phosphor stripes; both adjustable). *Look at the picture* hides the menu to see it. Vsync. The enhancement preset (original, low-end, desktop), the internal resolution (auto or 1-8x, from the next start), anisotropic filtering and true colour (at once; off is the console's 18-bit colour with its dither). The graphics device (from the next start). Frame times: F3 shows the frame rate, 1% and 0.1% lows and a frame-time graph in a corner.
 - **Game:** the Wii's own settings the game reads: language (English, German, French, Spanish, Italian), widescreen or 4:3, mono or stereo (from the next start).
 
 Close and Quit are at the top of every page.
+
+**Save recovery:** F1 → Game → Previous saves lists up to five previous copies of each changed save file. Restore and restart stages the selection for the next boot and backs up the current version first. Backups live outside the emulated NAND. See [recovery and controller details](docs/reliability-and-recovery.md).
+
+**Fight timing checks:** [timing-validation.md](docs/timing-validation.md) documents the paired-capture comparator, visual/audio detectors and input-sweep requirements. Its synthetic tests pass; actual opponent timings still need matched Dolphin and recomp recordings from your own game copy. Offscreen frame dumps include `frames.csv` so missing retraces are detected.
 
 Everything is kept in `punchout.ini` in the game's data folder, `qilin/punchout` in your per-user application data (Windows: `%LOCALAPPDATA%\qilin\punchout`), with the saves (`nand/`), the pipeline cache and the log (`punchout.log`, with `punchout.old.log` from the run before: send it with any bug report), as the other Qilin recomps keep theirs. The file has `[display]`, `[controls]` and `[console]` sections and comments, and can be edited by hand. Up to v0.17.0 the folder was `%APPDATA%\Qilin\PunchOut-QilinComp` and the file `settings.ini`: the first run of v0.18.0 moves the folder and carries the file's controls and scale over (Escape, now the menu's, becomes H for HOME).
 

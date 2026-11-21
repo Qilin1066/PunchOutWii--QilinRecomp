@@ -36,7 +36,7 @@ bool vulkan_13_device() {
 int main() {
     if (!vulkan_13_device()) {
         std::puts("vktest: no Vulkan 1.3 device here: skipped");
-        return 77;
+        return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
     }
     qilin::host::Display::Options o;
     o.headless = true;

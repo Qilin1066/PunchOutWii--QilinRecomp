@@ -6,6 +6,8 @@
 // a time (the fence is waited for before the next is recorded), so the one
 // descriptor set is rewritten for each.
 #include "qilin/host/display.hpp"
+#include "qilin/host/analog.hpp"
+#include <array>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -126,13 +128,18 @@ struct Display::Impl {
     struct Pad {
         SDL_Gamepad* pad = nullptr;
         SDL_JoystickID id = 0;
+        std::string key;
+        uint32_t analog_held = 0;
+        uint64_t rumble_until = 0;
         uint32_t buttons = 0;
         float stick_x = 0, stick_y = 0;
         bool rumbling = false;
         bool pressed = false;  // a button seen since it was opened (said once; it has joined)
     };
     std::vector<Pad> pads;                // every controller, as opened
-    std::vector<SDL_JoystickID> joined;   // in the order each first had a button pressed
+    unsigned stick_threshold = 50, trigger_threshold = 50, pointer_deadzone = 25, rumble_strength = 100;
+    std::array<std::string, 2> selected;
+    std::vector<std::string> joined;   // in the order each first had a button pressed
     bool log_input = false;    // PUNCHOUT_INPUT_LOG: every change of the buttons
     uint32_t logged = 0;
 
@@ -145,7 +152,24 @@ struct Display::Impl {
             say("controllers: can't open \"%s\": %s", SDL_GetGamepadNameForID(id) ? SDL_GetGamepadNameForID(id) : "?", SDL_GetError());
             return;
         }
-        pads.push_back({pad, id});
+        char guid[33]{};
+        SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), guid, sizeof guid);
+        const char* identity = SDL_GetGamepadSerial(pad);
+        std::string key = std::string(guid) + ":s:";
+        if (!identity || !*identity) { identity = SDL_GetGamepadName(pad); key = std::string(guid) + ":n:"; }
+        // Hex keeps serials/paths safe in the ini format, including #, commas and spaces.
+        constexpr char hex[] = "0123456789abcdef";
+        if (identity) for (const unsigned char* at = reinterpret_cast<const unsigned char*>(identity); *at; ++at) {
+            key += hex[*at >> 4]; key += hex[*at & 15];
+        }
+        const std::string family = key;
+        for (unsigned index = 0;; ++index) {
+            key = family + ":" + std::to_string(index);
+            if (std::none_of(pads.begin(), pads.end(), [&](const Pad& existing) { return existing.key == key; })) break;
+        }
+        Pad entry;
+        entry.pad = pad; entry.id = id; entry.key = key;
+        pads.push_back(std::move(entry));
         const char* name = SDL_GetGamepadName(pad);
         say("controllers: \"%s\" connected (press a button to check it)", name ? name : "a controller");
     }
@@ -154,9 +178,9 @@ struct Display::Impl {
             if (pads[i].id == id) {
                 const char* name = SDL_GetGamepadName(pads[i].pad);
                 say("controllers: \"%s\" disconnected", name ? name : "the controller");
+                SDL_RumbleGamepad(pads[i].pad, 0, 0, 0);
                 SDL_CloseGamepad(pads[i].pad);
                 pads.erase(pads.begin() + static_cast<std::ptrdiff_t>(i));
-                std::erase(joined, id);
                 return;
             }
     }
@@ -168,11 +192,21 @@ struct Display::Impl {
         }
     }
     Pad* pad_at(int place) {
-        if (place < 0 || static_cast<size_t>(place) >= joined.size()) return nullptr;
-        for (Pad& p : pads)
-            if (p.id == joined[static_cast<size_t>(place)]) return &p;
+        if (place < 0 || place > 1) return nullptr;
+        std::string key = selected[static_cast<size_t>(place)];
+        if (key.empty()) {
+            int automatic = place == 1 && selected[0].empty() ? 1 : 0;
+            for (const std::string& joined_key : joined) {
+                if ((!selected[0].empty() && joined_key == selected[0]) ||
+                    (!selected[1].empty() && joined_key == selected[1])) continue;
+                if (automatic-- == 0) { key = joined_key; break; }
+            }
+        }
+        if (key.empty()) return nullptr;
+        for (Pad& pad : pads) if (pad.key == key) return &pad;
         return nullptr;
     }
+
     float stick_x = 0, stick_y = 0;
     bool moved = false;
     float mouse_x = 0, mouse_y = 0;  // window pixels
@@ -524,6 +558,7 @@ Display::~Display() {
     }
     if (d.surface) vkDestroySurfaceKHR(d.gpu.instance, d.surface, nullptr);
     d.gpu.destroy();
+    while (!d.pads.empty()) d.close_pad(d.pads.back().id);
     if (d.window) {
         SDL_DestroyWindow(d.window);
         SDL_Quit();
@@ -555,6 +590,12 @@ bool Display::poll() {
             d.moved = true;
         }
     }
+    if (!focused()) {
+        d.buttons = 0; d.stick_x = d.stick_y = 0; d.moved = false;
+        for (Impl::Pad& pad : d.pads) { pad.buttons = pad.analog_held = 0; pad.stick_x = pad.stick_y = 0; }
+        rumble(false);
+        return true;
+    }
     uint32_t b = 0;
     d.stick_x = d.stick_y = 0;
     for (Impl::Pad& pad : d.pads) {
@@ -576,19 +617,19 @@ bool Display::poll() {
         uint32_t held = 0;
         for (const Map& m : kMap)
             if (SDL_GetGamepadButton(p, m.sdl)) held |= m.bit;
-        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16384) held |= kPadLT;
-        if (SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16384) held |= kPadRT;
-        const int x = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
-        if (x < -16384) held |= kPadLeft;
-        if (x > 16384) held |= kPadRight;
-        if (y < -16384) held |= kPadUp;
-        if (y > 16384) held |= kPadDown;
-        const auto axis = [](int v) {  // a dead zone of a quarter, then linear to 1
-            const float f = std::clamp(v / 32767.0f, -1.0f, 1.0f);
-            return std::fabs(f) < 0.25f ? 0.0f : (f - std::copysign(0.25f, f)) / 0.75f;
+        uint32_t analog = 0;
+        const auto axis_button = [&](int value, unsigned threshold, uint32_t bit) {
+            if (axis_pressed(value, threshold, (pad.analog_held & bit) != 0)) analog |= bit;
         };
-        pad.stick_x = axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX));
-        pad.stick_y = -axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY));
+        axis_button(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFT_TRIGGER), d.trigger_threshold, kPadLT);
+        axis_button(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER), d.trigger_threshold, kPadRT);
+        const int x = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTX), y = SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_LEFTY);
+        axis_button(-x, d.stick_threshold, kPadLeft); axis_button(x, d.stick_threshold, kPadRight);
+        axis_button(-y, d.stick_threshold, kPadUp); axis_button(y, d.stick_threshold, kPadDown);
+        pad.analog_held = analog;
+        held |= analog;
+        pad.stick_x = pointer_axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTX), d.pointer_deadzone);
+        pad.stick_y = -pointer_axis(SDL_GetGamepadAxis(p, SDL_GAMEPAD_AXIS_RIGHTY), d.pointer_deadzone);
         // The right stick is whichever controller's is pushed furthest.
         if (pad.stick_x * pad.stick_x + pad.stick_y * pad.stick_y > d.stick_x * d.stick_x + d.stick_y * d.stick_y)
             d.stick_x = pad.stick_x, d.stick_y = pad.stick_y;
@@ -596,11 +637,11 @@ bool Display::poll() {
         b |= held;
         if (!pad.pressed && held) {
             pad.pressed = true;
-            d.joined.push_back(pad.id);
+            if (std::find(d.joined.begin(), d.joined.end(), pad.key) == d.joined.end()) d.joined.push_back(pad.key);
             say("controllers: \"%s\" works (buttons 0x%x)", SDL_GetGamepadName(p) ? SDL_GetGamepadName(p) : "the controller", held);
         }
     }
-    if (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK) b |= kPadClick;
+    if (SDL_GetMouseFocus() == d.window && (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK)) b |= kPadClick;
     if (d.log_input && b != d.logged) say("input: buttons 0x%05x", b);
     d.logged = b;
     d.buttons = b;
@@ -613,7 +654,7 @@ int Display::key_code(const char* name) const {
     return sc == SDL_SCANCODE_UNKNOWN ? -1 : static_cast<int>(sc);
 }
 bool Display::key_down(int code) const {
-    if (impl_->window == nullptr || code < 0) return false;
+    if (!focused() || code < 0) return false;
     int n = 0;
     const bool* k = SDL_GetKeyboardState(&n);
     return code < n && k[code];
@@ -630,7 +671,37 @@ bool Display::mouse_moved(float& x, float& y) const {
     return true;
 }
 
-int Display::joined_pads() const { return static_cast<int>(impl_->joined.size()); }
+int Display::joined_pads() const { return static_cast<int>(std::count_if(impl_->pads.begin(), impl_->pads.end(), [](const Impl::Pad& pad) { return pad.pressed; })); }
+bool Display::focused() const { return impl_->window && (SDL_GetWindowFlags(impl_->window) & SDL_WINDOW_INPUT_FOCUS); }
+std::vector<Display::Controller> Display::controllers() const {
+    std::vector<Controller> out;
+    for (const Impl::Pad& pad : impl_->pads) {
+        const char* name = SDL_GetGamepadName(pad.pad);
+        out.push_back({pad.key, name ? name : "Controller", pad.id});
+    }
+    return out;
+}
+void Display::set_player_controllers(const std::string& first, const std::string& second) {
+    if (impl_->selected[0] == first && impl_->selected[1] == second) return;
+    rumble(false);
+    impl_->selected = {first, second};
+}
+void Display::reset_player_order() { rumble(false); impl_->joined.clear(); for (auto& pad : impl_->pads) pad.pressed = false; }
+bool Display::pad_connected(int place) const { return impl_->pad_at(place) != nullptr; }
+std::string Display::player_controller_name(int place) const {
+    const Impl::Pad* pad = impl_->pad_at(place);
+    const char* name = pad ? SDL_GetGamepadName(pad->pad) : nullptr;
+    return name ? name : "Disconnected";
+}
+void Display::set_input_thresholds(unsigned stick, unsigned trigger, unsigned pointer) {
+    impl_->stick_threshold = std::clamp(stick, 5u, 95u);
+    impl_->trigger_threshold = std::clamp(trigger, 5u, 95u);
+    impl_->pointer_deadzone = std::min(pointer, 95u);
+}
+void Display::set_rumble_strength(unsigned percent) {
+    percent = std::min(percent, 100u);
+    if (percent != impl_->rumble_strength) { rumble(false); impl_->rumble_strength = percent; }
+}
 uint32_t Display::pad_buttons(int place) const {
     const Impl::Pad* p = impl_->pad_at(place);
     return p ? p->buttons : 0;
@@ -642,18 +713,28 @@ void Display::pad_right_stick(int place, float& x, float& y) const {
     y = p ? p->stick_y : 0.0f;
 }
 
-namespace {
-void set_rumble(SDL_Gamepad* pad, bool& rumbling, bool on) {
-    if (on == rumbling) return;
-    rumbling = on;
-    SDL_RumbleGamepad(pad, on ? 0xFFFF : 0, on ? 0xFFFF : 0, on ? 60000 : 0);
-}
-}  // namespace
 void Display::rumble(bool on) {
-    for (Impl::Pad& p : impl_->pads) set_rumble(p.pad, p.rumbling, on);
+    for (size_t i = 0; i < impl_->pads.size(); ++i) {
+        auto& pad = impl_->pads[i];
+        const bool active = on && focused() && impl_->rumble_strength != 0;
+        const uint64_t now = SDL_GetTicks();
+        if (active == pad.rumbling && (!active || now < pad.rumble_until)) continue;
+        const auto strength = static_cast<Uint16>(65535u * impl_->rumble_strength / 100u);
+        if (SDL_RumbleGamepad(pad.pad, active ? strength : 0, active ? strength : 0, active ? 250 : 0)) {
+            pad.rumbling = active; pad.rumble_until = now + 100;
+        }
+    }
 }
 void Display::rumble_pad(int place, bool on) {
-    if (Impl::Pad* p = impl_->pad_at(place)) set_rumble(p->pad, p->rumbling, on);
+    auto* pad = impl_->pad_at(place);
+    if (!pad) return;
+    const bool active = on && focused() && impl_->rumble_strength != 0;
+    const uint64_t now = SDL_GetTicks();
+    if (active == pad->rumbling && (!active || now < pad->rumble_until)) return;
+    const auto strength = static_cast<Uint16>(65535u * impl_->rumble_strength / 100u);
+    if (SDL_RumbleGamepad(pad->pad, active ? strength : 0, active ? strength : 0, active ? 250 : 0)) {
+        pad->rumbling = active; pad->rumble_until = now + 100;
+    }
 }
 
 void Display::Impl::show(VkImage src, VkImageView view, uint32_t sw, uint32_t sh, float aspect, uint32_t lines) {

@@ -6,6 +6,7 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "qilin/host/display.hpp"
@@ -26,7 +27,13 @@ SDL_JoystickID attach_pad(const char* name) {
     desc.vendor_id = 0x045e;  // Microsoft
     desc.product_id = 0x0b12; // Xbox Series controller
     desc.name = name;
-    return SDL_AttachVirtualJoystick(&desc);
+    const auto id = SDL_AttachVirtualJoystick(&desc);
+    if (SDL_Joystick* joystick = SDL_OpenJoystick(id)) {
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
+        SDL_SetJoystickVirtualAxis(joystick, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
+        SDL_CloseJoystick(joystick);
+    }
+    return id;
 }
 
 // Poll until the buttons are `want` (events take a pass or two to arrive).
@@ -43,19 +50,19 @@ bool reaches(qilin::host::Display& d, uint32_t want) {
 int main() {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         std::printf("padtest: no display here (%s): skipped\n", SDL_GetError());
-        return 77;
+        return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
     }
     // The window is Vulkan: skip where there's no Vulkan loader (a macOS
     // runner without MoltenVK), as vktest does, rather than fail to open it.
     if (!SDL_Vulkan_LoadLibrary(nullptr)) {
         std::printf("padtest: no Vulkan here (%s): skipped\n", SDL_GetError());
-        return 77;
+        return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
     }
     SDL_Vulkan_UnloadLibrary();
     const SDL_JoystickID first = attach_pad("Virtual Xbox controller");
     if (!first) {
         std::printf("padtest: SDL has no virtual joysticks here: skipped\n");
-        return 77;
+        return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
     }
     SDL_Joystick* j = SDL_OpenJoystick(first);
     qilin::host::Display::Options o;
@@ -76,18 +83,41 @@ int main() {
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 32767);
     check(reaches(d, h::kPadLeft | h::kPadRT), "the left stick as the D-pad, the trigger as a button");
     SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 0);
-    SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 0);
+    SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
     check(reaches(d, 0), "let go");
 
-    // Unplugged, then another plugged in: it takes over.
-    SDL_CloseJoystick(j);
-    SDL_DetachVirtualJoystick(first);
-    d.poll();
+    // Join a second controller while the first remains attached.
     const SDL_JoystickID second = attach_pad("Second virtual controller");
     SDL_Joystick* j2 = SDL_OpenJoystick(second);
-    SDL_SetJoystickVirtualButton(j2, SDL_GAMEPAD_BUTTON_START, true);
-    check(reaches(d, h::kPadStart), "a controller connected later is used");
-    SDL_CloseJoystick(j2);
+    SDL_SetJoystickVirtualButton(j2, SDL_GAMEPAD_BUTTON_EAST, true);
+    check(reaches(d, h::kPadB), "second controller joins");
+    check(d.pad_buttons(0) == 0 && d.pad_buttons(1) == h::kPadB, "independent player inputs");
+    const auto info = d.controllers();
+    const auto key_for = [&](SDL_JoystickID id) { for (const auto& pad : info) if (pad.id == id) return pad.key; return std::string{}; };
+    const auto key1 = key_for(first), key2 = key_for(second);
+    check(!key1.empty() && !key2.empty() && key1 != key2, "distinct device identities");
+    d.set_player_controllers(key2, key1);
+    check(d.pad_buttons(0) == h::kPadB && d.pad_buttons(1) == 0, "explicit assignments swap players");
+    d.set_player_controllers("", "");
+    SDL_CloseJoystick(j); SDL_DetachVirtualJoystick(first);
+    check(reaches(d, h::kPadB) && !d.pad_connected(0) && d.pad_buttons(1) == h::kPadB,
+          "unplugging player one does not promote player two");
+    const SDL_JoystickID returned = attach_pad("Virtual Xbox controller");
+    j = SDL_OpenJoystick(returned);
+    SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_SOUTH, true);
+    check(reaches(d, h::kPadA | h::kPadB) && d.pad_buttons(0) == h::kPadA && d.pad_buttons(1) == h::kPadB,
+          "reconnected controller reclaims its original slot");
+    SDL_SetJoystickVirtualButton(j, SDL_GAMEPAD_BUTTON_SOUTH, false);
+    SDL_SetJoystickVirtualButton(j2, SDL_GAMEPAD_BUTTON_EAST, false);
+    d.set_input_thresholds(25, 25, 10);
+    SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 10000);
+    check(reaches(d, h::kPadRight), "custom press threshold");
+    SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 7500);
+    check(reaches(d, h::kPadRight), "hysteresis holds through jitter");
+    SDL_SetJoystickVirtualAxis(j, SDL_GAMEPAD_AXIS_LEFTX, 0);
+    check(reaches(d, 0), "hysteresis releases at centre");
+    SDL_CloseJoystick(j); SDL_DetachVirtualJoystick(returned);
+    SDL_CloseJoystick(j2); SDL_DetachVirtualJoystick(second);
 
     std::printf("padtest: %s\n", g_failures ? "FAILED" : "passed");
     return g_failures ? 1 : 0;

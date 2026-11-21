@@ -34,21 +34,32 @@ namespace qilin::host {
 // The queue's rules, on their own (no device): frames are left/right pairs.
 class AudioQueue {
 public:
-    AudioQueue(size_t target_frames, size_t cap_frames) : target_(target_frames), cap_(std::max(cap_frames, target_frames)) {}
+    AudioQueue(size_t target_frames, size_t cap_frames) { set_limits(target_frames, cap_frames); }
 
     size_t size() const { return (data_.size() - head_) / 2; }
     bool playing() const { return playing_; }
-    void set_limits(size_t target_frames, size_t cap_frames) { target_ = target_frames, cap_ = std::max(cap_frames, target_frames); }
+    void set_limits(size_t target_frames, size_t cap_frames) { target_ = std::max(size_t{1}, target_frames), cap_ = std::max(cap_frames, target_); }
 
     // Add sound. Over the cap, the oldest goes, down to the target: returns how many frames that was.
     size_t push(const int16_t* lr, size_t frames) {
-        if (head_ > 0 && head_ * 2 >= data_.size()) data_.erase(data_.begin(), data_.begin() + static_cast<std::ptrdiff_t>(head_)), head_ = 0;
-        data_.insert(data_.end(), lr, lr + frames * 2);
+        if (!frames) return 0;
+        const size_t before = size();
         size_t dropped = 0;
-        if (size() > cap_) {
-            dropped = size() - target_;
+        if (frames > cap_ || before > cap_ - frames) {
+            dropped = before + frames - target_;
+            if (frames >= target_) {
+                // A large batch never allocates more than the retained target.
+                data_.assign(lr + (frames - target_) * 2, lr + frames * 2);
+                head_ = 0;
+                return dropped;
+            }
             head_ += dropped * 2;
         }
+        if (head_ > 0 && (head_ * 2 >= data_.size() || data_.size() + frames * 2 > cap_ * 2)) {
+            data_.erase(data_.begin(), data_.begin() + static_cast<std::ptrdiff_t>(head_));
+            head_ = 0;
+        }
+        data_.insert(data_.end(), lr, lr + frames * 2);
         return dropped;
     }
 
@@ -57,12 +68,13 @@ public:
     // wanted more than there was while playing.
     size_t pull(int16_t* out, size_t frames, bool& ran_dry) {
         ran_dry = false;
+        if (!frames) return 0;
         if (!playing_) {
             if (size() < target_) return 0;
             playing_ = true;
         }
         const size_t n = std::min(frames, size());
-        std::memcpy(out, data_.data() + head_, n * 2 * sizeof(int16_t));
+        if (n) std::memcpy(out, data_.data() + head_, n * 2 * sizeof(int16_t));
         head_ += n * 2;
         if (n < frames) playing_ = false, ran_dry = true;
         return n;
@@ -91,6 +103,8 @@ public:
     // Queue `frames` left/right pairs at `rate` Hz.
     void push(const int16_t* left_right, size_t frames, unsigned rate);
 
+    void set_volume(unsigned percent, bool muted = false);
+
     double target_ms() const { return target_ms_; }
 
     // Since the last call (any thread): how much was queued on average and at
@@ -98,7 +112,7 @@ public:
     // how much of it was dropped for being over the cap.
     struct Stats {
         double average_ms = 0, max_ms = 0, ratio = 1, dropped_ms = 0;
-        uint32_t pushes = 0, empty = 0, dropped = 0;
+        uint32_t pushes = 0, empty = 0, dropped = 0, callbacks = 0;
     };
     Stats take_stats();
 
@@ -109,11 +123,12 @@ private:
     unsigned rate_ = 0;
     double target_ms_ = kTargetMs, device_period_ms_ = 0;
     double smoothed_ms_ = kTargetMs, ratio_ = 1.0;  // the pushing thread's own
-    std::mutex lock_;  // the queue: the pushing thread and the device's
+    // SDL stream lock protects the queue, format and resampler state, including callbacks.
+    float gain_ = 1.0f;
     AudioQueue queue_{0, 0};
     std::vector<int16_t> feeding_;  // the device thread's own
-    std::atomic<uint64_t> sum_us_{0}, dropped_frames_{0};
-    std::atomic<uint32_t> max_us_{0}, pushes_{0}, empty_{0}, dropped_{0}, ratio_ppm_{1000000};
+    std::atomic<uint64_t> sum_us_{0}, dropped_us_{0};
+    std::atomic<uint32_t> max_us_{0}, pushes_{0}, empty_{0}, dropped_{0}, ratio_ppm_{1000000}, callbacks_{0};
 };
 
 // The playback speed for a queue of `smoothed_ms` against `target_ms`: up to

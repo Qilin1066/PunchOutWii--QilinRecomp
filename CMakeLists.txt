@@ -7,7 +7,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 10.15 CACHE STRING "oldest macOS the runtime runs on")
 endif()
 # The single source of the version number (see CHANGELOG.md for the scheme).
-project(PunchOutWiiQilinRecomp VERSION 0.20.0 LANGUAGES C CXX)
+project(PunchOutWiiQilinRecomp VERSION 0.22.0 LANGUAGES C CXX)
 
 # ---- Language: C++23 everywhere (recompiler, runtime, generated code) ----
 set(CMAKE_CXX_STANDARD 23)
@@ -298,7 +298,7 @@ if(Python3_FOUND)
 endif()
 
 # The game's runtime: everything in punchout but the code lifted from main.dol.
-set(punchout_runtime_sources punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp punchout/src/profile.cpp punchout/src/menu.cpp punchout/src/priority.cpp)
+set(punchout_runtime_sources punchout/src/save_history.cpp punchout/src/main.cpp punchout/src/boot.cpp punchout/src/os.cpp punchout/src/dvd.cpp punchout/src/vi.cpp punchout/src/threads.cpp punchout/src/sc.cpp punchout/src/gpu.cpp punchout/src/video.cpp punchout/src/wpad.cpp punchout/src/nand.cpp punchout/src/hw.cpp punchout/src/dsp.cpp punchout/src/ax.cpp punchout/src/recorder.cpp punchout/src/texture.cpp punchout/src/renderer.cpp punchout/src/settings.cpp punchout/src/restart.cpp punchout/src/profile.cpp punchout/src/menu.cpp punchout/src/priority.cpp)
 
 # ---- The game: built only from the player's own main.dol ----
 # cmake -DQILIN_GAME_DOL=<extracted disc>/sys/main.dol: qilin lift turns it
@@ -407,4 +407,55 @@ if(QILIN_PLAYER_KIT)
     install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/R7PP01/plan.tsv DESTINATION kit COMPONENT player)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)
     install(FILES ${kit_headers} DESTINATION kit/include/qilin/rt COMPONENT player)
+endif()
+
+# Compile/link the complete runtime without distributing or requiring game data.
+if(QILIN_HOST AND NOT QILIN_GAME_DOL AND NOT QILIN_PLAYER_KIT)
+    add_executable(punchout_runtime_check ${punchout_runtime_sources} tools/player-kit/link_check.cpp)
+    target_include_directories(punchout_runtime_check PRIVATE punchout/src)
+    target_link_libraries(punchout_runtime_check PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
+    target_compile_definitions(punchout_runtime_check PRIVATE PUNCHOUT_VERSION="${PROJECT_VERSION}")
+    if(WIN32)
+        target_link_libraries(punchout_runtime_check PRIVATE winmm)
+    endif()
+    if(NOT MSVC)
+        set_source_files_properties(punchout/src/renderer.cpp punchout/src/menu.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+    endif()
+endif()
+
+add_executable(punchout_save_history_test punchout/tests/save_history_test.cpp punchout/src/save_history.cpp)
+target_include_directories(punchout_save_history_test PRIVATE punchout/src)
+target_link_libraries(punchout_save_history_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(punchout_save_history_test)
+add_test(NAME punchout_save_history_test COMMAND punchout_save_history_test)
+
+add_executable(punchout_nand_test punchout/tests/nand_test.cpp punchout/src/nand.cpp punchout/src/save_history.cpp)
+target_include_directories(punchout_nand_test PRIVATE punchout/src host/include)
+target_link_libraries(punchout_nand_test PRIVATE qilin_rt qilin_warnings)
+qilin_tool(punchout_nand_test)
+add_test(NAME punchout_nand_test COMMAND punchout_nand_test)
+
+add_executable(qilin_analog_test host/tests/analog_test.cpp)
+target_include_directories(qilin_analog_test PRIVATE host/include)
+target_link_libraries(qilin_analog_test PRIVATE qilin_warnings)
+qilin_tool(qilin_analog_test)
+add_test(NAME qilin_analog_test COMMAND qilin_analog_test)
+if(QILIN_HOST)
+    add_executable(qilin_audio_callback_test host/tests/audio_callback_test.cpp)
+    target_link_libraries(qilin_audio_callback_test PRIVATE qilin_host SDL3::SDL3-static qilin_warnings)
+    qilin_tool(qilin_audio_callback_test)
+    add_test(NAME qilin_audio_callback_test COMMAND qilin_audio_callback_test)
+    set_tests_properties(qilin_audio_callback_test PROPERTIES ENVIRONMENT "SDL_AUDIODRIVER=dummy;SDL_AUDIO_DEVICE_SAMPLE_FRAMES=128" TIMEOUT 25)
+endif()
+
+if(Python3_FOUND)
+    add_test(NAME punchout_timing_check_test COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/timing_check_test.py)
+endif()
+if(Python3_FOUND AND UNIX)
+    add_test(NAME punchout_launcher_test COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/launcher_test.py)
+endif()
+find_program(QILIN_POWERSHELL NAMES pwsh powershell)
+if(QILIN_POWERSHELL)
+    add_test(NAME punchout_powershell_syntax_test COMMAND ${QILIN_POWERSHELL} -NoProfile -ExecutionPolicy Bypass
+             -File ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/powershell_syntax_test.ps1)
 endif()

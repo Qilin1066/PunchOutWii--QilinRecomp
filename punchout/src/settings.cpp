@@ -7,6 +7,8 @@
 
 #include "qilin/host/pad.hpp"
 #include "qilin/rt/system.hpp"
+#include "qilin/rt/file.hpp"
+#include <set>
 
 namespace punchout {
 namespace host = qilin::host;
@@ -176,12 +178,13 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
     Settings s = default_settings();
     std::istringstream in(text);
     std::string line, section;
-    bool seen[kControlCount] = {};
+    std::set<std::string> seen;
     for (int n = 1; std::getline(in, line); ++n) {
         const auto fail = [&](const std::string& why) {
             error = "line " + std::to_string(n) + ": " + why;
             return false;
         };
+        if (n == 1 && line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3);
         if (const size_t hash = line.find('#'); hash != std::string::npos) line.erase(hash);
         line = trim(line);
         if (line.empty()) continue;
@@ -196,6 +199,7 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
         if (eq == std::string::npos) return fail("expected name = value");
         const std::string name = lower(trim(line.substr(0, eq))), value = trim(line.substr(eq + 1));
         if (section.empty()) return fail("'" + name + "' comes before any [section]");
+        if (!seen.insert(section + "." + name).second) return fail("'" + name + "' is set twice");
         const std::string v = lower(value);
         bool ok = true;
         const auto boolean = [&](bool& to) {
@@ -240,7 +244,7 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
             } else if (name == "mask") {
                 if (!number(s.mask, 0, 100)) return false;
             } else if (name == "internal_scale") {
-                if (value == "auto" || value == "0") s.scale = 0;  // auto
+                if (v == "auto" || v == "0") s.scale = 0;  // auto
                 else if (!number(s.scale, 1, 8)) return false;
             } else if (name == "anisotropy") {
                 if (!number(s.anisotropy, 1, 16)) return false;
@@ -279,6 +283,14 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
             continue;
         }
         // [controls]
+        if (name == "controller1") { s.controller1 = value; continue; }
+        if (name == "controller2") { s.controller2 = value; continue; }
+        if (name == "stick_threshold") { if (!number(s.stick_threshold, 5, 95)) return false; continue; }
+        if (name == "trigger_threshold") { if (!number(s.trigger_threshold, 5, 95)) return false; continue; }
+        if (name == "pointer_deadzone") { if (!number(s.pointer_deadzone, 0, 95)) return false; continue; }
+        if (name == "rumble_strength") { if (!number(s.rumble_strength, 0, 100)) return false; continue; }
+        if (name == "volume") { if (!number(s.volume, 0, 100)) return false; continue; }
+        if (name == "mute_unfocused") { if (!boolean(s.mute_unfocused)) return false; continue; }
         if (name == "rumble") {
             if (!boolean(s.rumble)) return false;
             continue;
@@ -298,8 +310,6 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
         while (c < kControlCount && name != kControlNames[c]) ++c;
         if (c == kControlCount)
             return fail("'" + name + "' isn't a Wii Remote button (up down left right one two a plus minus home), rumble, speaker or second_player");
-        if (seen[c]) return fail("'" + name + "' is set twice");
-        seen[c] = true;
         s.controls[c].clear();
         std::istringstream items(value);
         for (std::string item; std::getline(items, item, ',');) {
@@ -311,6 +321,8 @@ bool parse_settings(const std::string& text, Settings& out, std::string& error, 
             s.controls[c].push_back(b);
         }
     }
+    if (!s.controller1.empty() && s.controller1 == s.controller2) { error = "player one and player two cannot use the same explicit controller"; return false; }
+    error.clear();
     out = std::move(s);
     return true;
 }
@@ -361,6 +373,18 @@ std::string settings_text(const Settings& s) {
         "variable_refresh = " + b(s.variable_refresh) + "\n"
         "\n"
         "[controls]\n"
+        "# Preferred device identities selected in the menu; empty: automatic.\n"
+        "controller1 = " + s.controller1 + "\n"
+        "controller2 = " + s.controller2 + "\n"
+        "# Press thresholds, 5-95 percent. Release is 5 points lower to resist jitter.\n"
+        "stick_threshold = " + std::to_string(s.stick_threshold) + "\n"
+        "trigger_threshold = " + std::to_string(s.trigger_threshold) + "\n"
+        "# Pointer dead zone, 0-95 percent.\n"
+        "pointer_deadzone = " + std::to_string(s.pointer_deadzone) + "\n"
+        "rumble_strength = " + std::to_string(s.rumble_strength) + "\n"
+        "# Playback volume and optional muting while another window has focus.\n"
+        "volume = " + std::to_string(s.volume) + "\n"
+        "mute_unfocused = " + b(s.mute_unfocused) + "\n"
         "# The Wii Remote's rumble, on the controller.\n"
         "rumble = " + b(s.rumble) + "\n"
         "# The sounds the game plays on the Wii Remote's own speaker, from the PC's speakers.\n"
@@ -402,14 +426,24 @@ std::filesystem::path settings_file(const std::filesystem::path& folder) { retur
 
 bool save_settings(const std::filesystem::path& folder, const Settings& s) {
     const std::filesystem::path file = settings_file(folder), tmp = file.string() + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        out << settings_text(s);
-        if (!out.flush()) return false;
-    }
+    // Flush and close before replacement; either failure leaves the old file intact.
+#if defined(_WIN32)
+    FILE* out = _wfopen(tmp.c_str(), L"wb");
+#else
+    FILE* out = std::fopen(tmp.c_str(), "wb");
+#endif
+    if (!out) return false;
+    const std::string text = settings_text(s);
+    bool ok = std::fwrite(text.data(), 1, text.size(), out) == text.size();
+    ok = qilin::rt::sync_file(out) && ok;
+    ok = std::fclose(out) == 0 && ok;
     std::error_code ec;
-    std::filesystem::rename(tmp, file, ec);
-    return !ec;
+    if (ok) {
+        std::filesystem::rename(tmp, file, ec);
+        ok = !ec;
+    }
+    if (!ok) std::filesystem::remove(tmp, ec);
+    return ok;
 }
 
 Settings load_settings(const std::filesystem::path& folder) {
@@ -420,7 +454,7 @@ Settings load_settings(const std::filesystem::path& folder) {
         std::stringstream buf;
         buf << in.rdbuf();
         text = buf.str();
-        return true;
+        return !in.bad() && !buf.bad();
     };
     std::string text;
     if (read(file, text)) {
@@ -432,6 +466,9 @@ Settings load_settings(const std::filesystem::path& folder) {
         qilin::rt::log("settings: read %s", file.string().c_str());
         return s;
     }
+    std::error_code read_ec;
+    if (std::filesystem::exists(file, read_ec) || read_ec)
+        qilin::rt::fatal(nullptr, "cannot read %s (the existing settings have been kept)", file.string().c_str());
     Settings s = default_settings();
     if (read(old, text)) {  // v0.17.0's: its controls and scale carry over
         std::string error;

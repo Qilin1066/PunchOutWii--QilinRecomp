@@ -21,6 +21,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Timing test image dependency
+        run: python -m pip install Pillow
       # GCC 14's libstdc++ provides <print>; Clang on Linux uses it too.
       - name: Install compilers
         if: runner.os == 'Linux'
@@ -31,6 +36,7 @@ jobs:
           sudo apt-get install -y -qq libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
             libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev libegl-dev libdrm-dev libgbm-dev \
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev
+          sudo apt-get install -y -qq xvfb xauth libvulkan1 mesa-vulkan-drivers
       - name: Configure
         shell: bash
         run: |
@@ -42,7 +48,28 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            # Require a software Vulkan device and a desktop for graphical tests.
+            xvfb-run -a env QILIN_REQUIRE_GRAPHICS=1 ctest --test-dir build -C Release --output-on-failure
+          else
+            ctest --test-dir build -C Release --output-on-failure
+          fi
+      - name: Scheduler, save and audio sanitizers
+        if: matrix.sweep
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug -DQILIN_SANITIZE=address,undefined -DQILIN_WERROR=ON \
+            -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14 \
+            -DFETCHCONTENT_SOURCE_DIR_SDL3="$PWD/build/_deps/sdl3-src" \
+            -DFETCHCONTENT_SOURCE_DIR_VULKANHEADERS="$PWD/build/_deps/vulkanheaders-src" \
+            -DFETCHCONTENT_SOURCE_DIR_VOLK="$PWD/build/_deps/volk-src" \
+            -DFETCHCONTENT_SOURCE_DIR_IMGUI="$PWD/build/_deps/imgui-src"
+          cmake --build build-sanitize --parallel 2 --target punchout_threads_test punchout_save_history_test punchout_nand_test qilin_audio_callback_test
+          ctest --test-dir build-sanitize -R 'punchout_(threads|save_history|nand)_test|qilin_audio_callback_test' --output-on-failure
       # The decoder against GNU objdump over a sweep of the encoding space (no game files needed).
       - name: Decoder sweep
         if: matrix.sweep

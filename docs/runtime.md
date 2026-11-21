@@ -297,6 +297,12 @@ Not yet:
 - **The Wii Remote's speaker in use.** Its sound is decoded and mixed in (`speaker.hpp`; the decoder is exact against the game's own encoder), but in every scene played here the game sends it only silence: when the game does use it is unconfirmed.
 - Smaller, where the console's behaviour isn't modelled: the DSP's polyphase resampler is linear unless the console's coefficient table (`dsp_coef.bin`, which isn't on the disc) is in the user folder, texture offsets for lines and points.
 
+## Reliability additions (0.22.0)
+
+Audio callbacks and producers now share the SDL stream lock; see `host/src/audio.cpp`. Cancelling a parked guest releases its mutexes, withdraws inherited priorities and wakes its native thread to unwind. Shared ownership retains the old thread until it exits even if the guest address is reused; sleep completions carry generation tokens.
+
+[Recovery and controller behaviour](reliability-and-recovery.md) documents bounded save history, restart-time restoration, explicit assignments, reconnection and focus behaviour. [Fight-timing validation](timing-validation.md) explains the paired-capture tool and its evidence requirements. Its synthetic fixtures do not establish any opponent's actual timing.
+
 ## Next
 
 1. **The renderer's gaps** as the game reaches them, and checking pictures against hardware behaviour on the player's PC.

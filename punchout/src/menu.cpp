@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "os.hpp"
+#include "save_history.hpp"
 #include "qilin/rt/system.hpp"
 
 #ifndef PUNCHOUT_VERSION
@@ -122,6 +123,11 @@ bool Menu::take_controls_changed() {
 bool Menu::handle(const void* event) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(event);
     if (!ok_) return false;
+    if (!display_.focused() && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP ||
+        e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP ||
+        e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_WHEEL ||
+        e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_UP ||
+        e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION || e.type == SDL_EVENT_TEXT_INPUT)) return false;
     // Looking at the picture: any key or button brings the menu back.
     if (peek_ && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN)) {
         peek_ = false;
@@ -190,6 +196,7 @@ void Menu::toggle() {
         close();
         return;
     }
+    history_loaded_ = false;
     opening_ = true;
     request_pause(true);  // the game parks at its next retrace; tick() opens then
 }
@@ -376,6 +383,35 @@ void Menu::controls_page() {
         ImGui::BulletText("%s", name ? name : "A controller");
     }
     SDL_free(ids);
+    const auto devices = display_.controllers();
+    const auto select_pad = [&](const char* label, std::string& selected, const std::string& other) {
+        std::string preview = selected.empty() ? "Automatic" : "Saved controller (disconnected)";
+        for (const auto& device : devices) if (device.key == selected) preview = device.name;
+        if (ImGui::BeginCombo(label, preview.c_str())) {
+            if (ImGui::Selectable("Automatic", selected.empty())) selected.clear();
+            for (const auto& device : devices) {
+                ImGui::PushID(int(device.id));
+                ImGui::BeginDisabled(!other.empty() && device.key == other);
+                if (ImGui::Selectable(device.name.c_str(), selected == device.key)) selected = device.key;
+                ImGui::EndDisabled(); ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+    };
+    select_pad("Player one controller", s_.controller1, s_.controller2);
+    select_pad("Player two controller", s_.controller2, s_.controller1);
+    if (ImGui::Button("Reset automatic player order")) display_.reset_player_order();
+    ImGui::TextDisabled("Automatic slots stay reserved while unplugged. Explicit choices are remembered.");
+    const auto percent = [](const char* label, unsigned& value, int lo, int hi) {
+        int v = int(value);
+        if (ImGui::SliderInt(label, &v, lo, hi, "%d%%")) value = unsigned(v);
+    };
+    percent("Stick press threshold", s_.stick_threshold, 5, 95);
+    percent("Trigger press threshold", s_.trigger_threshold, 5, 95);
+    percent("Pointer dead zone", s_.pointer_deadzone, 0, 95);
+    percent("Rumble strength", s_.rumble_strength, 0, 100);
+    percent("Playback volume", s_.volume, 0, 100);
+    ImGui::Checkbox("Mute when unfocused", &s_.mute_unfocused);
     ImGui::Checkbox("Rumble", &s_.rumble);
     ImGui::SameLine();
     ImGui::Checkbox("Wii Remote speaker", &s_.speaker);
@@ -561,6 +597,25 @@ void Menu::display_page() {
 }
 
 void Menu::game_page() {
+    ImGui::SeparatorText("Save recovery");
+    ImGui::TextWrapped("The five latest previous copies of each save are kept. Restore restarts the game; the current save is backed up first.");
+    if (ImGui::TreeNode("Previous saves")) {
+        if (!history_loaded_ || ImGui::Button("Refresh previous saves")) { save_history_ = save_backups(folder_); history_loaded_ = true; }
+        const auto& backups = save_history_;
+        if (backups.empty()) ImGui::TextDisabled("No previous saves yet.");
+        for (size_t i = 0; i < backups.size(); ++i) {
+            ImGui::PushID(int(i));
+            ImGui::TextWrapped("%s", backups[i].label.c_str());
+            if (ImGui::Button("Restore and restart")) {
+                s_.fullscreen = display_.fullscreen();
+                if (!save_settings(folder_, s_)) note_ = "Settings could not be saved; restore was not queued.";
+                else if (request_save_restore(folder_, backups[i].file, note_)) restart_program();
+            }
+            ImGui::PopID();
+        }
+        ImGui::TreePop();
+    }
+    if (!note_.empty()) ImGui::TextWrapped("%s", note_.c_str());
     ImGui::SeparatorText("The Wii's own settings (read the next time the game starts)");
     const int lang = std::clamp(int(s_.language), 1, 5);  // the PAL disc's languages
     if (ImGui::BeginCombo("Language", kLanguages[lang])) {

@@ -10,6 +10,7 @@
 // device.
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -419,7 +420,7 @@ const rt::FunctionEntry kNoFunctions[] = {{0x80004000u, [](rt::Cpu&) {}}};
 int main() {
     if (!vulkan_13_device()) {
         std::puts("render_test: no Vulkan 1.3 device here: skipped");
-        return 77;
+        return std::getenv("QILIN_REQUIRE_GRAPHICS") ? 1 : 77;
     }
     rt::init({kNoFunctions, {}});  // guest memory, for textures
     host::Gpu gpu = host::Gpu::create({}, false);

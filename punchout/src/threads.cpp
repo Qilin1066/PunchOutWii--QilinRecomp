@@ -61,6 +61,8 @@ constexpr uint32_t kOSExitThread = 0x80208838u;      // a new thread's return ad
 constexpr uint32_t kFpuContextFlag = 0x803CAD30u;    // OSCreateThread fills FPRs with -1 when set
 constexpr size_t kHostStack = 16u << 20;
 
+struct ThreadCancelled {};
+
 struct ThreadExit {
     uint32_t value;
 };
@@ -70,6 +72,7 @@ struct Thread {
     Cpu* cpu = nullptr;          // the main thread's lives in start_game
     std::unique_ptr<Cpu> own;    // other threads' here
     int priority = 16;           // the one it runs at: its own, or a higher one lent by a mutex's waiter
+    int wanted_priority = 16;
     int base = 16;               // its own
     int suspend = 0;
     uint16_t state = kReady;
@@ -78,15 +81,18 @@ struct Thread {
     uint32_t waiting_on = 0;     // the queue it sleeps on, or 0
     uint32_t entry = 0;
     bool started = false, go = false;
+    bool cancelled = false;  // under g_lock: wake a parked host so it can unwind
+    uint64_t sleep_generation = 0;
     std::condition_variable cv;
     std::vector<uint32_t> mutexes;  // held, for OSExitThread's unlock
 };
 
 std::mutex g_lock;  // guards the hand-over (go flags, condition variables)
-std::map<uint32_t, std::unique_ptr<Thread>> g_threads;
+std::map<uint32_t, std::shared_ptr<Thread>> g_threads;
 Thread* g_current = nullptr;
 std::deque<Thread*> g_ready[32];
 std::map<uint32_t, std::deque<Thread*>> g_waiters;
+std::set<uint32_t> g_owned;  // the mutexes that have an owner
 
 void store(Thread* t) {
     rt::poke16(t->guest + kState, t->state);
@@ -122,14 +128,26 @@ Thread* best_ready() {
 }
 
 void host_main(Thread* t);
+void recompute_priorities();
 
 void start_host(Thread* t) {
     t->started = true;
-    run_on_host_thread([](void* p) { host_main(static_cast<Thread*>(p)); }, t);
+    // A cancelled guest address can be reused before its old host has unwound.
+    // The host keeps its own reference until it has stopped touching the thread.
+    auto* lifetime = new std::shared_ptr<Thread>(g_threads.at(t->guest));
+    run_on_host_thread([](void* p) {
+        std::shared_ptr<Thread> keep = std::move(*static_cast<std::shared_ptr<Thread>*>(p));
+        delete static_cast<std::shared_ptr<Thread>*>(p);
+        host_main(keep.get());
+    }, lifetime);
 }
 
 // Hand the guest CPU to `next`; unless `leaving`, wait until it comes back.
 void switch_to(Thread* next, bool leaving = false) {
+    // Keep the notified condition variable alive even if the other host
+    // finishes and its guest address is immediately reused before we park.
+    const auto keep_next = g_threads.at(next->guest);
+    next = keep_next.get();
     Thread* me = g_current;
     me->enabled = interrupts_enabled();
     unready(next);
@@ -145,7 +163,8 @@ void switch_to(Thread* next, bool leaving = false) {
     next->cv.notify_one();
     if (leaving) return;
     std::unique_lock l(g_lock);
-    me->cv.wait(l, [me] { return me->go; });
+    me->cv.wait(l, [me] { return me->go || me->cancelled; });
+    if (me->cancelled) throw ThreadCancelled{};
     me->go = false;
     l.unlock();
     set_interrupts_enabled(me->enabled);
@@ -180,7 +199,8 @@ void block(Cpu& c, bool leaving = false) {
 void host_main(Thread* t) {
     {
         std::unique_lock l(g_lock);
-        t->cv.wait(l, [t] { return t->go; });
+        t->cv.wait(l, [t] { return t->go || t->cancelled; });
+        if (t->cancelled) return;
         t->go = false;
     }
     set_interrupts_enabled(true);  // a new thread's context has interrupts on
@@ -189,6 +209,8 @@ void host_main(Thread* t) {
     try {
         rt::call(*t->cpu, t->entry);
         value = t->cpu->r[3];
+    } catch (const ThreadCancelled&) {
+        return;  // cancellation already released locks and handed on the guest CPU
     } catch (const ThreadExit& e) {
         value = e.value;
     }
@@ -203,6 +225,7 @@ bool wake_waiters(uint32_t queue) {
     g_waiters.erase(it);
     for (Thread* t : woken)
         if (t->state == kWaiting) make_ready(t);
+    if (g_owned.contains(queue)) recompute_priorities();
     return true;
 }
 
@@ -212,6 +235,7 @@ void sleep_on(Cpu& c, uint32_t queue) {
     me->waiting_on = queue;
     store(me);
     g_waiters[queue].push_back(me);
+    if (g_owned.contains(queue)) recompute_priorities();
     block(c);
 }
 
@@ -239,7 +263,9 @@ uint64_t g_generation = 0;
 struct Wake {
     uint64_t at;
     uint32_t thread;
+    uint64_t generation;
 };
+uint64_t g_sleep_generation = 0;
 std::vector<Wake> g_sleepers;  // OSSleepTicks
 
 void poll_alarms() {
@@ -265,8 +291,14 @@ void poll_alarms() {
     for (size_t i = 0; i < g_sleepers.size();) {
         if (g_sleepers[i].at <= now) {
             const uint32_t t = g_sleepers[i].thread;
+            const uint64_t generation = g_sleepers[i].generation;
             g_sleepers.erase(g_sleepers.begin() + static_cast<long>(i));
-            post_interrupt([t](Cpu& c) { wake_all(c, t + kQueue); });
+            post_interrupt([t, generation](Cpu& c) {
+                const auto it = g_threads.find(t);
+                if (it != g_threads.end() && it->second->sleep_generation == generation &&
+                    it->second->state == kWaiting && it->second->waiting_on == t + kQueue)
+                    wake_all(c, t + kQueue);
+            });
         } else {
             ++i;
         }
@@ -302,11 +334,11 @@ void OSCreateThread(Cpu& c) {  // (thread, func, param, stack, stackSize, priori
         return;
     }
     if (auto it = g_threads.find(t); it != g_threads.end()) {
-        if (it->second->state != kMoribund && it->second->started)
+        if (it->second->state != kMoribund)
             rt::fatal(&c, "OSCreateThread on %08X, a thread that is still alive", t);
         g_threads.erase(it);
     }
-    auto th = std::make_unique<Thread>();
+    auto th = std::make_shared<Thread>();
     th->guest = t;
     th->own = std::make_unique<Cpu>(rt::new_cpu());
     th->cpu = th->own.get();
@@ -345,6 +377,7 @@ void OSResumeThread(Cpu& c) {  // (thread) -> the suspend count before
     const int was = t->suspend;
     if (t->suspend > 0 && --t->suspend == 0 && t->state == kReady) make_ready(t);
     store(t);
+    recompute_priorities();
     c.r[3] = static_cast<uint32_t>(was);
     reschedule(c);
 }
@@ -357,6 +390,7 @@ void OSSuspendThread(Cpu& c) {  // (thread) -> the suspend count before
         if (t == g_current) {
             t->state = kReady;  // ready, but held until resumed
             store(t);
+            recompute_priorities();
             block(c);
             c.r[3] = static_cast<uint32_t>(was);
             return;
@@ -364,6 +398,8 @@ void OSSuspendThread(Cpu& c) {  // (thread) -> the suspend count before
         if (t->state == kReady) unready(t);
     }
     store(t);
+    recompute_priorities();
+    reschedule(c);
 }
 
 void OSYieldThread(Cpu& c) {
@@ -383,6 +419,8 @@ void OSExitThread(Cpu& c) {
     throw ThreadExit{c.r[3]};
 }
 
+void release_mutex(Thread* me, uint32_t m);
+
 void OSCancelThread(Cpu& c) {
     Thread* t = thread_at(c, c.r[3]);
     if (t == g_current) throw ThreadExit{0};
@@ -395,10 +433,24 @@ void OSCancelThread(Cpu& c) {
                 break;
             }
     }
-    t->state = kMoribund;  // its host thread stays parked
+    // Unlock and wake without switching until cancellation is fully recorded.
+    for (uint32_t m : std::vector(t->mutexes)) {
+        release_mutex(t, m);
+        wake_waiters(m);
+    }
+    t->state = kMoribund;
     t->waiting_on = 0;
+    t->sleep_generation = 0;
+    std::erase_if(g_sleepers, [t](const Wake& wake) { return wake.thread == t->guest; });
     store(t);
-    wake_all(c, t->guest + kQueueJoin);
+    {
+        std::lock_guard lock(g_lock);
+        t->cancelled = true;
+    }
+    t->cv.notify_one();
+    wake_waiters(t->guest + kQueueJoin);
+    recompute_priorities();
+    reschedule(c);
 }
 
 void OSJoinThread(Cpu& c) {  // (thread, val*) -> BOOL
@@ -422,7 +474,8 @@ void OSInitThreadQueue(Cpu& c) {
 
 void OSSleepTicks(Cpu& c) {  // (OSTime ticks): r3:r4
     const uint64_t ticks = arg64(c, 3);
-    g_sleepers.push_back({time_base() + ticks, g_current->guest});
+    g_current->sleep_generation = ++g_sleep_generation;
+    g_sleepers.push_back({time_base() + ticks, g_current->guest, g_current->sleep_generation});
     sleep_on(c, g_current->guest + kQueue);
 }
 
@@ -432,30 +485,34 @@ void OSSleepTicks(Cpu& c) {  // (OSTime ticks): r3:r4
 // owner is itself waiting for, so a thread in between can't keep the owner (and with it the
 // waiter) off the CPU; releasing a mutex takes the owner back to its own priority, or the
 // best still lent to it through the mutexes it keeps.
-std::set<uint32_t> g_owned;  // the mutexes that have an owner
+
 
 void set_priority(Thread* t, int priority) {
     if (t->priority == priority) return;
-    const bool queued = t->state == kReady && t->suspend == 0 && t != g_current;
+    const bool queued = t->state == kReady && t->suspend == 0;
     if (queued) unready(t);
     t->priority = priority;
     if (queued) g_ready[priority].push_back(t);
     store(t);
 }
-void lend_priority(Cpu& c, Thread* owner, int priority) {
-    for (int hops = 0; owner && owner->priority > priority; ++hops) {
-        if (hops == 64) rt::fatal(&c, "mutexes wait on each other in a ring (a deadlock in the game)");
-        set_priority(owner, priority);
-        if (owner->state != kWaiting || !g_owned.contains(owner->waiting_on)) break;
-        owner = thread_at(c, rt::peek32(owner->waiting_on + 8));
+// Rebuild effective priorities from base priorities and current live waiters.
+// Starting afresh also withdraws donations after cancellation/suspension, and
+// propagates that withdrawal through a chain of mutex owners. No allocation.
+void recompute_priorities() {
+    for (auto& [address, t] : g_threads) t->wanted_priority = t->base;
+    for (size_t pass = 0; pass < g_threads.size(); ++pass) {
+        bool changed = false;
+        for (const auto& [address, waiter] : g_threads) {
+            if (waiter->state != kWaiting || waiter->suspend || !g_owned.contains(waiter->waiting_on)) continue;
+            const auto owner = g_threads.find(rt::peek32(waiter->waiting_on + 8));
+            if (owner != g_threads.end() && owner->second->wanted_priority > waiter->wanted_priority) {
+                owner->second->wanted_priority = waiter->wanted_priority;
+                changed = true;
+            }
+        }
+        if (!changed) break;
     }
-}
-int own_or_lent_priority(const Thread* t) {
-    int p = t->base;
-    for (uint32_t m : t->mutexes)
-        if (const auto it = g_waiters.find(m); it != g_waiters.end())
-            for (const Thread* w : it->second) p = std::min(p, w->priority);
-    return p;
+    for (auto& [address, t] : g_threads) set_priority(t.get(), t->wanted_priority);
 }
 
 void OSInitMutex(Cpu& c) {
@@ -478,7 +535,6 @@ void lock_mutex(Cpu& c, uint32_t m) {
             rt::poke32(m + 0xC, rt::peek32(m + 0xC) + 1);
             return;
         }
-        lend_priority(c, thread_at(c, owner), me->priority);
         sleep_on(c, m);
     }
 }
@@ -487,7 +543,7 @@ void release_mutex(Thread* me, uint32_t m) {
     rt::poke32(m + 0xC, 0);
     std::erase(me->mutexes, m);
     g_owned.erase(m);
-    set_priority(me, own_or_lent_priority(me));
+    if (me->priority != me->base) recompute_priorities();
 }
 void OSLockMutex(Cpu& c) { lock_mutex(c, c.r[3]); }
 void OSUnlockMutex(Cpu& c) {
@@ -637,7 +693,7 @@ const rt::Provided kReplacements[] = {
 std::span<const rt::Provided> thread_replacements() { return kReplacements; }
 
 void init_threads(Cpu& main_cpu) {
-    auto th = std::make_unique<Thread>();
+    auto th = std::make_shared<Thread>();
     th->guest = kDefaultThread;
     th->cpu = &main_cpu;
     th->priority = 16;
