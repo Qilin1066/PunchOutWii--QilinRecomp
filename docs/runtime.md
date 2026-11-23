@@ -194,7 +194,7 @@ Two threads share the work. The game's thread records what the command stream as
   - `PUNCHOUT_POINTER="x,y"` holds the pointer at a point (−1 to 1, y up); `"x,y;x,y@40;x,y@52"` moves it at those times.
   - The save lives in the per-user folder's `nand/`; copying it aside and back makes a scripted run repeatable.
   - `PUNCHOUT_GPU_THREAD=0` decodes the command stream on the guest's thread instead of the GPU thread (v0.17.0; gpu.cpp explains the 16 KB queue).
-  - `PUNCHOUT_FULL_VERTICES=1` stores every vertex in the full 132-byte layout instead of the compact one where it fits (v0.16.0; 76 bytes and up to four texture coordinates since the recording work after v0.20.0).
+  - `PUNCHOUT_FULL_VERTICES=1` stores every vertex in the full 132-byte layout instead of the compact one where it fits (v0.16.0; 76 bytes and up to four texture coordinates since the recording work of v0.22.0).
   - Draws of triangle lists and strips, lines, line strips and points have `Draw::direct` set (1 list, 2 strip) and no indices: `first_index` and `index_count` are then the first vertex and the count, and the renderer sets the topology (dynamic, within the pipeline's class) and calls vkCmdDraw.
   - Draw states are built incrementally (`build_state` parts: `kPartPos`, `kPartNormal`, `kPartPost`, `kPartLights`, `kPartXfRegs`, `kPartBp`): gpu.cpp reports XF writes by address (`gx::xf_changed`), BP writes as changed or not, and CP writes not at all (vertex formats are read by each primitive, not kept in the state).
   - `PUNCHOUT_CHECK_DECODE=1` also checks each incrementally built state against one built whole. It decodes every primitive both ways, an attribute at a time across its vertices (the way used) and a vertex at a time (the reference), and stops at the first byte that differs.
@@ -297,7 +297,7 @@ Not yet:
 - **The Wii Remote's speaker in use.** Its sound is decoded and mixed in (`speaker.hpp`; the decoder is exact against the game's own encoder), but in every scene played here the game sends it only silence: when the game does use it is unconfirmed.
 - Smaller, where the console's behaviour isn't modelled: the DSP's polyphase resampler is linear unless the console's coefficient table (`dsp_coef.bin`, which isn't on the disc) is in the user folder, texture offsets for lines and points.
 
-## Reliability additions (0.22.0)
+## Reliability additions (v0.22.0)
 
 Audio callbacks and producers now share the SDL stream lock; see `host/src/audio.cpp`. Cancelling a parked guest releases its mutexes, withdraws inherited priorities and wakes its native thread to unwind. Shared ownership retains the old thread until it exits even if the guest address is reused; sleep completions carry generation tokens.
 

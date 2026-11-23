@@ -125,7 +125,7 @@ As before, the rules come from Dolphin's interpreter (`Interpreter_Paired.cpp`, 
 - **Teeth:** planted bugs are caught. Without the single-rounding fix 2 operations fail, moving the NI threshold fails 5, breaking `round25` fails 4, and swapping the NaN order fails 11.
 - **What it found:** in v0.13.8, a bug in `madd_single`. When the product is below the smallest subnormal, the fma's rounding error underflows to zero and the tie went the wrong way, so `fmadds` gave infinity instead of `FLT_MAX` for `b` halfway between them. Now fixed, and kept as a regression case.
 
-### Lifter: single-precision leaf functions (after v0.20.0)
+### Lifter: single-precision leaf functions (v0.22.0)
 
 The game's hottest code in a fight is a handful of leaf loops that skin vertices with single-precision and paired-single arithmetic (`fn_801C264C`, `fn_801C21A0`). Lifted as the rest is, every FPR half is a `double`, and each single operation is a double operation, a rounding to single and a widening back, with the helpers' checks. A function qualifies for *single mode* when it is a leaf and every floating-point instruction in it is one whose result is a single (the `s` forms, the paired singles, single loads and stores, `psq_l`/`psq_st`, moves, compares). Then:
 - Its FPR halves are `float` locals. Halves it reads before writing (found by a liveness pass over the function's blocks) are checked on entry: if any holds a double that isn't exactly a single, the function runs its ordinary twin instead (`fn_X_d`, emitted beside it), so nothing is assumed about callers.

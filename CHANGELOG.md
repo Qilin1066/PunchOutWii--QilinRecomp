@@ -11,7 +11,10 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
-Next version: **0.22.0** (CMake's single version source).
+## [0.22.0] - 2026-11-23
+
+There is no 0.21.0: the version went from 0.20.0 to 0.22.0 in one step.
+
 ### Added
 - **Remembered controller assignments and tuning:** optional device identities per player, reserved automatic slots across disconnects, configurable stick/trigger press thresholds with a five-point release margin, pointer dead zone, rumble strength, playback volume and background muting. The default single-player mode still accepts every controller. Indistinguishable devices without serials use connection-instance order.
 - **Save history and recovery:** keep five flushed pre-write copies per NAND file outside NAND. Game → Previous saves offers Restore and restart; restoration stages the selected version before pruning, backs up the current save and applies it before guest files open on the next boot. Missing, outside or symlinked backup paths fail explicitly.
