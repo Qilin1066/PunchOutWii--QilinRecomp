@@ -33,6 +33,20 @@ int main() {
     { std::ofstream invalid(folder / "restore-save.txt"); invalid << "../../outside.bak\n"; }
     check(!punchout::apply_save_restore(folder, error) && read(save) == selected_data, "bad request cannot modify current save");
     fs::remove(folder / "restore-save.txt");
+    // A request edited on Windows: a byte-order mark and CR LF.
+    write("current again");
+    const auto second = punchout::save_backups(folder).front().file;
+    const std::string second_data = read(second);
+    check(punchout::request_save_restore(folder, second, error), "second restore request queued");
+    {
+        const std::string line = read(folder / "restore-save.txt");
+        std::ofstream edited(folder / "restore-save.txt", std::ios::binary);
+        edited << "\xEF\xBB\xBF" << line.substr(0, line.size() - 1) << "\r\n";
+    }
+    check(punchout::apply_save_restore(folder, error) && read(save) == second_data, "request with a byte-order mark and CR LF applied");
+    { std::ofstream huge(folder / "restore-save.txt", std::ios::binary); huge << std::string(2000, 'a') << '\n'; }
+    check(!punchout::apply_save_restore(folder, error), "oversized request refused");
+    fs::remove(folder / "restore-save.txt");
     // A stale staging file from an interrupted operation is never offered as a backup.
     { std::ofstream partial(backups.front().file.string() + ".tmp"); partial << "partial"; }
     check(punchout::save_backups(folder).size() == 5, "incomplete backups ignored");

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 #include <ctime>
 #include <thread>
@@ -89,7 +90,9 @@ bool backup_save(const fs::path& nand, const fs::path& file, std::string& error)
         std::ostringstream name;
         name << std::setw(20) << std::setfill('0') << ticks << '-' << std::setw(6) << sequence << ".bak";
         destination = dir / name.str();
-        if (!fs::exists(destination, ec)) break;
+        const bool exists = fs::exists(destination, ec);
+        if (ec) return fail(error, "cannot inspect a backup name", ec);
+        if (!exists) break;
     }
     fs::path temporary = destination; temporary += ".tmp";
     if (!copy_flushed(file, temporary, error)) return false;
@@ -98,8 +101,12 @@ bool backup_save(const fs::path& nand, const fs::path& file, std::string& error)
     std::vector<fs::path> backups;
     for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
         if (it->is_regular_file(ec) && it->path().extension() == ".bak") backups.push_back(it->path());
+    if (ec) return fail(error, "cannot list the save's backups to prune them", ec);
     std::sort(backups.begin(), backups.end());
-    for (size_t i = 0; i + kKeep < backups.size(); ++i) fs::remove(backups[i], ec);
+    for (size_t i = 0; i + kKeep < backups.size(); ++i) {
+        fs::remove(backups[i], ec);
+        if (ec) return fail(error, "cannot remove an expired backup", ec);
+    }
     error.clear(); return true;
 }
 
@@ -151,13 +158,23 @@ bool apply_save_restore(const fs::path& folder, std::string& error) {
     const fs::path request = folder / "restore-save.txt";
     std::error_code ec;
     if (!fs::exists(request, ec)) return ec ? fail(error, "cannot inspect restore request", ec) : true;
-    std::string name, extra;
+    std::string name;
     {
         // Closed before the request is removed at the end: Windows won't
-        // delete a file that is still open.
+        // delete a file that is still open. A request is one line of at most
+        // 1024 bytes; one saved by a Windows editor may start with a UTF-8
+        // byte-order mark and end with CR LF.
         std::ifstream in(request, std::ios::binary);
-        if (!std::getline(in, name) || std::getline(in, extra)) return fail(error, "invalid restore request");
+        name.resize(1025);
+        in.read(name.data(), std::streamsize(name.size()));
+        if (in.bad()) return fail(error, "cannot read the restore request");
+        name.resize(static_cast<size_t>(in.gcount()));
+        if (name.size() > 1024) return fail(error, "the restore request is longer than 1024 bytes");
     }
+    if (name.starts_with("\xEF\xBB\xBF")) name.erase(0, 3);
+    if (name.ends_with('\n')) name.pop_back();
+    if (name.ends_with('\r')) name.pop_back();
+    if (name.empty() || name.find_first_of(std::string_view("\r\n\0", 3)) != std::string::npos) return fail(error, "invalid restore request");
     fs::path relative, target;
     const fs::path backup = folder / "save-backups" / fs::path(name);
     if (!backup_paths(folder, backup, relative, target, error)) return false;

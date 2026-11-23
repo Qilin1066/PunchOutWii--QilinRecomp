@@ -561,7 +561,9 @@ Display::~Display() {
     while (!d.pads.empty()) d.close_pad(d.pads.back().id);
     if (d.window) {
         SDL_DestroyWindow(d.window);
-        SDL_Quit();
+        // Only what this display started: SDL_Quit would also end the sound
+        // output's audio subsystem, which it owns and quits itself.
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
     }
 }
 

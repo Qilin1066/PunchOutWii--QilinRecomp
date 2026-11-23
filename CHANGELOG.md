@@ -11,6 +11,10 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+### Fixed
+- Closing the window no longer ends SDL as a whole: the display quits only the video and gamepad subsystems it started, so the sound output's audio subsystem is still there when it closes (as Toy Commander's host since its 0.12.0).
+- Save history, as Toy Commander's: a restore request saved by a Windows editor (a UTF-8 byte-order mark, CR LF) is accepted, one over 1024 bytes is refused, and failures to inspect, list or prune backups are reported instead of passing silently.
+
 ## [0.22.0] - 2026-11-23
 
 There is no 0.21.0: the version went from 0.20.0 to 0.22.0 in one step.
