@@ -151,9 +151,13 @@ bool apply_save_restore(const fs::path& folder, std::string& error) {
     const fs::path request = folder / "restore-save.txt";
     std::error_code ec;
     if (!fs::exists(request, ec)) return ec ? fail(error, "cannot inspect restore request", ec) : true;
-    std::ifstream in(request, std::ios::binary);
     std::string name, extra;
-    if (!std::getline(in, name) || std::getline(in, extra)) return fail(error, "invalid restore request");
+    {
+        // Closed before the request is removed at the end: Windows won't
+        // delete a file that is still open.
+        std::ifstream in(request, std::ios::binary);
+        if (!std::getline(in, name) || std::getline(in, extra)) return fail(error, "invalid restore request");
+    }
     fs::path relative, target;
     const fs::path backup = folder / "save-backups" / fs::path(name);
     if (!backup_paths(folder, backup, relative, target, error)) return false;
