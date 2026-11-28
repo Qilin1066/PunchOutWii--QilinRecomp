@@ -39,6 +39,9 @@
 #include "dol.hpp"
 #include "identify.hpp"
 #include "lift.hpp"
+#include "qilin/command_line.hpp"
+#include "qilin/path.hpp"
+#include "qilin/rt/file.hpp"
 
 #ifndef QILIN_VERSION
 #define QILIN_VERSION "unknown"
@@ -112,7 +115,7 @@ Args parse_args(std::span<char*> argv) {
 }
 
 Dol load_dol(const std::string& path) {
-    auto dol = Dol::load(path);
+    auto dol = Dol::load(native_path(path));
     if (!dol) throw Failure{std::format("{}: {}", path, dol.error())};
     return std::move(*dol);
 }
@@ -122,7 +125,7 @@ class Output {
 public:
     explicit Output(const std::optional<std::string>& path) {
         if (!path) return;
-        file_ = std::fopen(path->c_str(), "w");
+        file_ = rt::open_file(native_path(*path), "w");
         if (!file_) throw Failure{std::format("cannot write {}", *path)};
     }
     ~Output() {
@@ -148,7 +151,7 @@ int cmd_info(const Args& a) {
     const Dol dol = load_dol(a.input);
     const std::string json = to_json(dol);
     if (a.json) {
-        std::ofstream f(*a.json, std::ios::binary);
+        std::ofstream f(native_path(*a.json), std::ios::binary);
         if (!(f << json)) throw Failure{std::format("cannot write {}", *a.json)};
     } else {
         std::print("{}", json);
@@ -165,7 +168,7 @@ int cmd_insns(const Args& a) {
 }
 
 int cmd_disasm(const Args& a) {
-    std::ifstream f(a.input, std::ios::binary);
+    std::ifstream f(native_path(a.input), std::ios::binary);
     if (!f) throw Failure{std::format("cannot open {}", a.input)};
     const std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
     if (bytes.size() % 4) throw Failure{std::format("{}: size is not a multiple of 4", a.input)};
@@ -205,7 +208,7 @@ int cmd_cfg(const Args& a) {
     cfg.run();
     std::print("{}", cfg.summary());
     if (a.json) {
-        std::ofstream f(*a.json, std::ios::binary);
+        std::ofstream f(native_path(*a.json), std::ios::binary);
         if (!(f << cfg.to_json())) throw Failure{std::format("cannot write {}", *a.json)};
     }
     return 0;
@@ -251,7 +254,7 @@ struct PlanRange {
     std::string plan, library;
 };
 std::vector<PlanRange> load_plan(const std::string& path) {
-    std::ifstream f(path);
+    std::ifstream f(native_path(path));
     if (!f) throw Failure{std::format("cannot read {}", path)};
     std::vector<PlanRange> out;
     std::string line;
@@ -301,7 +304,7 @@ int cmd_lift(const Args& a) {
         if (!best) throw Failure{std::format("function {:08X} is in no range of the plan", start)};
         return best;
     };
-    const std::filesystem::path dir = *a.out;
+    const std::filesystem::path dir = native_path(*a.out);
     std::filesystem::create_directories(dir);
     // A file whose text is unchanged is left alone, so a build after an update
     // recompiles only what the update changed.
@@ -311,7 +314,7 @@ int cmd_lift(const Args& a) {
             if (old && std::string(std::istreambuf_iterator<char>(old), {}) == text) return;
         }
         std::ofstream f(dir / name, std::ios::binary);
-        if (!(f << text)) throw Failure{std::format("cannot write {}", (dir / name).string())};
+        if (!(f << text)) throw Failure{std::format("cannot write {}", utf8_path(dir / name))};
     };
 
     const size_t total = cfg.functions().size();
@@ -415,7 +418,7 @@ int cmd_identify(int argc, char** argv) {
         id.message = problem;
     } else {
         try {
-            id = identify(std::filesystem::path(*path), build.value_or(""));
+            id = identify(native_path(*path), build.value_or(""));
         } catch (const std::exception& e) {
             id = Identity{};
             id.message = std::format("The recompiler failed: {}.", e.what());
@@ -429,6 +432,11 @@ int cmd_identify(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Windows: the arguments in UTF-8 from the UTF-16 command line, not the
+    // ANSI code page (a folder named in Japanese, or one with accents on a Japanese system).
+    const qilin::CommandLine command_line(argc, argv);
+    argc = command_line.count();
+    argv = command_line.values();
     if (argc >= 2 && std::string_view(argv[1]) == "identify") return cmd_identify(argc, argv);
     if (argc == 2 && std::string_view(argv[1]) == "--version") {
         std::println("qilin " QILIN_VERSION);

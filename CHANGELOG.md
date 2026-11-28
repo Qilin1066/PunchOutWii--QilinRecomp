@@ -11,6 +11,9 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+### Fixed
+- **Disc folders with any characters on Windows**: `qilin` and the game read their arguments in UTF-8 from the UTF-16 command line (`runtime/include/qilin/command_line.hpp` and `path.hpp`, Toy Commander's), not in the system's code page, so a folder named in Japanese, or with accents the code page lacks, is identified, lifted and played. Every file named from an argument (the disc's `sys` and `files`, `--json`, `-o`, `--plan`), and the game's log, is opened through its Unicode name (`qilin::rt::open_file`). `qilin_command_line_test` runs the real `qilin identify`, `info` and `lift` on a folder with a Japanese and accented name.
+
 ## [0.23.1] - 2026-11-28
 
 ### Fixed

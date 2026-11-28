@@ -19,6 +19,7 @@
 #endif
 
 #include "os.hpp"
+#include "qilin/path.hpp"
 #include "qilin/rt/system.hpp"
 
 namespace punchout {
@@ -26,12 +27,13 @@ namespace {
 std::vector<std::string> g_args;  // argv, with argv[0] made absolute if it was a path
 }
 
+// argv in UTF-8 (main reads it through qilin::CommandLine).
 void set_command_line(int argc, char** argv) {
     g_args.assign(argv, argv + argc);
     // A relative path to the program would break if anything changed folder;
     // a bare name is found on PATH again.
     if (!g_args.empty() && g_args[0].find_first_of("/\\") != std::string::npos)
-        g_args[0] = std::filesystem::absolute(g_args[0]).string();
+        g_args[0] = qilin::utf8_path(std::filesystem::absolute(qilin::native_path(g_args[0])));
 }
 
 void restart_program() {
