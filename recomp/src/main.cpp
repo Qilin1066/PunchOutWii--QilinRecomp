@@ -9,6 +9,12 @@
 //   qilin cfg     <main.dol> [--json out.json]   function discovery + control flow, summary
 //   qilin coverage <main.dol> [--list]           word accounting of the text: code / padding / unknown
 //   qilin suspects <main.dol>                    functions with problems, for review
+//   qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n]
+//                                                the game's code as C++ (--out is -o)
+//   qilin identify <extracted disc folder> --json [--build <title>]
+//                                                what the folder is, for the downloads' launcher: one
+//                                                JSON object on stdout (identify.hpp); exit 0 the
+//                                                supported build, 3 another, 2 unreadable
 //
 // Listings are one line per word: address, word, text ("8000310c 4e800020 bclr 20,lt,0").
 // Exit status is non-zero on any error; nothing fails silently.
@@ -31,6 +37,7 @@
 #include "cfg.hpp"
 #include "decoder.hpp"
 #include "dol.hpp"
+#include "identify.hpp"
 #include "lift.hpp"
 
 #ifndef QILIN_VERSION
@@ -57,6 +64,7 @@ int usage() {
                "  qilin coverage <main.dol> [--list]\n"
                "  qilin suspects <main.dol>\n"
                "  qilin lift    <main.dol> -o <dir> [--plan plan.tsv] [--files n]\n"
+               "  qilin identify <extracted disc folder> --json [--build <title>]\n"
                "  qilin --version\n");
     return 2;
 }
@@ -89,7 +97,7 @@ Args parse_args(std::span<char*> argv) {
             if (i + 1 >= argv.size()) throw Failure{std::format("{} needs a value", arg)};
             return argv[++i];
         };
-        if (arg == "-o") a.out = value();
+        if (arg == "-o" || arg == "--out") a.out = value();
         else if (arg == "--json") a.json = value();
         else if (arg == "--base") a.base = parse_u32(value());
         else if (arg == "--plan") a.plan = value();
@@ -387,9 +395,41 @@ int cmd_lift(const Args& a) {
     return 0;
 }
 
+// The launcher's contract (identify.hpp): JSON whatever happens, and only
+// exit codes 0, 3 and 2.
+int cmd_identify(int argc, char** argv) {
+    std::optional<std::string> path, build;
+    bool json = false;
+    std::string problem;
+    for (int i = 2; i < argc; ++i) {
+        const std::string_view a = argv[i];
+        if (a == "--json") json = true;
+        else if (a == "--build" && i + 1 < argc) build = argv[++i];
+        else if (!a.starts_with("-") && !path) path = std::string(a);
+        else problem = std::format("identify: unexpected argument {}", a);
+    }
+    if (!path) problem = "identify takes one folder";
+    if (!json) problem = "identify needs --json";
+    Identity id;
+    if (!problem.empty()) {
+        id.message = problem;
+    } else {
+        try {
+            id = identify(std::filesystem::path(*path), build.value_or(""));
+        } catch (const std::exception& e) {
+            id = Identity{};
+            id.message = std::format("The recompiler failed: {}.", e.what());
+        }
+    }
+    std::print("{}", to_json(id));
+    std::fflush(stdout);
+    return id.code;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string_view(argv[1]) == "identify") return cmd_identify(argc, argv);
     if (argc == 2 && std::string_view(argv[1]) == "--version") {
         std::println("qilin " QILIN_VERSION);
         return 0;

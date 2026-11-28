@@ -11,7 +11,14 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+### Added
+- **Downloads for Windows, Linux (x86-64 and ARM64, the Raspberry Pi 4 and 5) and macOS (one universal app for Apple silicon and Intel)**, with the players' launcher shared by the QilinRecomp projects (`tools/player-kit/launcher/`, copied unchanged from Toy Commander's, launcher 1): unpack, double-click `Play Punch-Out`, choose the extracted disc's folder (or drop it onto the window), and the first start builds the game from it; after that Play starts it at once. The launcher checks the folder before building, remembers it, keeps a cache of compiled files, builds again only what an update changed, and updates itself from GitHub Releases. Windows bundles llvm-mingw, Linux bundles zig, and the Mac uses Apple's command line tools (the launcher offers Apple's installer) with MoltenVK inside the app. Each release now carries `PunchOutWii--QilinRecomp-X.Y.Z-windows-x64.zip`, `-linux-x86_64.tar.gz`, `-linux-arm64.tar.gz` and `-macos.dmg`, made by three workflows (`player-kit.yml`, `player-kit-linux.yml`, `player-kit-macos.yml`) on every push and attached to the release of a `vX.Y.Z` tag; CI checks each download as a player gets it (`smoke-linux.sh`, `check-macos.sh` on both kinds of Mac).
+- **`qilin identify <extracted disc folder> --json`**, the launcher's identify contract (`recomp/src/identify.cpp`): one JSON object saying what the folder is, and exit 0 for the supported build, 3 for another (another game, region or revision, named from `sys/boot.bin` and `disc/header.bin`), 2 for what can't be used (a disc image, `main.dol` alone, the `sys` folder itself, Dolphin's folder of partitions, a folder without the rest of the disc), each with a plain sentence for the player. `qilin lift` also takes `--out` for `-o`.
+
 ### Changed
+- **The Windows download's file is now named `PunchOutWii--QilinRecomp-X.Y.Z-windows-x64.zip`** (the project's name, as the other downloads), and it is the launcher's: `Play Punch-Out.exe` replaces `Play Punch-Out.bat` and `kit/play.ps1`, and the game is built into `work/`. A new download unzipped over an old folder removes the old `.bat`, `Punch-Out.exe`, `play.ps1`, `ninja.exe` and `kit.ninja`; the extracted disc's folder is asked for once more.
+- The player kit's archive is `kit/lib/libpunchout_kit.a` with `kit/build-flags.txt` (was `kit.ninja`), and has Linux (zig) and macOS (universal) builds besides Windows'.
+- macOS: the Vulkan instance asks for the loader's portability enumeration only where it is offered, so the game also starts with MoltenVK's own library and no Vulkan loader (the macOS download's app), as Toy Commander's host does.
 - README rewritten to the layout shared by the QilinRecomp projects: what works and how to build and play it, without the development history.
 
 ### Fixed

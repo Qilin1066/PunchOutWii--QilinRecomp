@@ -67,9 +67,22 @@ Gpu Gpu::create(std::span<const char* const> instance_extensions, bool want_swap
     std::vector<const char*> ext(instance_extensions.begin(), instance_extensions.end());
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 #if defined(__APPLE__)
-    // MoltenVK is a portability implementation: it's only listed if asked for.
-    ext.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-    ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    // MoltenVK is a portability implementation: through the Vulkan loader
+    // it's only listed if asked for. MoltenVK on its own (the macOS
+    // download's app, which carries its dylib and no loader) may not offer
+    // the loader's extension: asked for only if offered (as Toy Commander's).
+    {
+        uint32_t count = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> offered(count);
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, offered.data());
+        offered.resize(count);
+        for (const VkExtensionProperties& e : offered)
+            if (std::strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) {
+                ext.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+            }
+    }
 #endif
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = static_cast<uint32_t>(ext.size());
