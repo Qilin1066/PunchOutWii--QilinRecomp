@@ -24,9 +24,20 @@ The game runs, with sound, from boot through the menus into fights at 60 frames 
 
 ## Playing
 
-### Windows download
+### The downloads
 
-Each release has `PunchOutWii--QilinRecomp-<version>-windows-x64.zip`. Unpack it and double-click **`Play Punch-Out.bat`**. The first time, it asks for your extracted disc folder and builds the game from it with the compiler inside the download (LLVM-MinGW), which takes a few minutes (up to 15 on a slower PC); after that it starts the game at once. The download holds everything prebuilt except the game's own code, which is made on your PC from your copy and never distributed. `tools/player-kit/` builds it (`package.sh`) and holds what Play runs (`play.ps1`).
+Each [release](https://github.com/Qilin1066/PunchOutWii--QilinRecomp/releases) has a download for each system:
+
+| System | Download | Then |
+|---|---|---|
+| Windows 10 or 11, 64-bit | `PunchOutWii--QilinRecomp-<version>-windows-x64.zip` | unzip it, double-click **`Play Punch-Out.exe`** |
+| Linux on x86-64 (glibc 2.35 or later) | `PunchOutWii--QilinRecomp-<version>-linux-x86_64.tar.gz` | unpack it, double-click **`Play Punch-Out`** |
+| Linux on ARM64: Raspberry Pi 4 or 5 (64-bit Raspberry Pi OS, Trixie or later) | `PunchOutWii--QilinRecomp-<version>-linux-arm64.tar.gz` | unpack it, double-click **`Play Punch-Out`** |
+| macOS 14.5 or newer, Apple silicon or Intel | `PunchOutWii--QilinRecomp-<version>-macos.dmg` | drag **`Punch-Out.app`** onto Applications and open it (the first time: System Settings, Privacy & Security, *Open Anyway*) |
+
+First extract the whole disc with Dolphin (right-click the game, *Properties*, the *Filesystem* tab, right-click the disc, *Extract Entire Disc*). In the launcher, choose that folder, the one holding `sys` and `files` (or the `DATA` folder inside it, if Dolphin made one), or drop it onto the window: it says at once whether it is the right game, region and revision. The first start then builds the game from it with the compiler the download carries (LLVM-MinGW on Windows, zig on Linux; on a Mac, Apple's command line tools, which the launcher offers to install), which takes a few minutes on a PC and longer on a Raspberry Pi; after that, Play starts the game at once. The launcher remembers the folder, checks GitHub for updates when asked, and rebuilds only what an update changed. Each download's `README.txt` has the details.
+
+The downloads hold everything prebuilt except the game's own code, which is made on your computer from your copy and never distributed. `tools/player-kit/` builds them (`package.sh`, `package-linux.sh`, `package-macos.sh`, with `games.sh`), and `tools/player-kit/launcher/` is the launcher, the same files as in the other QilinRecomp projects (Toy Commander's copy is the master: `ADOPTING.md` there).
 
 ### From the source on Windows
 
@@ -37,7 +48,7 @@ With Visual Studio 2022 (17.10 or newer, "Desktop development with C++") and Git
 
 Both run `tools/build-punchout.ps1`, which finds Visual Studio's CMake and Git itself.
 
-### Linux and macOS
+### From the source on Linux and macOS
 
 ```sh
 ./punchout.sh --disc "<extracted disc>"   # the first time: builds it, then starts it
@@ -185,7 +196,7 @@ Compares cue-to-attack intervals and dodge windows between matched Dolphin and r
 | `data/R7PP01/` | `plan.tsv`: the lift / replace / drop plan for each library range |
 | `tools/check/` | Decoder, picture and timing checks; the ARM64 cross-build |
 | `tools/analysis/` | Library identification, hardware access, replacement checks, profiling and FIFO-log tools |
-| `tools/player-kit/` | The Windows download: packaging and the Play script |
+| `tools/player-kit/` | The Windows, Linux and macOS downloads: packaging, checks, README templates; `launcher/` is the players' launcher |
 | `tools/pi/`, `tools/tests/` | The Pi 4 cross toolchain file; launcher and timing-tool tests |
 | `third_party/rhf/` | The Rhythm Heaven Fever decomp's symbols and splits (CC0), for the libraries both games share |
 | `docs/` | Roadmap and design targets, prior art, naming, analysis and status notes |
@@ -196,7 +207,7 @@ Releases are tagged `vX.Y.Z` on GitHub, and every release is recorded in [`CHANG
 
 ## Licence
 
-This project's own code and documentation are under the [GNU General Public License, version 3](LICENSE) (GPL-3.0): you may use, share, change and sell it, but anything you distribute that is built from it must come with its full source under the same licence. `third_party/rhf/` keeps its own licence, CC0 1.0 (`third_party/rhf/LICENSE`). The dependencies CMake fetches keep theirs: SDL3 (zlib), the Vulkan headers (Apache-2.0 or MIT), volk (MIT) and Dear ImGui (MIT); the Windows download carries each under `LICENSES/`.
+This project's own code and documentation are under the [GNU General Public License, version 3](LICENSE) (GPL-3.0): you may use, share, change and sell it, but anything you distribute that is built from it must come with its full source under the same licence. `third_party/rhf/` keeps its own licence, CC0 1.0 (`third_party/rhf/LICENSE`). The dependencies CMake fetches keep theirs: SDL3 (zlib), the Vulkan headers (Apache-2.0 or MIT), volk (MIT) and Dear ImGui (MIT); each download carries them under `LICENSES/`, with its compiler's (llvm-mingw, zig) and, on macOS, MoltenVK's.
 
 Punch-Out!! itself, its code and data, belong to Nintendo and are not covered by anything here: you need your own copy, and nothing built from it may be shared.
 

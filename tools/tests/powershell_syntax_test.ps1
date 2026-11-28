@@ -1,7 +1,7 @@
 # Parse our launchers on every machine with PowerShell, without game files.
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-foreach ($relative in @("tools/build-punchout.ps1", "tools/player-kit/play.ps1")) {
+foreach ($relative in @("tools/build-punchout.ps1")) {
     $tokens = $null
     $parseErrors = $null
     $null = [System.Management.Automation.Language.Parser]::ParseFile(

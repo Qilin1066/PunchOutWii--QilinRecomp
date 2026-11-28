@@ -13,6 +13,10 @@ project(PunchOutWiiQilinRecomp VERSION 0.22.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# No C++ modules anywhere: without this, Ninja builds scan every C++ source
+# for them with clang-scan-deps, which zig's Clang (the Linux download's
+# compiler, and a Windows PC's without LLVM) doesn't have.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
@@ -115,6 +119,7 @@ add_library(qilin_core STATIC
     recomp/src/cfg.cpp
     recomp/src/lift.cpp
     recomp/src/idle.cpp
+    recomp/src/identify.cpp
 )
 target_include_directories(qilin_core PUBLIC recomp/src)
 target_link_libraries(qilin_core PUBLIC qilin_dol PRIVATE qilin_warnings)
@@ -131,6 +136,18 @@ target_include_directories(qilin_rt PUBLIC runtime/include)
 target_link_libraries(qilin_rt PRIVATE qilin_warnings)
 
 enable_testing()
+
+# The downloads' launcher (tools/player-kit/launcher, the same files in every
+# QilinRecomp project, copied from Toy Commander's: ADOPTING.md there): its
+# core and tests here, its program in the host section below (where SDL3 and
+# Dear ImGui are known). Its build test runs the real build with stand-in
+# children, and qilin's identify.
+option(QILIN_REQUIRE_LAUNCHER_TESTS "Require the launcher's build test (CI): a native build, not a cross-compile" OFF)
+if(QILIN_REQUIRE_LAUNCHER_TESTS AND CMAKE_CROSSCOMPILING)
+    message(FATAL_ERROR "the launcher's build test needs a native build")
+endif()
+set(QILIN_LAUNCHER_QILIN qilin)
+include(tools/player-kit/launcher/launcher.cmake)
 
 # ---- The host platform: window, input and audio (SDL3), Vulkan ----
 # Fetched at configure time, pinned, built statically: SDL3, the Vulkan headers
@@ -153,6 +170,17 @@ if(QILIN_HOST)
     FetchContent_Declare(volk GIT_REPOSITORY https://github.com/zeux/volk GIT_TAG vulkan-sdk-1.4.363.0 GIT_SHALLOW ON
                          SOURCE_SUBDIR no-cmake)
     FetchContent_MakeAvailable(SDL3 VulkanHeaders volk)
+    # SDL's Wayland protocol headers, made from its own XML, before the
+    # system's (as Toy Commander's): SDL adds them as a system folder, and
+    # zig's compiler (the Linux download's) searches the system's
+    # /usr/include first, whose older wayland-client-protocol.h (Ubuntu
+    # 22.04's) lacks what SDL uses (WL_KEYBOARD_KEY_STATE_REPEATED). SDL
+    # includes them in quotes, and -iquote folders come before every -I and
+    # -isystem one. (An option, not an include folder: CMake would merge
+    # that into SDL's system one.)
+    if(TARGET SDL3-static AND EXISTS "${sdl3_BINARY_DIR}/wayland-generated-protocols" AND NOT MSVC)
+        target_compile_options(SDL3-static BEFORE PRIVATE "-iquote${sdl3_BINARY_DIR}/wayland-generated-protocols")
+    endif()
     add_library(qilin_volk STATIC ${volk_SOURCE_DIR}/volk.c)
     target_include_directories(qilin_volk PUBLIC ${volk_SOURCE_DIR})
     target_link_libraries(qilin_volk PUBLIC Vulkan::Headers ${CMAKE_DL_LIBS})
@@ -223,6 +251,25 @@ if(QILIN_HOST)
     # And with every vertex in the full layout (the compact one is the default).
     add_test(NAME punchout_render_test_full_vertices COMMAND punchout_render_test)
     set_tests_properties(punchout_render_test_full_vertices PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120 ENVIRONMENT "PUNCHOUT_FULL_VERTICES=1")
+
+    # The downloads' launcher, `Play Punch-Out` (Windows: .exe; macOS: the
+    # app's program), which reads kit/game.txt (tools/player-kit/launcher).
+    find_package(Threads REQUIRED)
+    qilin_launcher_program(IMGUI_DIR ${imgui_SOURCE_DIR} LIBRARIES qilin_imgui qilin_volk SDL3::SDL3-static Threads::Threads)
+    if(WIN32)
+        # The launcher's icon for the game too, which the player's PC links
+        # (the player kit's icon.o; QILIN_WINDOWS_RESOURCES is launcher.cmake's).
+        if(QILIN_WINDOWS_RESOURCES)
+            add_library(qilin_game_icon OBJECT tools/player-kit/game_icon.rc)
+        elseif(QILIN_PLAYER_KIT)
+            message(FATAL_ERROR "the player kit needs QILIN_WINDOWS_RESOURCES=ON (the game's icon)")
+        endif()
+    endif()
+endif()
+
+# The macOS download's CMake side (the universal kit): tools/player-kit/macos.cmake.
+if(APPLE)
+    include(tools/player-kit/macos.cmake)
 endif()
 
 # ---- Tests (no game files needed) ----
@@ -355,58 +402,102 @@ if(QILIN_GAME_DOL)
 endif()
 
 # ---- The player kit: everything punchout needs but the code lifted from main.dol ----
-# For the Windows download (tools/player-kit), as the APB recomp's: the game's
-# runtime and every library it links (the host layer, SDL3, Dear ImGui, volk),
-# merged into one archive, with the headers the lifted code includes, qilin,
-# the library plan, and the flags and libraries to build the rest with
-# (kit.ninja). A player's own PC lifts their own main.dol and compiles only
-# that code, with the same compiler, against the kit. Needs a MinGW toolchain
-# (tools/player-kit/mingw-cross.cmake) and SDL3 built statically (the fetched one).
-option(QILIN_PLAYER_KIT "Build the player kit (tools/player-kit)" OFF)
+# For the downloads (tools/player-kit), as Toy Commander's: the game's
+# runtime and every library it links (the host layer, SDL3, Dear ImGui,
+# volk) in one archive (kit/lib/libpunchout_kit.a), the headers the lifted
+# code includes (kit/include), qilin, the library plan (kit/plan.tsv), and
+# kit/build-flags.txt: how the launcher (tools/player-kit/launcher, build.cpp)
+# compiles and links the code it lifts from the player's own main.dol.
+# Windows: cross-compiled on Linux with llvm-mingw (package.sh). Linux: built
+# with the zig the download bundles, so the archive's libc++ is the one the
+# player's compiles link with (package-linux.sh). macOS: universal, with
+# Apple's clang (package-macos.sh, tools/player-kit/macos.cmake).
+option(QILIN_PLAYER_KIT "Build the player kit (tools/player-kit): the game's runtime as one archive, for the downloads" OFF)
+# What the lifted code is compiled with, in build-flags.txt: as the punchout
+# target's (CMake's Release flags, and -ffp-contract=off from above).
+set(QILIN_LIFTED_OPTIONS -ffp-contract=off)
 if(QILIN_PLAYER_KIT)
     if(NOT QILIN_HOST OR NOT TARGET SDL3-static)
         message(FATAL_ERROR "the player kit needs the host layer with SDL3 built statically (QILIN_HOST=ON)")
     endif()
-    add_library(punchout_kit_main OBJECT ${punchout_runtime_sources})
+    add_library(punchout_kit_main STATIC ${punchout_runtime_sources})
     target_include_directories(punchout_kit_main PRIVATE punchout/src)
     target_link_libraries(punchout_kit_main PRIVATE qilin_rt qilin_dol qilin_host qilin_imgui SDL3::SDL3-static qilin_warnings)
     target_compile_definitions(punchout_kit_main PRIVATE PUNCHOUT_VERSION="${PROJECT_VERSION}")
-    set(kit_libraries qilin_rt qilin_dol qilin_host qilin_imgui qilin_volk SDL3-static)
-    set(kit_archive "${CMAKE_BINARY_DIR}/libpunchout_kit.a")
-    set(mri "CREATE ${kit_archive}\n")
-    foreach(library IN LISTS kit_libraries)
-        string(APPEND mri "ADDLIB $<TARGET_FILE:${library}>\n")
-    endforeach()
-    string(APPEND mri "ADDMOD $<JOIN:$<TARGET_OBJECTS:punchout_kit_main>,\nADDMOD >\nSAVE\nEND\n")
-    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/punchout_kit.mri" CONTENT "${mri}")
-    add_custom_command(OUTPUT "${kit_archive}"
-        COMMAND "${CMAKE_COMMAND}" "-DAR=${CMAKE_AR}" "-DMRI=${CMAKE_BINARY_DIR}/punchout_kit.mri" "-DOUT=${kit_archive}"
-                -P "${CMAKE_SOURCE_DIR}/tools/player-kit/merge.cmake"
-        DEPENDS punchout_kit_main ${kit_libraries} $<TARGET_OBJECTS:punchout_kit_main> "${CMAKE_BINARY_DIR}/punchout_kit.mri"
-        COMMENT "Merging the player kit's libraries" VERBATIM)
-    add_custom_target(punchout_kit ALL DEPENDS "${kit_archive}")
-    # The system libraries SDL3 and the runtime need (MinGW names).
-    set(kit_system_libraries -lm -lkernel32 -luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32
-        -lsetupapi -lshell32 -ldinput8 -lwinspool -lcomdlg32)
-    string(JOIN " " kit_system_text ${kit_system_libraries})
-    # What the lifted code is compiled and linked with: kit.ninja, included by
-    # the build.ninja the player's script writes ($kit is the kit's folder).
-    # Lifted calls nest as deeply as the guest's: a 16 MB main stack, as MSVC's /STACK.
-    file(WRITE "${CMAKE_BINARY_DIR}/kit.ninja"
-        "# Written by CMake for the player kit (QILIN_PLAYER_KIT).\n"
-        "cxxflags = -O2 -DNDEBUG -std=c++23 -w -ffp-contract=off -I$kit/include\n"
-        "ldflags = -static -O2 -Wl,--stack,16777216\n"
-        "libs = $kit/lib/libpunchout_kit.a ${kit_system_text}\n")
-    # Linked with stand-ins for the lifted code: the kit is complete.
-    add_executable(punchout_kit_link_check tools/player-kit/link_check.cpp)
-    target_link_libraries(punchout_kit_link_check PRIVATE qilin_rt "${kit_archive}" ${kit_system_libraries})
-    add_dependencies(punchout_kit_link_check punchout_kit)
-
-    install(TARGETS qilin RUNTIME DESTINATION kit COMPONENT player)
-    install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT player)
-    install(FILES "${CMAKE_BINARY_DIR}/kit.ninja" data/R7PP01/plan.tsv DESTINATION kit COMPONENT player)
+    if(NOT MSVC)  # Vulkan structures written {sType}, as in the host layer
+        set_source_files_properties(punchout/src/renderer.cpp punchout/src/menu.cpp PROPERTIES COMPILE_OPTIONS -Wno-missing-field-initializers)
+    endif()
+    set(kit_libraries punchout_kit_main qilin_rt qilin_dol qilin_host qilin_imgui qilin_volk SDL3-static)
+    set(kit_archive "${CMAKE_BINARY_DIR}/kit/libpunchout_kit.a")
+    string(JOIN " " lifted_text ${QILIN_LIFTED_OPTIONS})
+    if(APPLE)
+        qilin_player_kit_macos()  # tools/player-kit/macos.cmake
+    else()
+        set(mri "CREATE ${kit_archive}\n")
+        foreach(library IN LISTS kit_libraries)
+            string(APPEND mri "ADDLIB $<TARGET_FILE:${library}>\n")
+        endforeach()
+        string(APPEND mri "SAVE\nEND\n")
+        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/kit/punchout_kit.mri" CONTENT "${mri}")
+        add_custom_command(OUTPUT "${kit_archive}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/kit"
+            COMMAND "${CMAKE_COMMAND}" "-DAR=${CMAKE_AR}" "-DMRI=${CMAKE_BINARY_DIR}/kit/punchout_kit.mri" "-DOUT=${kit_archive}"
+                    -P "${CMAKE_SOURCE_DIR}/tools/player-kit/merge.cmake"
+            DEPENDS ${kit_libraries} "${CMAKE_BINARY_DIR}/kit/punchout_kit.mri"
+            COMMENT "Merging the player kit's libraries" VERBATIM)
+        add_custom_target(punchout_kit ALL DEPENDS "${kit_archive}")
+        if(WIN32)
+            # The system libraries SDL3 and the runtime need (MinGW names).
+            # Lifted calls nest as deeply as the guest's: a 16 MB main stack,
+            # as MSVC's /STACK.
+            set(kit_system_libraries -lm -lkernel32 -luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid -ladvapi32
+                -lsetupapi -lshell32 -ldinput8 -lwinspool -lcomdlg32)
+            set(kit_ldflags "-static -O2 -Wl,--stack,16777216")
+            set(kit_icon " $kit/lib/icon.o")
+            set(kit_native "")  # the launcher's default, -march=native (FMA for the Wii's fused multiply-adds)
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            # SDL3 loads X11, Wayland, the sound servers and Vulkan at run
+            # time: the game links only glibc's own libraries (and zig's libc++).
+            # Lifted calls nest deeply: the main thread's stack is the
+            # system's (8 MB by default), as the punchout target's.
+            set(kit_system_libraries -lm -ldl -lpthread -lrt)
+            set(kit_ldflags "-O2")
+            set(kit_icon "")
+            # For the player's processor: x86-64's -march, ARM's -mcpu.
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+                set(kit_native "native = -mcpu=native\n")
+            else()
+                set(kit_native "native = -march=native\n")
+            endif()
+        else()
+            message(FATAL_ERROR "no player kit for ${CMAKE_SYSTEM_NAME} yet")
+        endif()
+        string(JOIN " " kit_system_text ${kit_system_libraries})
+        # Read by the launcher (tools/player-kit/launcher/build.cpp): `name = value`
+        # lines, $kit the kit's folder.
+        file(WRITE "${CMAKE_BINARY_DIR}/kit/build-flags.txt"
+            "# Written by CMake for the player kit (QILIN_PLAYER_KIT).\n"
+            "cxxflags = -O2 -DNDEBUG -std=c++23 -w ${lifted_text} -I$kit/include\n"
+            "${kit_native}"
+            "ldflags = ${kit_ldflags}\n"
+            "libs = $kit/lib/libpunchout_kit.a${kit_icon} ${kit_system_text}\n")
+        # Linked with stand-ins for the lifted code: the kit is complete.
+        add_executable(punchout_kit_link_check tools/player-kit/link_check.cpp)
+        target_include_directories(punchout_kit_link_check PRIVATE runtime/include)
+        target_link_libraries(punchout_kit_link_check PRIVATE "${kit_archive}" ${kit_system_libraries})
+        add_dependencies(punchout_kit_link_check punchout_kit)
+        if(WIN32)
+            # The game's icon (the launcher's), linked into it on the player's PC.
+            add_dependencies(punchout_kit qilin_game_icon)
+            install(FILES $<TARGET_OBJECTS:qilin_game_icon> DESTINATION kit/lib RENAME icon.o COMPONENT punchout)
+        endif()
+        install(TARGETS qilin RUNTIME DESTINATION kit COMPONENT punchout)
+        install(FILES "${kit_archive}" DESTINATION kit/lib COMPONENT punchout)
+        install(FILES "${CMAKE_BINARY_DIR}/kit/build-flags.txt" DESTINATION kit COMPONENT punchout)
+    endif()
+    install(FILES data/R7PP01/plan.tsv DESTINATION kit COMPONENT punchout)
     file(GLOB kit_headers runtime/include/qilin/rt/*.hpp)
-    install(FILES ${kit_headers} DESTINATION kit/include/qilin/rt COMPONENT player)
+    install(FILES ${kit_headers} DESTINATION kit/include/qilin/rt COMPONENT punchout)
 endif()
 
 # Compile/link the complete runtime without distributing or requiring game data.

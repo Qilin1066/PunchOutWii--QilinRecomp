@@ -40,6 +40,8 @@ const KnownBuild* known_build(std::string_view sha256_hex) {
     return nullptr;
 }
 
+std::span<const KnownBuild> known_builds() { return kKnownBuilds; }
+
 std::expected<Dol, std::string> Dol::load(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return fail("cannot open " + path.string());
