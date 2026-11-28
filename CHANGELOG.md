@@ -11,6 +11,11 @@ Each release is a git tag (`vX.Y.Z`) with a matching GitHub release. The version
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-28
+
+### Fixed
+- **The launcher's build cache works when your data folder's path is very long**: past Windows' 260-character limit it used to fail without a word, so every build compiled everything again; a file it can't cache is now noted in build.log (launcher 4).
+
 ## [0.23.0] - 2026-11-28
 
 ### Added
