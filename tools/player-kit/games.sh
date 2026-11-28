@@ -46,6 +46,11 @@ write_game_txt() {
         printf 'identify={qilin} identify {input} --json --build {game:build}\n'
         printf 'step.1={qilin} lift {input}/sys/main.dol -o {gen} --plan {kit}/plan.tsv --files 32\n'
         printf 'compile_memory_mb=1200\nbuild_space_mb=2048\ncache_mb=2048\nrun_args={input}\n'
+        # What the downloads before the launcher (Play Punch-Out.bat and
+        # kit/play.ps1, up to 0.22.0) left, and where play.ps1 remembered
+        # the disc folder: removed, and the folder taken over (launcher 2).
+        printf 'old_files=Play Punch-Out.bat;kit/play.ps1;kit/ninja.exe;kit/kit.ninja;work/build.ninja;work/.ninja_log;work/.ninja_deps;work/disc-folder.txt.tmp;Punch-Out.exe.new;Punch-Out.exe.previous\n'
+        printf 'old_input_file=work/disc-folder.txt\n'
         printf 'compiler=%s\n' "$3"
         if [ -n "${4:-}" ]; then printf 'compiler_args=%s\n' "$4"; fi
     } | if [ "${GAME_TXT_CRLF:-0}" = 1 ]; then sed 's/$/\r/'; else cat; fi > "$1"
