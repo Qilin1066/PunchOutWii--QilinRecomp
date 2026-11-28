@@ -37,6 +37,8 @@
 #include <vector>
 
 #include "os.hpp"
+#include "qilin/path.hpp"
+#include "qilin/rt/file.hpp"
 #include "gx.hpp"
 #include "recorder.hpp"
 #include "video.hpp"
@@ -315,7 +317,7 @@ struct LoadedDff {
 LoadedDff load_dff(const char* dff_path) {
     LoadedDff out;
     std::vector<uint8_t>& file = out.file;
-    if (FILE* f = std::fopen(dff_path, "rb")) {
+    if (FILE* f = qilin::rt::open_file(qilin::native_path(dff_path), "rb")) {
         uint8_t buf[1 << 16];
         for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) file.insert(file.end(), buf, buf + n);
         std::fclose(f);

@@ -11,6 +11,8 @@
 #include "dol.hpp"
 #include "os.hpp"
 #include "threads.hpp"
+#include "qilin/path.hpp"
+#include "qilin/rt/file.hpp"
 #include "qilin/rt/system.hpp"
 
 namespace punchout {
@@ -20,12 +22,12 @@ namespace {
 
 std::vector<uint8_t> read_file(const std::filesystem::path& p) {
     std::vector<uint8_t> out;
-    if (FILE* f = std::fopen(p.string().c_str(), "rb")) {
+    if (FILE* f = rt::open_file(p, "rb")) {
         uint8_t buf[65536];
         for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) out.insert(out.end(), buf, buf + n);
         std::fclose(f);
     } else {
-        rt::fatal(nullptr, "cannot read %s", p.string().c_str());
+        rt::fatal(nullptr, "cannot read %s", qilin::utf8_path(p).c_str());
     }
     return out;
 }
@@ -83,17 +85,17 @@ void load_game(const std::filesystem::path& folder) {
     set_game_folder(folder);
     const auto dol_path = folder / "sys" / "main.dol";
     auto dol = qilin::Dol::load(dol_path);
-    if (!dol) rt::fatal(nullptr, "%s: %s", dol_path.string().c_str(), dol.error().c_str());
+    if (!dol) rt::fatal(nullptr, "%s: %s", qilin::utf8_path(dol_path).c_str(), dol.error().c_str());
     const qilin::KnownBuild* known = qilin::known_build(dol->sha256);
     if (!known || known->disc_id != "R7PP01")
         rt::fatal(nullptr, "%s isn't the supported build (Punch-Out!! PAL Rev 1, R7PP01): SHA-256 %s",
-                  dol_path.string().c_str(), dol->sha256.c_str());
+                  qilin::utf8_path(dol_path).c_str(), dol->sha256.c_str());
     // The image covers every section and the BSS; bytes outside the sections are zero.
     std::memcpy(rt::guest_ptr(dol->base()), dol->image().data(), dol->image().size());
 
     const std::vector<uint8_t> boot = read_file(folder / "sys" / "boot.bin");
     if (boot.size() < 0x20 || std::memcmp(boot.data(), "R7PP01", 6) != 0)
-        rt::fatal(nullptr, "%s isn't Punch-Out!!'s PAL disc header", (folder / "sys" / "boot.bin").string().c_str());
+        rt::fatal(nullptr, "%s isn't Punch-Out!!'s PAL disc header", qilin::utf8_path(folder / "sys" / "boot.bin").c_str());
     write_boot_info(std::span(boot).first(0x20));
 }
 

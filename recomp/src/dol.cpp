@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iterator>
 
+#include "qilin/path.hpp"
 #include "sha256.hpp"
 
 namespace qilin {
@@ -44,9 +45,9 @@ std::span<const KnownBuild> known_builds() { return kKnownBuilds; }
 
 std::expected<Dol, std::string> Dol::load(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) return fail("cannot open " + path.string());
+    if (!f) return fail("cannot open " + utf8_path(path));
     std::vector<uint8_t> bytes{std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
-    if (f.bad()) return fail("cannot read " + path.string());
+    if (f.bad()) return fail("cannot read " + utf8_path(path));
     return parse(bytes);
 }
 

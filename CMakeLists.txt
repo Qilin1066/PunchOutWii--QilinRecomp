@@ -107,10 +107,17 @@ function(qilin_tool target)
     endif()
 endfunction()
 
+# ---- UTF-8 paths and command lines (runtime/include/qilin/path.hpp, command_line.hpp) ----
+add_library(qilin_paths INTERFACE)
+target_include_directories(qilin_paths INTERFACE runtime/include)
+if(WIN32)
+    target_link_libraries(qilin_paths INTERFACE shell32)  # CommandLineToArgvW: the UTF-16 command line
+endif()
+
 # ---- The DOL loader: runtime code too (no std::format) ----
 add_library(qilin_dol STATIC recomp/src/dol.cpp recomp/src/sha256.cpp)
 target_include_directories(qilin_dol PUBLIC recomp/src)
-target_link_libraries(qilin_dol PRIVATE qilin_warnings)
+target_link_libraries(qilin_dol PUBLIC qilin_paths PRIVATE qilin_warnings)
 
 # ---- Recompiler core ----
 add_library(qilin_core STATIC
@@ -133,7 +140,7 @@ target_compile_definitions(qilin PRIVATE QILIN_VERSION="${PROJECT_VERSION}")
 # ---- Runtime (what players run: no std::format) ----
 add_library(qilin_rt STATIC runtime/src/memory.cpp runtime/src/system.cpp runtime/src/report.cpp)
 target_include_directories(qilin_rt PUBLIC runtime/include)
-target_link_libraries(qilin_rt PRIVATE qilin_warnings)
+target_link_libraries(qilin_rt PUBLIC qilin_paths PRIVATE qilin_warnings)
 
 enable_testing()
 
@@ -277,6 +284,8 @@ add_executable(qilin_tests recomp/tests/tests.cpp)
 target_link_libraries(qilin_tests PRIVATE qilin_core qilin_rt qilin_warnings)
 qilin_tool(qilin_tests)
 add_test(NAME qilin_tests COMMAND qilin_tests)
+# The real qilin on Unicode folder names (Japanese and accents: no ANSI code page holds both).
+add_test(NAME qilin_command_line_test COMMAND qilin_tests --qilin $<TARGET_FILE:qilin>)
 add_executable(qilin_frame_times_test host/tests/frame_times_test.cpp)
 target_include_directories(qilin_frame_times_test PRIVATE host/include)
 target_link_libraries(qilin_frame_times_test PRIVATE qilin_warnings)

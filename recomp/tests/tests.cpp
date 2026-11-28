@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iterator>
 #include <print>
 #include <string>
 #include <string_view>
@@ -19,8 +20,19 @@
 #include "identify.hpp"
 #include "lift.hpp"
 #include "idle.hpp"
+#include "qilin/command_line.hpp"
+#include "qilin/path.hpp"
 #include "qilin/rt/cpu.hpp"
 #include "sha256.hpp"
+
+#if defined(_WIN32)
+#undef near  // <windows.h>'s (command_line.hpp), a name below
+#undef far
+#else
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 using namespace qilin;
 
@@ -188,8 +200,9 @@ void test_dol() {
 // An extracted disc in a folder of its own, as Dolphin lays one out.
 struct FakeDisc {
     std::filesystem::path dir;
-    explicit FakeDisc(std::string_view name) {
+    explicit FakeDisc(std::string_view name, std::u8string_view unicode = {}) {
         dir = std::filesystem::temp_directory_path() / std::format("qilin-identify-{}-{}", name, std::rand());
+        dir += std::filesystem::path(unicode);  // (a folder name no ANSI code page holds, for the command-line test)
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir / "sys");
         std::filesystem::create_directories(dir / "files");
@@ -316,6 +329,105 @@ void test_identify() {
     CHECK(to_json(quoted) == "{\"ok\": true, \"title\": \"Fixture!! (Europe, Australia)\", \"id\": \"R7PP01\", \"version\": \"1\", "
                              "\"message\": \"a \\\"quote\\\"\\\\ and\\na line\\u0001\"}\n");
     CHECK(to_json(Identity{}).starts_with("{\"ok\": false, "));
+}
+
+// ---------------------------------------------------------------- qilin's command line
+
+// Runs a program with these arguments (none parsed by a shell), its standard
+// output to `out`: its exit code, or -1 if it couldn't be run.
+int run_program(const std::filesystem::path& program, const std::vector<std::filesystem::path>& args,
+                const std::filesystem::path& out) {
+#if defined(_WIN32)
+    // Quoted as CommandLineToArgvW reads it back.
+    auto quote = [](const std::wstring& a) {
+        std::wstring q = L"\"";
+        size_t slashes = 0;
+        for (const wchar_t ch : a) {
+            if (ch == L'\\') {
+                ++slashes;
+            } else {
+                if (ch == L'"') q.append(slashes + 1, L'\\');
+                slashes = 0;
+            }
+            q += ch;
+        }
+        q.append(slashes, L'\\');
+        return q + L"\"";
+    };
+    std::wstring line = quote(program.native());
+    for (const auto& a : args) line += L" " + quote(a.native());
+    SECURITY_ATTRIBUTES inherit{sizeof inherit, nullptr, TRUE};
+    const HANDLE file = CreateFileW(out.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return -1;
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = file;
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(program.c_str(), line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi);
+    CloseHandle(file);
+    if (!started) return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return static_cast<int>(code);
+#else
+    std::vector<std::string> strings{program.string()};
+    for (const auto& a : args) strings.push_back(a.string());
+    std::vector<char*> argv;
+    for (std::string& s : strings) argv.push_back(s.data());
+    argv.push_back(nullptr);
+    const pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        const int fd = open(out.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0 || dup2(fd, 1) < 0) _exit(127);
+        execv(argv[0], argv.data());
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return -1;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
+}
+
+std::string file_text(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+// The real qilin, as the launcher runs it, on a folder whose name no single
+// ANSI code page holds (Japanese and accents together): it must read its
+// arguments in UTF-8 from the UTF-16 command line on Windows, and every path
+// it makes from one must stay Unicode.
+void test_command_line(const std::filesystem::path& qilin_exe) {
+    namespace fs = std::filesystem;
+    FakeDisc disc("unicode", u8" \u4fdd\u5b58 \u00e9t\u00e9 \u00fc");
+    const fs::path out = disc.dir / u8"identify \u00e9.json";
+
+    // The fixture's headers name the supported disc; its main.dol is no known one: exit 3, read through.
+    CHECK(run_program(qilin_exe, {"identify", disc.dir, "--json", "--build", "Punch-Out!! (Europe, Australia)"}, out) == 3);
+    const std::string json = file_text(out);
+    CHECK(json.find("\"id\": \"R7PP01\"") != std::string::npos);
+    CHECK(json.find("\"version\": \"1\"") != std::string::npos);
+    CHECK(json.find("If your disc is revision 1, extract it again.") != std::string::npos);
+    if (failures) std::println(stderr, "  qilin identify said: {}", json);
+    // A name that isn't there is told apart (so the case above did find the folder).
+    CHECK(run_program(qilin_exe, {"identify", disc.dir / u8"\u4fdd", "--json"}, out) == 2);
+
+    // A file read and one written, both named from arguments.
+    const fs::path info = disc.dir / u8"info \u4fdd\u5b58 \u00e9.json";
+    CHECK(run_program(qilin_exe, {"info", disc.dir / "sys" / "main.dol", "--json", info}, disc.dir / "info.txt") == 0);
+    CHECK(file_text(info).find(sha256_hex(SyntheticDol().bytes)) != std::string::npos);
+
+    // lift's output folder.
+    const fs::path gen = disc.dir / u8"gen \u4fdd\u5b58 \u00e9";
+    CHECK(run_program(qilin_exe, {"lift", disc.dir / "sys" / "main.dol", "-o", gen}, disc.dir / "lift.txt") == 0);
+    CHECK(fs::exists(gen / "functions.hpp") && fs::exists(gen / "table.cpp"));
 }
 
 // ---------------------------------------------------------------- decoder
@@ -1106,7 +1218,18 @@ void test_poll_loops() {
     CHECK(!loop({0x800DC7B8, 0x4200FFF8}));
 }
 
-int main() {
+int main(int argc, char** argv) {
+    // qilin_tests --qilin <qilin>: only the real qilin's command line (a test of its own in CTest).
+    const qilin::CommandLine command_line(argc, argv);
+    if (command_line.count() == 3 && std::string_view(command_line.values()[1]) == "--qilin") {
+        test_command_line(native_path(command_line.values()[2]));
+        if (failures) {
+            std::println(stderr, "{} check(s) failed", failures);
+            return 1;
+        }
+        std::println("qilin's command line: all tests passed");
+        return 0;
+    }
     test_sha256();
     test_dol();
     test_identify();

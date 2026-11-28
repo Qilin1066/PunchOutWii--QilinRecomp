@@ -45,7 +45,10 @@
 #include "save_history.hpp"
 #include "speaker.hpp"
 #include "build.hpp"
+#include "qilin/command_line.hpp"
 #include "qilin/host/paths.hpp"
+#include "qilin/path.hpp"
+#include "qilin/rt/file.hpp"
 #include "qilin/rt/report.hpp"
 #include "renderer.hpp"
 #include "recorder.hpp"
@@ -354,6 +357,11 @@ static int check_speaker_decoder() {
 
 int main(int argc, char** argv) {
     namespace rt = qilin::rt;
+    // Windows: the arguments in UTF-8 from the UTF-16 command line, not the
+    // ANSI code page (a disc folder named in Japanese, or one with accents on a Japanese system).
+    const qilin::CommandLine command_line(argc, argv);
+    argc = command_line.count();
+    argv = command_line.values();
     punchout::set_command_line(argc, argv);  // for the game's reset
     punchout::start_profiler();              // PUNCHOUT_PROFILE, for development
 #if defined(_WIN32)
@@ -409,8 +417,8 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         std::filesystem::rename(log, dir / "punchout.old.log", ec);
-        static const std::string log_path = log.string();
-        if (std::FILE* f = std::fopen(log_path.c_str(), "w")) {
+        static const std::string log_path = qilin::utf8_path(log);
+        if (std::FILE* f = rt::open_file(log, "w")) {
             rt::set_log_file(f);  // open until the process ends
             rt::set_log_path(log_path.c_str());
         } else {
@@ -463,7 +471,7 @@ int main(int argc, char** argv) {
         if (!shown_w) rt::fatal(nullptr, "--render-dff: %s has no copy to the screen", render_dff);
         if (shown_w > 1280 || shown_h > 720) rt::fatal(nullptr, "--render-dff: a %ux%u picture doesn't fit the 1280x720 read back", shown_w, shown_h);
         const std::vector<uint8_t> px = display.read_back();
-        FILE* fp = std::fopen(render_out, "wb");
+        FILE* fp = rt::open_file(qilin::native_path(render_out), "wb");
         if (!fp) rt::fatal(nullptr, "--render-dff: %s can't be written", render_out);
         std::fprintf(fp, "P6\n%u %u\n255\n", shown_w, shown_h);
         const uint32_t x0 = (1280 - shown_w) / 2, y0 = (720 - shown_h) / 2;
@@ -476,7 +484,7 @@ int main(int argc, char** argv) {
     std::string restore_error;
     if (!punchout::apply_save_restore(qilin::host::user_folder(), restore_error))
         rt::fatal(nullptr, "save recovery: %s (the restore request is restore-save.txt in the save folder)", restore_error.c_str());
-    punchout::load_game(folder);
+    punchout::load_game(qilin::native_path(folder));
     if (check_speaker) std::_Exit(check_speaker_decoder());
 
     const std::filesystem::path data = qilin::host::user_folder();

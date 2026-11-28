@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "boot.hpp"
+#include "qilin/path.hpp"
+#include "qilin/rt/file.hpp"
 #include "os.hpp"
 
 namespace punchout {
@@ -46,15 +48,15 @@ void load_fst() {
     if (!g_fst.empty()) return;
     const auto path = game_folder() / "sys" / "fst.bin";
     std::vector<uint8_t> d;
-    if (FILE* f = std::fopen(path.string().c_str(), "rb")) {
+    if (FILE* f = rt::open_file(path, "rb")) {
         uint8_t buf[65536];
         for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) d.insert(d.end(), buf, buf + n);
         std::fclose(f);
     }
-    if (d.size() < 12) rt::fatal(nullptr, "cannot read the disc's file table %s", path.string().c_str());
+    if (d.size() < 12) rt::fatal(nullptr, "cannot read the disc's file table %s", qilin::utf8_path(path).c_str());
     const uint32_t count = be32(d, 8);
     const size_t strings = size_t{count} * 12;
-    if (count == 0 || strings > d.size()) rt::fatal(nullptr, "%s is malformed", path.string().c_str());
+    if (count == 0 || strings > d.size()) rt::fatal(nullptr, "%s is malformed", qilin::utf8_path(path).c_str());
     g_fst.resize(count);
     // Directories own the entries up to their end index; walk with a stack of them.
     std::vector<uint32_t> dirs{0};
@@ -127,7 +129,7 @@ int32_t read_file(Cpu& c, uint32_t start, uint32_t addr, uint32_t length, uint32
     if (uint64_t{offset} + length > ((uint64_t{e.size} + 31) & ~uint64_t{31}))
         rt::fatal(&c, "DVD read past the end of %s (%u bytes at %u)", e.path.c_str(), length, offset);
     const auto host = game_folder() / "files" / e.path;
-    FILE* f = std::fopen(host.string().c_str(), "rb");
+    FILE* f = rt::open_file(host, "rb");
     if (!f) {
         // Development, with part of a disc: PUNCHOUT_DEV_MISSING_FILES=<list> reads a missing file
         // as zeros and adds its name to the list (once), to find what a scene needs.
@@ -142,13 +144,13 @@ int32_t read_file(Cpu& c, uint32_t start, uint32_t addr, uint32_t length, uint32
             return static_cast<int32_t>(length);
         }
         rt::fatal(&c, "the game reads %s, which isn't there: extract the whole disc (files/ next to sys/)",
-                  host.string().c_str());
+                  qilin::utf8_path(host).c_str());
     }
     std::memset(rt::guest_ptr(addr), 0, length);  // reads past the end of the file, up to the 32-byte unit, give zeros
     std::fseek(f, static_cast<long>(offset), SEEK_SET);
     const size_t got = std::fread(rt::guest_ptr(addr), 1, length, f);
     std::fclose(f);
-    if (got < length && offset + got < e.size) rt::fatal(&c, "short read from %s", host.string().c_str());
+    if (got < length && offset + got < e.size) rt::fatal(&c, "short read from %s", qilin::utf8_path(host).c_str());
     return static_cast<int32_t>(length);
 }
 
